@@ -67,8 +67,10 @@ can trust what it is diffing against, and the session always runs over TLS.
 | 11 | Design decisions and their tradeoffs |
 | 15 | Integrating with [MCUboot](https://github.com/mcu-tools/mcuboot) instead of the custom bootloader |
 
-## Scope
+## For Review/ TODO
+1. In-place single-partition updates;
+2. Compression or binary diffing;
+3. Multi-generation rollback or over-the-air updates of the bootloader itself;
+4. Reasoning for each is in `DESIGN.md`.
 
-Not planned: in-place single-partition updates, compression or binary diffing
-inside a sector, multi-generation rollback, or over-the-air updates of the
-bootloader itself. The reasoning for each is in `DESIGN.md`.
+
