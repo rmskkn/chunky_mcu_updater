@@ -132,3 +132,14 @@ scripts/lab.sh status
 
 The server stays up across sessions and re-reads the image directory each time,
 so `release 3 12` then `session` tests a new release without restarting it.
+Or one terminal, backgrounding the server in your own shell:
+
+```sh
+scripts/lab.sh server &
+scripts/lab.sh release 2 && scripts/lab.sh session && scripts/lab.sh boot
+kill %1
+```
+
+The server exits with the shell that started it, so background it from your own
+shell rather than from a script that then exits.
+
