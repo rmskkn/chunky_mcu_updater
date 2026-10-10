@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 
 static const char *opt_flash = "flash.bin";
@@ -113,7 +114,11 @@ static int cmd_session(void)
     double t_start = now_ms(), t_manifest = 0, t_auth = 0, t_stage = 0, t_persist = 0;
 
     int fd = tcp_connect(opt_host, opt_port);
-    if (fd < 0) die("cannot connect to %s:%d", opt_host, opt_port);
+    if (fd < 0)
+        die("cannot connect to %s:%d: %s\n"
+            "  no server is listening there; start one in another terminal:\n"
+            "    scripts/lab.sh server",
+            opt_host, opt_port, strerror(errno));
     link_init(&l, fd);
 
     msg_hello_t h;

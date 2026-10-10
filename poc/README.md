@@ -55,6 +55,18 @@ it. Anything `lab.sh` does not recognise is passed to `cb-client`, so
 `scripts/lab.sh session --fail-after 20` cuts the power mid-download and
 `scripts/lab.sh unroll` abandons a staged plan.
 
+Or one terminal, backgrounding the server in your own shell:
+
+```sh
+scripts/lab.sh server &
+scripts/lab.sh release 2 && scripts/lab.sh session && scripts/lab.sh boot
+kill %1
+```
+
+The server exits with the shell that started it (`PR_SET_PDEATHSIG`), so
+background it from your own shell, not from a script that then exits — a
+wrapper that launches it and returns takes the server down with it.
+
 Without the harness it is two plain commands:
 
 ```sh

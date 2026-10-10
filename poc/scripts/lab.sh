@@ -2,7 +2,7 @@
 # Runtime harness: keeps one server up while you drive the device by hand.
 #
 #   scripts/lab.sh setup            fresh flash, slot 0 provisioned with v1
-#   scripts/lab.sh server           run the server in the foreground
+#   scripts/lab.sh server           run the server; '&' to keep one terminal
 #   scripts/lab.sh release N [RUNS] publish version N, RUNS patched runs (default 4)
 #   scripts/lab.sh session          run one update session
 #   scripts/lab.sh boot|confirm|unroll|status
@@ -28,8 +28,14 @@ ready. two terminals:
   terminal 1:  $0 server
   terminal 2:  $0 release 2 && $0 session && $0 boot && $0 confirm
 
+or one terminal, backgrounding the server in this shell:
+  $0 server &
+  $0 release 2 && $0 session && $0 boot && $0 confirm
+  kill %1
+
 the server stays up across sessions; publish a new release and run another
-session without restarting it.
+session without restarting it. It exits with the shell that started it, so
+background it from your own shell, not from a script that then exits.
 TXT
     ;;
 server)
