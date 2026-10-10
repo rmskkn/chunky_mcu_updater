@@ -20,17 +20,18 @@ row() {   # row <label> <log> <phase>
     local label="$1" line
     line="$(grep "^TIME phase=$3" "$2" | tail -1)"
     [ -n "$line" ] || return 0
-    printf '%-22s %10s %12s %11s %9s %11s\n' "$label" \
-        "$(field host_ms "$line")" "$(field model_ms "$line")" \
-        "$(field flash_ms "$line")" "$(field erases "$line")" \
-        "$(field prog_bytes "$line")"
+    printf '%-22s %10s %15s %15s %8s %11s\n' "$label" \
+        "$(field host_ms "$line")" \
+        "$(field model_min_ms "$line")-$(field model_max_ms "$line")" \
+        "$(field flash_min_ms "$line")-$(field flash_max_ms "$line")" \
+        "$(field erases "$line")" "$(field prog_bytes "$line")"
 }
 
 hdr() {
-    printf '\n%-22s %10s %12s %11s %9s %11s\n' \
+    printf '\n%-22s %10s %15s %15s %8s %11s\n' \
         "attempt" "host ms" "F103 ms" "of it flash" "erases" "prog bytes"
-    printf '%-22s %10s %12s %11s %9s %11s\n' \
-        ---------------------- ---------- ------------ ----------- --------- -----------
+    printf '%-22s %10s %15s %15s %8s %11s\n' \
+        ---------------------- ---------- --------------- --------------- -------- -----------
 }
 
 try() {   # try <label> <target>
@@ -71,6 +72,11 @@ echo
 echo "phase detail, last 12-run session:"
 grep '^time:' "$RUN/t.session"
 echo
-echo "model inputs: md5 ${F103_MD5:-10} cyc/B, sha256 25 cyc/B, 72 MHz,"
-echo "              page erase 20 ms, half-word program 52.5 us (RM0008),"
-echo "              ECDSA P-256 sign 250 ms / verify 300 ms (DESIGN.md 10.2)"
+cat <<'TXT'
+
+model inputs: md5 10 cyc/B, sha256 25 cyc/B, 72 MHz core
+              page erase 20-40 ms, half-word program 20-40 us
+                -> DS5319 Table 23; the datasheet gives min and max only,
+                   there is no typical, so every F103 figure is a range
+              ECDSA P-256 sign 250 ms / verify 300 ms (DESIGN.md 10.2, budgeted)
+TXT

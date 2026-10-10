@@ -156,47 +156,69 @@ worth a flat 2 076 B, which is more than a third of a two-sector session.
 
 From `scripts/timing.sh`. Host wall time is reported for what it is: the host
 runs the same code far faster than the part. The useful column is the device
-model, built from the operation counts the PoC records — hashing at the
-cycles/byte in `flash.h`, flash erase and program at RM0008 typicals (20 ms per
-page erase, 52.5 µs per half-word program), and the ECDSA costs `DESIGN.md`
-budgets rather than measures.
+model, built from the operation counts the PoC records and from datasheet
+DS5319 Table 23:
 
 ```
-attempt                   host ms      F103 ms of it flash    erases  prog bytes
-1 run: session            113.043        468.3       202.3         6        3134
-1 run: apply+verify        14.709        427.5       108.5         4        1084
-1 run: trial 2              6.015        108.3       108.3         4        1080
-1 run: trial 3              5.853        108.3       108.3         4        1080
-1 run: revert              14.284        255.1       236.7         9        2160
-4 runs: session           249.641        609.9       343.1         9        6212
-12 runs: session          601.184        940.4       671.6        16       13394
-plain boot                  2.711         18.4         0.0         0           0
+tprog   Word programming time    min 20 us   max 40 us
+tERASE  Page (1kB) erase time    min 20 ms   max 40 ms
 ```
 
-Per-phase, for the 12-sector session:
+The **Typ column of that table is empty** — ST gives a min and a max and no
+typical — so every F103 figure below is a range. The part programs 16 bits per
+operation, so a 1 KB page is one erase plus 512 programming operations:
+**30.2 ms best case, 60.5 ms worst**, and 1.57–3.14 s for a full 52 KB slot.
 
 ```
-time: manifest   host     1.15 ms   F103 model     14.8 ms  (104 sectors hashed)
-time: sign       host     0.05 ms   F103 model    250.0 ms  (ECDSA P-256, budgeted)
-time: stage      host   567.80 ms   F103 model    671.6 ms  (receive, verify, program)
-time: session    host   601.18 ms   F103 model    940.4 ms
+attempt                   host ms         F103 ms     of it flash   erases  prog bytes
+1 run: session            101.079     417.4-568.7     151.3-302.7        6        3134
+1 run: apply+verify         9.255     409.9-500.7      90.8-181.7        4        1084
+1 run: trial 2              7.780      90.8-181.6      90.8-181.6        4        1080
+1 run: revert              17.735     220.0-421.6     201.6-403.2        9        2160
+4 runs: session           249.684     509.0-751.1     242.1-484.2        9        6212
+12 runs: session          594.262    722.8-1176.7     453.9-907.9       16       13394
+plain boot                  1.231       18.4-18.4         0.0-0.0        0           0
 ```
 
-**Flash programming dominates, not cryptography.** One sector costs 46.9 ms to
-erase and program, so a 12-sector update spends 672 of its 940 ms in flash, and
-a full 52 KB slot would cost 2.44 s. On a 9600 baud link that is invisible next
+**Flash programming dominates, not cryptography.** A 12-sector update spends
+454–908 of its 723–1177 ms in flash. On a 9600 baud link that is invisible next
 to the transfer; on CAN FD or TCP it is the floor, and it scales with sectors
-written — another reason never to send a sector the device already has.
+written.
 
-**A trial boot costs 108 ms and does no useful work.** Every state change
-rewrites a 4-page meta bank, and a page erase is 20 ms. This is the measurement
-that justifies the attempt-token log in `DESIGN.md` section 2: clear one bit per
-attempt instead of rewriting the bank. The PoC does not implement that
-optimisation, which is exactly why the cost is visible here.
+**A trial boot costs 91–182 ms and does no useful work.** Every state change
+rewrites a 4-page meta bank. With endurance at 1 kcycle minimum (DS5319 Rev 1;
+10 kcycles later), that is an endurance cost as well as a time cost, which is
+what justifies the attempt-token log in `DESIGN.md` section 2: clear one bit
+per attempt instead of erasing a bank. The PoC does not implement that
+optimisation, which is why the cost is visible here.
 
 Timing also found a plain inefficiency: the apply path wrote the meta bank
 twice, once to enter `TRIAL` and once to take the first attempt token. Merging
-them saved 108 ms per update, and the apply-plus-verify row above is the result.
+them saved a bank erase per update.
+
+## Savings, both currencies
+
+`scripts/overhead.sh` prints bytes and device time together. The full-image
+baseline is computed from the frame and message sizes rather than measured, and
+it lands on 60 724 B — exactly what a forced full transfer measures.
+
+For a 5-sector change in steady state:
+
+| | Delta | Full image | Saved |
+|---|---|---|---|
+| Wire | 7 943 B | 60 724 B | 52 781 B, 86.9 % |
+| Sectors written | 5 | 52 | 47 |
+| Flash time | 151–302 ms | 1 572–3 145 ms | 1.4–2.8 s |
+| Total at 9600 baud | 8.4–8.6 s | 64.8–66.4 s | 56.2–57.8 s |
+| Total at 115200 baud | 0.8–1.0 s | 6.8–8.4 s | 6.0–7.4 s |
+
+**Copies save bytes but not flash time.** A `STEP_COPY` still erases and
+programs the destination page, so it costs the device what a `STEP_WRITE`
+costs. On a first update into an erased slot, rule 2 takes the wire from 87.1 %
+to 15.8 % of a full image while flash stays at 1.36–2.72 s either way. On a
+slow link that is close to free money; on a fast link it buys almost nothing,
+because flash is the floor. Rule 1 — the sector that is already correct, so
+neither sent nor written — is the only rule that saves both.
 
 ## What this PoC does not do
 
