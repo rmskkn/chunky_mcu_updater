@@ -73,8 +73,8 @@ only ever go from 1 to 0:
 
 ```
 0xFFFF  empty
-0xAAAA  sector written to flash
-0x5555  sector written and MD5-verified
+0xFFF0  sector written to flash
+0xFF00  sector written and MD5-verified
 0x0000  step complete (for COPY: source read and destination verified)
 ```
 
@@ -107,7 +107,6 @@ The device hashes **both** slots and reports all of it, as requested:
 
 ```
 MANIFEST                                 // fragmented over several frames
-  nonce         : u8[16]   // echoed from CHALLENGE
   sector_size   : u16      (1024)
   slot_count    : u8       (2)
   sectors_slot  : u8       (52)
@@ -119,8 +118,11 @@ MANIFEST_END                             // one frame, closes the manifest
   signature       : u8[64] // device ECDSA P-256 over the struct below
 ```
 
-The signed structure is explicit, so neither side has to agree on how the
-fragments were cut:
+The body carries **no nonce**. It is a pure function of what is in flash, so
+`manifest_sha256` is stable across sessions and the server can cache it, which
+is what makes the elision in Section 17.1 possible. Freshness lives in the
+signed structure instead, which is explicit so neither side has to agree on how
+the fragments were cut:
 
 ```c
 typedef struct {                /* 72 bytes, hashed then signed            */
@@ -360,7 +362,7 @@ idempotent, so a power cut during unroll just means unroll runs again.
 | Failure point | Result |
 |---|---|
 | Power loss mid-download | Journal survives; resume sends only unverified sectors |
-| Power loss mid flash program | That sector's journal word is not `0x5555`; it is re-sent or re-copied |
+| Power loss mid flash program | That sector's journal word is not `0xFF00`; it is re-sent or re-copied |
 | Power loss during apply | `plan_state == APPLYING`; the bootloader resumes the journal from where it stopped |
 | Power loss during meta write | The other bank with the lower generation is still consistent |
 | Corrupt blob in transit | Per-sector MD5 fails → `STEP_NAK` → re-sent |
@@ -965,32 +967,52 @@ Delta is not free. It adds a manifest, a signature, and two round trips to
 every session, and those costs are paid whether one sector changed or all of
 them did. The honest question is where the crossover sits.
 
-Framing costs 11 B per frame (Section 6) at a 256 B payload cap, so a 1024 B
-sector costs 1024 + 4×11 = **1068 B** on the wire, plus a 19 B `STEP_ACK`.
-Fixed session cost is `HELLO` + `CHALLENGE` + manifest (1872 B of body, 8
-frames) + `MANIFEST_END` + `PLAN_BEGIN` + the closing messages ≈ **2270 B**.
-Sending the whole 52 KB image through the same framing costs **56 694 B**.
+Framing costs 10 B per frame (2 magic + 2 length + 1 type + 1 sequence +
+4 CRC), and each sector fragment also carries a 5-byte step header, so at a
+256 B data chunk a 1024 B sector costs 1024 + 4×15 = 1084 B, plus a
+`STEP_WRITE_END` and a `STEP_ACK`: **1123 B measured**. Fixed session cost is
+`HELLO` + `CHALLENGE` + manifest (1872 B of body) + `MANIFEST_END` +
+`PLAN_BEGIN` + the closing messages: **2328 B measured**.
+
+The numbers below are **measured**, not modelled: they come from the host PoC
+in `poc/`, which runs the real protocol over a real socket against a 128 KB
+emulated flash and a 45 772 B reference binary. `scripts/overhead.sh` reproduces
+the table.
+
+Steady state, destination slot holding the previous release:
 
 | Sectors changed | Delta on the wire | Fraction of a full image |
 |---|---|---|
-| 1 | 3 357 B | 5.9 % |
-| 5 | 7 705 B | 13.6 % |
-| 10 | 13 140 B | 23.2 % |
-| 20 | 24 010 B | 42.3 % |
-| 30 | 34 880 B | 61.5 % |
-| 40 | 45 750 B | 80.7 % |
-| 52 (everything) | 58 794 B | **103.7 %** |
+| 2 | 4 574 B | 7.5 % |
+| 5 | 7 943 B | 13.1 % |
+| 12 | 15 804 B | 26.0 % |
+| 26 | 31 526 B | 51.9 % |
+| 52 (everything) | 60 724 B | 100.0 % |
 
-Two numbers matter in that table.
+The full-image baseline is 60 724 B: the same protocol with every sector forced
+to a write. Three things in that table are worth more than the ratios.
 
-**Break-even is 50 of 52 sectors.** Delta loses only when essentially the
-entire image has changed, and then it loses by 3.7 % — about 2 KB. There is no
-realistic update profile where delta is meaningfully worse, so the design does
-not need a "send it all instead" escape hatch; the manifest is a flat ~4 % tax
-on the worst case and a 5–20× saving on the normal one.
+**Delta is never worse, and the worst case is a tie.** When every sector has
+changed, a delta plan is exactly a full transfer plus the manifest, and the
+manifest is itself elided or amortised. The earlier estimate in this document
+put break-even at 50 of 52 sectors and the worst case at 103.7 %; that assumed
+the full transfer was a raw stream with no per-sector protocol of its own. Any
+real full-image transfer needs its own framing, acknowledgements and integrity
+checks, so measured against a like-for-like baseline there is no crossover at
+all. The design therefore needs no "send it all instead" escape hatch.
 
-**A one-sector change still costs 3.4 KB**, of which 1 KB is payload. For small
-or frequent updates the manifest dominates, which is what Section 17.1 fixes.
+**A two-sector change costs 4 574 B**, of which 2 048 B is payload: the fixed
+manifest cost dominates small updates. With a warm server-side manifest cache
+(Section 17.1) the same update measures **2 498 B, 4.1 %** — the elision is
+worth 2 076 B, and more than a third of the session.
+
+**Rule 2 earns nothing in steady state and a great deal on a first update.**
+Measured with the destination holding the previous release, turning rule 2 off
+changes nothing at all (13.1 % either way): the sectors that differ there are
+genuinely new bytes that exist nowhere on the device. But updating into an
+**erased** slot, rule 2 finds 40 of 45 sectors in the active slot and drops the
+session from 87.1 % to 15.8 %. That is where content-addressed local copies pay,
+and it is also the case a naive implementation gets worst.
 
 **Sector-delta efficiency is hostage to code layout.** This is the real risk,
 and it is not visible in the table. Inserting one function near the start of
@@ -1044,7 +1066,7 @@ So the device may send a digest instead of the full manifest:
 
 ```
 MANIFEST_DIGEST
-  nonce         : u8[16]
+  nonce         : u8[16]     // from CHALLENGE, so this is not replayable
   manifest_sha256 : u8[32]   // over the canonical manifest body
   signature     : u8[64]     // same ManifestAuth struct as Section 4
 ```
@@ -1057,9 +1079,10 @@ whose flash was changed by a debugger or a factory tool — gets
 canonical body is defined bit-for-bit (Section 4) precisely so this digest is
 reproducible on both sides.
 
-Fixed session cost drops from ~2270 B to ~420 B, which moves the one-sector
-case from 3 357 B to **1 507 B**, 2.7 % of a full image. Break-even moves to 52
-of 52 sectors, so with elision delta is never worse than sending everything.
+Measured: the fixed session cost drops by 2 076 B, which moves the two-sector
+case from 4 574 B to **2 498 B**, 4.1 % of a full image, and the five-sector
+case from 7 943 B to 5 867 B. The saving is flat, so it matters most exactly
+where it should: on the smallest updates.
 
 The digest is signed and carries the nonce for the same reason the manifest
 does: it is a statement about device state, and the server must not plan against
