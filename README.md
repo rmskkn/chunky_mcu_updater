@@ -47,6 +47,21 @@ difference into a spare partition that the running firmware never depends on.
    failures and the device reverts to the partition it booted from before, then
    retries the update into the partition that just failed.
 
+Break-even against simply sending the whole image sits at 50 of 52 sectors, so
+delta loses only when essentially everything changed, and then by under 4 %. A
+one-sector change costs 2.7 % of a full transfer.
+
+## Transports
+
+The protocol is defined as messages; how they reach the device is a swappable
+link adapter. TCP/TLS and UART/RS-485 are byte streams. **Modbus** maps onto a
+holding-register mailbox with the master driving every exchange. **CAN** uses
+ISO-TP, with update traffic given a low-priority identifier so control frames
+always win arbitration — and if the product already speaks UDS, the plan maps
+straight onto `RequestDownload`/`TransferData`. Devices on a field bus are
+reached through a gateway; the signatures are end to end, so the gateway never
+has to be trusted.
+
 Integrity and authenticity are layered deliberately: per-sector hashes decide
 *what to transfer*, one signed hash over the whole image decides *whether the
 result is the real release*, the device signs its own manifest so the server
