@@ -81,6 +81,8 @@ can trust what it is diffing against, and the session always runs over TLS.
 | 10 | Image signing, manifest signing, TLS |
 | 11 | Design decisions and their tradeoffs |
 | 15 | Integrating with [MCUboot](https://github.com/mcu-tools/mcuboot) instead of the custom bootloader |
+| 16 | Transports: byte stream, Modbus, CAN with ISO-TP, UDS |
+| 17 | Overhead against a full image transfer, and manifest elision |
 
 ## For Review/ TODO
 1. In-place single-partition updates;
