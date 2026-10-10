@@ -12,7 +12,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <errno.h>
 #include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <sys/stat.h>
 #include <sys/socket.h>
 
@@ -265,10 +269,20 @@ int main(int argc, char **argv)
      * server would take SIGPIPE and exit, which is useless for a long-running
      * test session. */
     signal(SIGPIPE, SIG_IGN);
+#ifdef __linux__
+    /* Die with whoever started us. Ctrl-C already reaches the server because
+     * lab.sh execs it, but a closed terminal or a killed wrapper script would
+     * otherwise leave it holding the port. */
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+#endif
     mkdir(opt_cache, 0755);
 
     int srv = tcp_listen(opt_port);
-    if (srv < 0) die("cannot listen on port %d", opt_port);
+    if (srv < 0)
+        die("cannot listen on port %d: %s\n"
+            "  another server is probably still running: pkill cb-server\n"
+            "  or pick a free port on both sides: --port N",
+            opt_port, strerror(errno));
     printf("server: listening on 127.0.0.1:%d, images from %s\n", opt_port, opt_images);
     fflush(stdout);
 
