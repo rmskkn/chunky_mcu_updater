@@ -67,6 +67,21 @@ Integrity and authenticity are layered deliberately: per-sector hashes decide
 result is the real release*, the device signs its own manifest so the server
 can trust what it is diffing against, and the session always runs over TLS.
 
+## Proof of concept
+
+[`poc/`](poc/) is a working host implementation of the update path: a server, a
+device client, and a 128 KB emulated STM32F103CB flash with page erase and
+programming that refuses to set a bit without an erase. It transfers a real
+45 772 B firmware binary sector by sector, applies it through the bootloader
+path, and demonstrates resume after power loss, unroll of a tampered image, and
+revert after an unconfirmed trial boot. `poc/scripts/overhead.sh` measures the
+wire cost that section 17 of the design claims, and writing the PoC corrected
+three errors in it.
+
+```sh
+cd poc && make && scripts/run_demo.sh
+```
+
 ## Read next
 
 [`DESIGN.md`](DESIGN.md) covers it properly:
