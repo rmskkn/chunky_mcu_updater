@@ -12,6 +12,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <signal.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 
 static const char *opt_images = "images";
@@ -258,6 +260,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--once"))                   opt_once = 1;
         else die("unknown option %s", argv[i]);
     }
+
+    /* A device that dies mid-plan closes the socket under us; without this the
+     * server would take SIGPIPE and exit, which is useless for a long-running
+     * test session. */
+    signal(SIGPIPE, SIG_IGN);
+    mkdir(opt_cache, 0755);
 
     int srv = tcp_listen(opt_port);
     if (srv < 0) die("cannot listen on port %d", opt_port);

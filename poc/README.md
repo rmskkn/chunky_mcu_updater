@@ -18,10 +18,59 @@ scripts/run_resume.sh      # power loss mid-download, then resume
 scripts/run_unroll.sh      # tampered image, and a trial boot that never confirms
 scripts/overhead.sh        # measured wire cost against a full transfer
 scripts/timing.sh          # time per attempt, host and modelled device time
+scripts/lab.sh setup       # then drive server and client by hand, see below
 ```
 
 Everything is written under `run/`, which is disposable. The reference binary
 comes from `$KLIPPER_BIN` (default `/home/roman/projects/klipper/out/klipper.bin`).
+
+## Running it by hand
+
+The scripts above start and stop a server for you. For interactive work use
+`scripts/lab.sh`, which keeps one server up while you drive the device:
+
+```sh
+scripts/lab.sh setup            # fresh flash, slot 0 provisioned with v1
+```
+
+Terminal 1, left running:
+
+```sh
+scripts/lab.sh server           # add --no-copy, --full or --tamper N here
+```
+
+Terminal 2:
+
+```sh
+scripts/lab.sh release 2        # publish v2 (4 patched runs)
+scripts/lab.sh session          # run one update session
+scripts/lab.sh boot             # the bootloader applies and verifies
+scripts/lab.sh confirm          # pass the self-test
+scripts/lab.sh status           # where everything stands
+```
+
+The server stays up across sessions and re-reads the image directory each
+time, so `release 3 12` then `session` tests a new release without restarting
+it. Anything `lab.sh` does not recognise is passed to `cb-client`, so
+`scripts/lab.sh session --fail-after 20` cuts the power mid-download and
+`scripts/lab.sh unroll` abandons a staged plan.
+
+Without the harness it is two plain commands:
+
+```sh
+build/cb-server --port 7700 --images run/images --cache run/cache
+build/cb-client session --flash run/flash.bin --port 7700
+```
+
+The server ignores `SIGPIPE` and treats a vanished device as an ordinary
+outcome, so a client killed mid-transfer does not take it down:
+
+```
+server: device went away after 5 steps
+server: steps skip=7 copy=16 write=29
+...
+server: steps skip=12 copy=16 write=24      # next session resumes the gap
+```
 
 ## What the pieces are
 
