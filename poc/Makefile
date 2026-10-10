@@ -1,5 +1,5 @@
 CC      ?= gcc
-CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter
+CFLAGS  ?= -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wno-unused-parameter
 BUILD   := build
 SRC     := src
 

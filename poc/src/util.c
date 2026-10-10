@@ -72,6 +72,13 @@ void die(const char *fmt, ...)
     exit(1);
 }
 
+double now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1000.0 + (double)t.tv_nsec / 1e6;
+}
+
 void rnd_bytes(uint8_t *out, size_t len)
 {
     FILE *f = fopen("/dev/urandom", "rb");

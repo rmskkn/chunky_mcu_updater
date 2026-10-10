@@ -79,9 +79,27 @@ typedef struct {
     uint8_t *map;
     int      fd;
     int      fail_after;   /* -1 = never; else _exit after N programs */
-    long     programs;
+    long     programs;     /* erases + programs, what fail_after counts */
+    long     n_erase;
+    long     n_prog;
+    size_t   prog_bytes;
+    double   io_ms;        /* host time spent in erase and program */
     const char *path;
 } flash_t;
+
+/* STM32F103 flash timings from RM0008, used to model device time from the
+ * operation counts the host PoC records. */
+#define F103_ERASE_MS      20.0     /* page erase, typical */
+#define F103_PROG_US_HW    52.5     /* half-word program, typical */
+#define F103_MHZ           72.0
+#define F103_MD5_CYC_B     10.0
+#define F103_SHA256_CYC_B  25.0
+
+static inline double f103_flash_ms(long erases, size_t prog_bytes)
+{
+    return (double)erases * F103_ERASE_MS +
+           (double)(prog_bytes / 2) * F103_PROG_US_HW / 1000.0;
+}
 
 int  flash_create(const char *path);
 int  flash_open(flash_t *f, const char *path, int fail_after);

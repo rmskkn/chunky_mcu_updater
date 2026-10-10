@@ -17,6 +17,38 @@ static const char *opt_host  = "127.0.0.1";
 static int opt_port = 7700;
 static int opt_fail_after = -1;
 
+/* Device-time model. The host runs the same code thousands of times faster,
+ * so the interesting number is what the work would cost on the part: hashing
+ * at the cycles/byte in flash.h, plus RM0008 flash erase and program times.
+ * ECDSA costs are the figures DESIGN.md section 10 budgets, not measurements. */
+#define ECDSA_SIGN_MS   250.0
+#define ECDSA_VERIFY_MS 300.0
+
+static size_t md5_bytes, sha_bytes;
+static double ecdsa_ms;
+
+static double model_ms(const flash_t *f)
+{
+    double cyc_per_ms = F103_MHZ * 1000.0;
+    return (double)md5_bytes * F103_MD5_CYC_B / cyc_per_ms +
+           (double)sha_bytes * F103_SHA256_CYC_B / cyc_per_ms +
+           f103_flash_ms(f->n_erase, f->prog_bytes) + ecdsa_ms;
+}
+
+static void time_report(const char *phase, double host_ms, const flash_t *f)
+{
+    printf("time: %-10s host %8.2f ms   F103 model %8.1f ms"
+           "  (flash %.1f ms: %ld erase, %zu B prog)\n",
+           phase, host_ms, model_ms(f),
+           f103_flash_ms(f->n_erase, f->prog_bytes), f->n_erase, f->prog_bytes);
+    printf("TIME phase=%s host_ms=%.3f model_ms=%.1f flash_ms=%.1f erases=%ld "
+           "prog_bytes=%zu md5_bytes=%zu sha_bytes=%zu ecdsa_ms=%.0f\n",
+           phase, host_ms, model_ms(f),
+           f103_flash_ms(f->n_erase, f->prog_bytes), f->n_erase, f->prog_bytes,
+           md5_bytes, sha_bytes, ecdsa_ms);
+    fflush(stdout);
+}
+
 static const char *state_name(int s)
 {
     static const char *n[] = { "NONE", "STAGING", "READY", "APPLYING",
@@ -73,6 +105,8 @@ static int cmd_session(void)
     identity_t *id = identity_get(&f);
     meta_load(&f, &m);
 
+    double t_start = now_ms(), t_manifest = 0, t_auth = 0, t_stage = 0, t_persist = 0;
+
     int fd = tcp_connect(opt_host, opt_port);
     if (fd < 0) die("cannot connect to %s:%d", opt_host, opt_port);
     link_init(&l, fd);
@@ -92,10 +126,18 @@ static int cmd_session(void)
     msg_challenge_t ch;
     memcpy(&ch, pay, sizeof ch);
 
+    double t0 = now_ms();
     manifest_build(&f, m.active_slot, &man);
+    t_manifest = now_ms() - t0;
+    md5_bytes += (size_t)MANIFEST_ENTRIES * PAGE_SIZE;   /* both slots hashed */
+
+    t0 = now_ms();
     msg_manifest_auth_t auth;
     manifest_digest(&man, auth.manifest_sha256);
     manifest_mac(dev_key, id->device_id, ch.nonce, auth.manifest_sha256, auth.mac);
+    t_auth = now_ms() - t0;
+    sha_bytes += MANIFEST_BODY_LEN;
+    ecdsa_ms += ECDSA_SIGN_MS;        /* the real signature, not this HMAC */
     frame_send(&l, MSG_MANIFEST_DIGEST, &auth, sizeof auth);
 
     int t = frame_recv(&l, pay, &n);
@@ -140,6 +182,7 @@ static int cmd_session(void)
     uint8_t done[SECTORS_SLOT];
     memset(done, 0, sizeof done);
     int pending_copies = 0;
+    t0 = now_ms();
 
     for (;;) {
         t = frame_recv(&l, pay, &n);
@@ -185,6 +228,7 @@ static int cmd_session(void)
                 frame_send(&l, MSG_STEP_NAK, nak, 2);
                 continue;
             }
+            md5_bytes += 2 * PAGE_SIZE;   /* hash of the buffer and of the page */
             np.op[we.dst] = OP_WRITE;
             memcpy(np.target_md5[we.dst], we.md5, MD5_LEN);
             done[we.dst] = 1;
@@ -195,11 +239,15 @@ static int cmd_session(void)
         }
     }
 
+    t_stage = now_ms() - t0;
+
     /* Persist the plan once, then mark the sectors already in flash.
      * meta_store() erases the target bank, so it must come first. */
+    t0 = now_ms();
     meta_store(&f, &np);
     for (int i = 0; i < SECTORS_SLOT; i++)
         if (done[i]) journal_set(&f, i, JRN_VERIFIED);
+    t_persist = now_ms() - t0;
 
     msg_plan_ready_t pr = { (uint16_t)pending_copies };
     frame_send(&l, MSG_PLAN_READY, &pr, sizeof pr);
@@ -216,6 +264,15 @@ static int cmd_session(void)
 done:
     printf("device: wire tx=%llu rx=%llu bytes\n",
            (unsigned long long)l.tx_bytes, (unsigned long long)l.rx_bytes);
+    printf("time: manifest   host %8.2f ms   F103 model %8.1f ms  (%d sectors hashed)\n",
+           t_manifest, (double)MANIFEST_ENTRIES * PAGE_SIZE * F103_MD5_CYC_B / (F103_MHZ * 1000.0),
+           MANIFEST_ENTRIES);
+    printf("time: sign       host %8.2f ms   F103 model %8.1f ms  (ECDSA P-256, budgeted)\n",
+           t_auth, ECDSA_SIGN_MS);
+    printf("time: stage      host %8.2f ms   F103 model %8.1f ms  (receive, verify, program)\n",
+           t_stage, f103_flash_ms(f.n_erase, f.prog_bytes));
+    printf("time: persist    host %8.2f ms\n", t_persist);
+    time_report("session", now_ms() - t_start, &f);
     close(fd);
     flash_close(&f);
     return 0;
@@ -232,6 +289,7 @@ static int cmd_boot(void)
 
     poc_root_key(root_key);
     if (flash_open(&f, opt_flash, opt_fail_after) < 0) die("cannot open %s", opt_flash);
+    double t_start = now_ms(), t_apply = 0, t_verify = 0;
     if (meta_load(&f, &m) < 0) printf("boot: no valid meta bank, assuming slot 0\n");
 
     if (m.plan_state == PLAN_STAGING) {
@@ -240,6 +298,7 @@ static int cmd_boot(void)
             goto boot_active;
         }
         printf("boot: applying plan v%u into slot %u\n", m.target_version, m.pending_slot);
+        double t0 = now_ms();
 
         for (int i = 0; i < SECTORS_SLOT; i++) {
             if (m.op[i] == OP_NONE) continue;
@@ -264,25 +323,36 @@ static int cmd_boot(void)
                 goto boot_active;
             }
             journal_set(&f, i, JRN_DONE);
+            md5_bytes += 2 * PAGE_SIZE;
         }
+        t_apply = now_ms() - t0;
 
+        t0 = now_ms();
         uint8_t h[SHA256_LEN];
         const uint8_t *slot = flash_at(&f, SLOT_BASE(m.pending_slot));
         image_hash(slot, h);
+        sha_bytes += SLOT_SIZE - DESC_LEN;
+        ecdsa_ms += ECDSA_VERIFY_MS;
+        /* One hash, two checks: against the plan, then against the descriptor. */
         if (memcmp(h, m.target_sha256, SHA256_LEN)) {
+            t_verify = now_ms() - t0;
             do_unroll(&f, &m, "image_sha256 mismatch");
             goto boot_active;
         }
-        if (image_verify(slot, root_key, &why) < 0) {
+        if (image_verify_hashed(slot, root_key, h, &why) < 0) {
+            t_verify = now_ms() - t0;
             do_unroll(&f, &m, why);
             goto boot_active;
         }
+        t_verify = now_ms() - t0;
         printf("boot: slot %u verified, image_sha256 and release signature good\n",
                m.pending_slot);
 
+        /* No meta_store here: the TRIAL block below stores once, after
+         * taking the first attempt token. Each store costs a 4-page bank
+         * erase, which is ~108 ms on the part. */
         m.plan_state = PLAN_TRIAL;
         m.try_count  = MAX_TRIES;
-        meta_store(&f, &m);
     }
 
     if (m.plan_state == PLAN_TRIAL) {
@@ -301,6 +371,15 @@ static int cmd_boot(void)
                m.pending_slot, slot_version(&f, m.pending_slot), m.try_count);
         printf("boot: jumping to slot %u (run `confirm` if the self-test passes)\n",
                m.pending_slot);
+        if (t_apply > 0)
+            printf("time: apply      host %8.2f ms   F103 model %8.1f ms  (copies)\n",
+                   t_apply, f103_flash_ms(f.n_erase, f.prog_bytes));
+        if (t_verify > 0)
+            printf("time: verify     host %8.2f ms   F103 model %8.1f ms  "
+                   "(image_sha256 + signature)\n", t_verify,
+                   (double)(SLOT_SIZE - DESC_LEN) * F103_SHA256_CYC_B / (F103_MHZ * 1000.0)
+                   + ECDSA_VERIFY_MS);
+        time_report("boot", now_ms() - t_start, &f);
         flash_close(&f);
         return 0;
     }
@@ -317,7 +396,9 @@ boot_active:
         }
         printf("boot: booting slot %u version %u\n",
                m.active_slot, slot_version(&f, m.active_slot));
+        sha_bytes += SLOT_SIZE - DESC_LEN;   /* image_sha256 on every boot */
     }
+    time_report("boot", now_ms() - t_start, &f);
     flash_close(&f);
     return 0;
 }

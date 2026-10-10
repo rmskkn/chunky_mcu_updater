@@ -44,16 +44,15 @@ int image_build(const uint8_t *bin, size_t binlen, uint32_t version,
     return 0;
 }
 
-int image_verify(const uint8_t *slot, const uint8_t root_key[32], const char **why)
+int image_verify_hashed(const uint8_t *slot, const uint8_t root_key[32],
+                        const uint8_t h[SHA256_LEN], const char **why)
 {
     image_desc_t d;
-    uint8_t h[SHA256_LEN], mac[SHA256_LEN];
+    uint8_t mac[SHA256_LEN];
 
     memcpy(&d, slot + DESC_OFF, sizeof d);
-    if (d.magic != IMG_MAGIC)      { *why = "no image descriptor";      return -1; }
-    if (d.image_len != SLOT_SIZE)  { *why = "bad image_len";            return -1; }
-
-    image_hash(slot, h);
+    if (d.magic != IMG_MAGIC)      { *why = "no image descriptor"; return -1; }
+    if (d.image_len != SLOT_SIZE)  { *why = "bad image_len";       return -1; }
     if (memcmp(h, d.sha256, SHA256_LEN)) { *why = "image_sha256 mismatch"; return -1; }
 
     hmac_sha256(root_key, 32, &d, 16 + SHA256_LEN, mac);
@@ -61,4 +60,11 @@ int image_verify(const uint8_t *slot, const uint8_t root_key[32], const char **w
 
     *why = NULL;
     return 0;
+}
+
+int image_verify(const uint8_t *slot, const uint8_t root_key[32], const char **why)
+{
+    uint8_t h[SHA256_LEN];
+    image_hash(slot, h);
+    return image_verify_hashed(slot, root_key, h, why);
 }

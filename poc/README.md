@@ -17,6 +17,7 @@ scripts/run_demo.sh        # provision v1, update to v2, apply, confirm
 scripts/run_resume.sh      # power loss mid-download, then resume
 scripts/run_unroll.sh      # tampered image, and a trial boot that never confirms
 scripts/overhead.sh        # measured wire cost against a full transfer
+scripts/timing.sh          # time per attempt, host and modelled device time
 ```
 
 Everything is written under `run/`, which is disposable. The reference binary
@@ -90,6 +91,52 @@ reproducible builds and a stable link order in `DESIGN.md` section 17.
 
 **Manifest elision pays on exactly the updates that need it.** A warm cache is
 worth a flat 2 076 B, which is more than a third of a two-sector session.
+
+## Measured time per attempt
+
+From `scripts/timing.sh`. Host wall time is reported for what it is: the host
+runs the same code far faster than the part. The useful column is the device
+model, built from the operation counts the PoC records — hashing at the
+cycles/byte in `flash.h`, flash erase and program at RM0008 typicals (20 ms per
+page erase, 52.5 µs per half-word program), and the ECDSA costs `DESIGN.md`
+budgets rather than measures.
+
+```
+attempt                   host ms      F103 ms of it flash    erases  prog bytes
+1 run: session            113.043        468.3       202.3         6        3134
+1 run: apply+verify        14.709        427.5       108.5         4        1084
+1 run: trial 2              6.015        108.3       108.3         4        1080
+1 run: trial 3              5.853        108.3       108.3         4        1080
+1 run: revert              14.284        255.1       236.7         9        2160
+4 runs: session           249.641        609.9       343.1         9        6212
+12 runs: session          601.184        940.4       671.6        16       13394
+plain boot                  2.711         18.4         0.0         0           0
+```
+
+Per-phase, for the 12-sector session:
+
+```
+time: manifest   host     1.15 ms   F103 model     14.8 ms  (104 sectors hashed)
+time: sign       host     0.05 ms   F103 model    250.0 ms  (ECDSA P-256, budgeted)
+time: stage      host   567.80 ms   F103 model    671.6 ms  (receive, verify, program)
+time: session    host   601.18 ms   F103 model    940.4 ms
+```
+
+**Flash programming dominates, not cryptography.** One sector costs 46.9 ms to
+erase and program, so a 12-sector update spends 672 of its 940 ms in flash, and
+a full 52 KB slot would cost 2.44 s. On a 9600 baud link that is invisible next
+to the transfer; on CAN FD or TCP it is the floor, and it scales with sectors
+written — another reason never to send a sector the device already has.
+
+**A trial boot costs 108 ms and does no useful work.** Every state change
+rewrites a 4-page meta bank, and a page erase is 20 ms. This is the measurement
+that justifies the attempt-token log in `DESIGN.md` section 2: clear one bit per
+attempt instead of rewriting the bank. The PoC does not implement that
+optimisation, which is exactly why the cost is visible here.
+
+Timing also found a plain inefficiency: the apply path wrote the meta bank
+twice, once to enter `TRIAL` and once to take the first attempt token. Merging
+them saved 108 ms per update, and the apply-plus-verify row above is the result.
 
 ## What this PoC does not do
 
