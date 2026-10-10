@@ -106,3 +106,29 @@ cd poc && make && scripts/run_demo.sh
 4. Reasoning for each is in `DESIGN.md`.
 
 
+
+## Running the PoC by hand
+
+```sh
+cd poc
+scripts/lab.sh setup            # fresh flash, slot 0 provisioned with v1
+```
+
+Terminal 1, left running:
+
+```sh
+scripts/lab.sh server           # --no-copy, --full, --tamper N go here
+```
+
+Terminal 2:
+
+```sh
+scripts/lab.sh release 2        # publish v2 (4 patched runs)
+scripts/lab.sh session          # one update session
+scripts/lab.sh boot             # bootloader applies and verifies
+scripts/lab.sh confirm          # self-test passes
+scripts/lab.sh status
+```
+
+The server stays up across sessions and re-reads the image directory each time,
+so `release 3 12` then `session` tests a new release without restarting it.
