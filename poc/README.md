@@ -62,8 +62,19 @@ build/cb-server --port 7700 --images run/images --cache run/cache
 build/cb-client session --flash run/flash.bin --port 7700
 ```
 
-The server ignores `SIGPIPE` and treats a vanished device as an ordinary
-outcome, so a client killed mid-transfer does not take it down:
+Ctrl-C stops the server, and it does not outlive the shell that started it:
+`lab.sh` execs it so signals reach it directly, and it sets
+`PR_SET_PDEATHSIG` so a closed terminal or a killed wrapper script cannot leave
+it holding the port. If a bind ever fails anyway, the error says what to do:
+
+```
+error: cannot listen on port 7700: Address already in use
+  another server is probably still running: pkill cb-server
+  or pick a free port on both sides: --port N
+```
+
+A vanished *device*, on the other hand, is an ordinary outcome: the server
+ignores `SIGPIPE`, so a client killed mid-transfer does not take it down:
 
 ```
 server: device went away after 5 steps
