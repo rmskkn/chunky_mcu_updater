@@ -213,118 +213,16 @@ always emitted **last**. The slot header is the commit marker — if a transfer
 dies halfway, sector 0 is still erased, the slot is unmistakably invalid, and
 unroll has nothing to think about.
 
-### 5.1 Wire cost against sending the whole image
-
-Delta is not free. It adds a manifest, a signature, and two round trips to
-every session, and those costs are paid whether one sector changed or all of
-them did. The honest question is where the crossover sits.
-
-Framing costs 11 B per frame (Section 6) at a 256 B payload cap, so a 1024 B
-sector costs 1024 + 4×11 = **1068 B** on the wire, plus a 19 B `STEP_ACK`.
-Fixed session cost is `HELLO` + `CHALLENGE` + manifest (1872 B of body, 8
-frames) + `MANIFEST_END` + `PLAN_BEGIN` + the closing messages ≈ **2270 B**.
-Sending the whole 52 KB image through the same framing costs **56 694 B**.
-
-| Sectors changed | Delta on the wire | Fraction of a full image |
-|---|---|---|
-| 1 | 3 357 B | 5.9 % |
-| 5 | 7 705 B | 13.6 % |
-| 10 | 13 140 B | 23.2 % |
-| 20 | 24 010 B | 42.3 % |
-| 30 | 34 880 B | 61.5 % |
-| 40 | 45 750 B | 80.7 % |
-| 52 (everything) | 58 794 B | **103.7 %** |
-
-Two numbers matter in that table.
-
-**Break-even is 50 of 52 sectors.** Delta loses only when essentially the
-entire image has changed, and then it loses by 3.7 % — about 2 KB. There is no
-realistic update profile where delta is meaningfully worse, so the design does
-not need a "send it all instead" escape hatch; the manifest is a flat ~4 % tax
-on the worst case and a 5–20× saving on the normal one.
-
-**A one-sector change still costs 3.4 KB**, of which 1 KB is payload. For small
-or frequent updates the manifest dominates, which is what Section 5.2 fixes.
-
-**Sector-delta efficiency is hostage to code layout.** This is the real risk,
-and it is not visible in the table. Inserting one function near the start of
-the image shifts every byte after it, so every following sector's hash changes
-and a one-line fix turns into a near-full transfer. Mitigations, in order of
-value:
-
-* Build reproducibly — same toolchain, same flags, sorted link order, no
-  timestamps or paths baked into the binary. Without this the whole scheme
-  degrades toward full transfers for reasons unrelated to the actual change.
-* Compile with `-ffunction-sections -fdata-sections` and keep an explicit,
-  stable symbol order in the linker script, so unrelated edits do not permute
-  layout.
-* Place volatile, frequently-tuned data (calibration tables, strings, limits)
-  in their own sector-aligned section at the **end** of the image, so changing
-  them cannot shift code.
-* Accept the rest. Code churn genuinely spread across the image is a genuinely
-  large update, and no sector-granular scheme can fix that.
-
-**Against a compressed full image.** LZ-class compression on ARM Thumb code
-reaches roughly 60–70 % of the original, so a compressed full transfer is
-around 35 KB — better than delta once churn exceeds about 60 % of sectors, and
-much worse below it. Compressing each 1 KB blob independently gains little,
-because a 1 KB window has almost no history to exploit; compressing the blob
-*stream* compresses well but couples the sectors together and destroys
-per-sector resume. The two techniques are complementary rather than
-alternatives: if the link is expensive enough to justify both, compress each
-blob with a shared pre-trained dictionary, which keeps sectors independent and
-recovers most of the ratio. Not in v1.
-
-**Round trips, not just bytes.** On a high-latency link — NB-IoT with a 1–2 s
-RTT, or a polled field bus — the ACK-per-sector pattern dominates the transfer
-time. Delta already wins here (7 round trips instead of 52), but the protocol
-should allow a window of several outstanding sectors and a single ACK bitmap at
-`PLAN_END` rather than one ACK per sector. With a window of 8 the 7-sector case
-becomes 2 round trips.
-
-**Device-side CPU cost is noise.** Manifest hashing ~15 ms, manifest signing
-~250 ms, `image_sha256` ~18 ms, release-signature verify ~300 ms: under 0.6 s
-in total. The 7-sector transfer takes ~10 s at 9600 baud and the full image
-takes ~60 s, so the cryptography never shows up in the comparison.
-
-### 5.2 Manifest elision
-
-The manifest is a flat 1.9 KB per session, and on a metered or very slow link
-that is the dominant cost of a small update. It is also redundant: the server
-already knows what the device's flash contains, because the server is the only
-thing that ever changes it.
-
-So the device may send a digest instead of the full manifest:
-
-```
-MANIFEST_DIGEST
-  nonce         : u8[16]
-  manifest_sha256 : u8[32]   // over the canonical manifest body
-  signature     : u8[64]     // same ManifestAuth struct as Section 4
-```
-
-The server compares the digest with the manifest it has cached for this
-`device_id`. A match means its cached copy is byte-identical and planning
-proceeds immediately. A mismatch — first contact, a cache eviction, a device
-whose flash was changed by a debugger or a factory tool — gets
-`MANIFEST_NEEDED`, and the device sends the full manifest as in Section 4. The
-canonical body is defined bit-for-bit (Section 4) precisely so this digest is
-reproducible on both sides.
-
-Fixed session cost drops from ~2270 B to ~420 B, which moves the one-sector
-case from 3 357 B to **1 507 B**, 2.7 % of a full image. Break-even moves to 52
-of 52 sectors, so with elision delta is never worse than sending everything.
-
-The digest is signed and carries the nonce for the same reason the manifest
-does: it is a statement about device state, and the server must not plan against
-an unauthenticated or replayed one.
+Section 17 quantifies what this saves, where the break-even against
+sending a whole image lies, and the manifest elision that removes the fixed
+manifest cost from small updates.
 
 ---
 
 ## 6. Protocol
 
 The protocol is defined once, as messages. How those messages reach the device
-is a **link adapter** (Section 6.1), and the message layer does not care which
+is a **link adapter** (Section 16), and the message layer does not care which
 one is in use.
 
 The default adapter is a thin framing layer over a byte stream (UART, RS-485,
@@ -364,98 +262,8 @@ sectors, inside the same signed `MANIFEST_END` structure. The server replays the
 twice, and because every sector carries its own MD5 the device never has to
 trust that a resumed stream is consistent with the earlier one.
 
-### 6.1 Link adapters
-
-A device on a field bus is reached through a **gateway**: the server speaks TLS
-to the gateway over IP, and the gateway relays the same messages onto the bus.
-This is not a new trust model — Section 10.3 already accepts a non-TLS last hop,
-because on the reference platform TLS terminates in the network module and the
-MCU-to-module UART is unprotected. A Modbus or CAN segment is the same shape
-with a longer last hop, and it is safe for the same reason: the manifest
-signature and the release signature are end to end, so a gateway can read and
-reorder traffic but cannot forge what the device reports or what it installs.
-
-An adapter must provide four things, and nothing more:
-
-1. Deliver one message, in order, to one addressed device.
-2. Declare its maximum payload per transaction.
-3. Declare whether it already provides per-transaction integrity and
-   sequencing.
-4. Declare which side initiates.
-
-Point 3 earns its place: on a link that already checksums and sequences every
-transaction, the framing `crc32` is redundant and is omitted, saving 4 B per
-frame. Reassembly errors are still caught, because the per-sector hash is the
-only end-to-end integrity check that actually matters.
-
-Point 4 matters more than it looks. The message layer is request/response in
-both directions, but a polled bus has no device-initiated path at all, so on
-those adapters the gateway drives every exchange and the device only answers.
-
-| Adapter | Max payload | Frames per 1 KB sector | Integrity | Initiator |
-|---|---|---|---|---|
-| TCP + TLS | 256 B (RAM-bound, not link-bound) | 4 | TLS AEAD | either |
-| UART / RS-485 | 256 B | 4 | framing `crc32` | either |
-| Modbus RTU / TCP | 246 B (FC 16, 123 registers) | 5 | Modbus CRC16 / TCP | master only |
-| CAN 2.0 + ISO-TP | 4095 B per message | 147 CAN frames | CAN CRC + ISO-TP sequence | either |
-| CAN FD + ISO-TP | 4095 B per message | 18 CAN FD frames | CAN CRC + ISO-TP sequence | either |
-
-#### Modbus
-
-The device is a slave and exposes a mailbox in its holding-register space: a
-data window, a command register, and a status register. The master writes a
-chunk with `Write Multiple Registers` (FC 16, 123 registers = 246 B maximum per
-transaction), then writes the command register to commit it. A 1 KB sector is
-five transactions, roughly 5 % ADU overhead — cheaper than the byte-stream
-framing it replaces.
-
-The flow inverts. Modbus has no server push, so the device cannot announce
-itself; instead it raises an "update wanted" bit in its status register, the
-master polls for it, and the master then **reads** the manifest out of the
-device with `Read Holding Registers` rather than receiving it. 1872 B of
-manifest is 8 reads. Everything else is unchanged, because the message layer was
-already request/response.
-
-Modbus is also where the round-trip cost bites hardest: it is strictly one
-transaction at a time, so a 1 KB sector is five round trips. At 19200 baud a
-sector takes about 1.5 s, which makes a 7-sector delta ~11 s against ~80 s for
-a full image. This is the transport where delta pays for itself most obviously,
-and where the manifest elision of Section 5.2 is worth the most.
-
-`Read/Write File Record` (FC 20/21) is the more semantically honest mapping and
-is a reasonable alternative, but register mailboxes are what field tooling and
-existing Modbus masters actually support without special cases.
-
-#### CAN
-
-Use **ISO-TP (ISO 15765-2)** for segmentation: a 1 KB sector is one multi-frame
-message, with a per-device RX/TX identifier pair for addressing. On classic CAN
-at 500 kbit/s a sector is 147 frames and about 33 ms; CAN FD cuts that to 18
-frames. Bandwidth is not the constraint on CAN — **coexistence is**.
-
-Two rules keep an update from disturbing the machine it is running on:
-
-* Give update traffic a **high numeric CAN identifier**, so arbitration makes
-  control and safety frames win automatically. This is free and it is the whole
-  reason CAN prioritisation exists.
-* Cap bus utilisation with ISO-TP `STmin`, sized so update traffic stays under a
-  budget (20 % is a reasonable default) rather than filling whatever is idle.
-
-**If the product already speaks UDS, reuse it.** `RequestDownload` (0x34),
-`TransferData` (0x36) and `RequestTransferExit` (0x37) carry a delta plan
-directly: the sector index goes in the address field of `RequestDownload`, one
-`TransferData` sequence per sector. The manifest is read with `ReadDataByIdentifier`
-(0x22) against a dedicated DID, or `ReadMemoryByAddress` (0x23). That reuses an
-audited, already-certified stack instead of adding a second protocol to the same
-bus, and it keeps diagnostic tooling working. The planner, the manifest, and
-both signatures are unaffected — only the framing changes.
-
-#### Very low rate links
-
-On LoRaWAN or a similar sub-kbit/s link the manifest alone is minutes of
-airtime. Manifest elision (Section 5.2) stops being an optimisation and becomes
-a requirement, and the ACK window should be the whole plan: one ACK bitmap at
-`PLAN_END`, never per sector.
+Section 16 defines the link adapters — byte stream, Modbus, CAN with ISO-TP,
+and UDS — and what each one has to provide.
 
 ---
 
@@ -739,7 +547,7 @@ transport, which is the one thing Section 3 deliberately refuses.
 **TLS is mandatory on every IP hop.** No plaintext fallback exists in the
 protocol; a device or gateway that cannot establish TLS reports a link fault and
 retries with backoff. Where the device sits behind a gateway on a field bus
-(Section 6.1), TLS covers server-to-gateway, and the bus segment is covered by
+(Section 16), TLS covers server-to-gateway, and the bus segment is covered by
 the end-to-end signatures instead — the same split as the MCU-to-module UART on
 the reference platform. If a bus segment also needs confidentiality, wrap the
 message payloads in an AEAD under a per-device pre-shared key; the device
@@ -1053,3 +861,206 @@ reimplementation of something that is audited, fuzzed, and widely deployed.
 
 Either way the manifest protocol, the planner, the device manifest signature,
 and TLS are unaffected. They are the part of this design MCUboot does not have.
+
+---
+
+## 16. Transport
+
+A device on a field bus is reached through a **gateway**: the server speaks TLS
+to the gateway over IP, and the gateway relays the same messages onto the bus.
+This is not a new trust model — Section 10.3 already accepts a non-TLS last hop,
+because on the reference platform TLS terminates in the network module and the
+MCU-to-module UART is unprotected. A Modbus or CAN segment is the same shape
+with a longer last hop, and it is safe for the same reason: the manifest
+signature and the release signature are end to end, so a gateway can read and
+reorder traffic but cannot forge what the device reports or what it installs.
+
+An adapter must provide four things, and nothing more:
+
+1. Deliver one message, in order, to one addressed device.
+2. Declare its maximum payload per transaction.
+3. Declare whether it already provides per-transaction integrity and
+   sequencing.
+4. Declare which side initiates.
+
+Point 3 earns its place: on a link that already checksums and sequences every
+transaction, the framing `crc32` is redundant and is omitted, saving 4 B per
+frame. Reassembly errors are still caught, because the per-sector hash is the
+only end-to-end integrity check that actually matters.
+
+Point 4 matters more than it looks. The message layer is request/response in
+both directions, but a polled bus has no device-initiated path at all, so on
+those adapters the gateway drives every exchange and the device only answers.
+
+| Adapter | Max payload | Frames per 1 KB sector | Integrity | Initiator |
+|---|---|---|---|---|
+| TCP + TLS | 256 B (RAM-bound, not link-bound) | 4 | TLS AEAD | either |
+| UART / RS-485 | 256 B | 4 | framing `crc32` | either |
+| Modbus RTU / TCP | 246 B (FC 16, 123 registers) | 5 | Modbus CRC16 / TCP | master only |
+| CAN 2.0 + ISO-TP | 4095 B per message | 147 CAN frames | CAN CRC + ISO-TP sequence | either |
+| CAN FD + ISO-TP | 4095 B per message | 18 CAN FD frames | CAN CRC + ISO-TP sequence | either |
+
+### 16.1 Modbus
+
+The device is a slave and exposes a mailbox in its holding-register space: a
+data window, a command register, and a status register. The master writes a
+chunk with `Write Multiple Registers` (FC 16, 123 registers = 246 B maximum per
+transaction), then writes the command register to commit it. A 1 KB sector is
+five transactions, roughly 5 % ADU overhead — cheaper than the byte-stream
+framing it replaces.
+
+The flow inverts. Modbus has no server push, so the device cannot announce
+itself; instead it raises an "update wanted" bit in its status register, the
+master polls for it, and the master then **reads** the manifest out of the
+device with `Read Holding Registers` rather than receiving it. 1872 B of
+manifest is 8 reads. Everything else is unchanged, because the message layer was
+already request/response.
+
+Modbus is also where the round-trip cost bites hardest: it is strictly one
+transaction at a time, so a 1 KB sector is five round trips. At 19200 baud a
+sector takes about 1.5 s, which makes a 7-sector delta ~11 s against ~80 s for
+a full image. This is the transport where delta pays for itself most obviously,
+and where the manifest elision of Section 17.1 is worth the most.
+
+`Read/Write File Record` (FC 20/21) is the more semantically honest mapping and
+is a reasonable alternative, but register mailboxes are what field tooling and
+existing Modbus masters actually support without special cases.
+
+### 16.2 CAN
+
+Use **ISO-TP (ISO 15765-2)** for segmentation: a 1 KB sector is one multi-frame
+message, with a per-device RX/TX identifier pair for addressing. On classic CAN
+at 500 kbit/s a sector is 147 frames and about 33 ms; CAN FD cuts that to 18
+frames. Bandwidth is not the constraint on CAN — **coexistence is**.
+
+Two rules keep an update from disturbing the machine it is running on:
+
+* Give update traffic a **high numeric CAN identifier**, so arbitration makes
+  control and safety frames win automatically. This is free and it is the whole
+  reason CAN prioritisation exists.
+* Cap bus utilisation with ISO-TP `STmin`, sized so update traffic stays under a
+  budget (20 % is a reasonable default) rather than filling whatever is idle.
+
+**If the product already speaks UDS, reuse it.** `RequestDownload` (0x34),
+`TransferData` (0x36) and `RequestTransferExit` (0x37) carry a delta plan
+directly: the sector index goes in the address field of `RequestDownload`, one
+`TransferData` sequence per sector. The manifest is read with `ReadDataByIdentifier`
+(0x22) against a dedicated DID, or `ReadMemoryByAddress` (0x23). That reuses an
+audited, already-certified stack instead of adding a second protocol to the same
+bus, and it keeps diagnostic tooling working. The planner, the manifest, and
+both signatures are unaffected — only the framing changes.
+
+### 16.3 Very low rate links
+
+On LoRaWAN or a similar sub-kbit/s link the manifest alone is minutes of
+airtime. Manifest elision (Section 17.1) stops being an optimisation and becomes
+a requirement, and the ACK window should be the whole plan: one ACK bitmap at
+`PLAN_END`, never per sector.
+
+---
+
+## 17. Overhead analysis
+
+Delta is not free. It adds a manifest, a signature, and two round trips to
+every session, and those costs are paid whether one sector changed or all of
+them did. The honest question is where the crossover sits.
+
+Framing costs 11 B per frame (Section 6) at a 256 B payload cap, so a 1024 B
+sector costs 1024 + 4×11 = **1068 B** on the wire, plus a 19 B `STEP_ACK`.
+Fixed session cost is `HELLO` + `CHALLENGE` + manifest (1872 B of body, 8
+frames) + `MANIFEST_END` + `PLAN_BEGIN` + the closing messages ≈ **2270 B**.
+Sending the whole 52 KB image through the same framing costs **56 694 B**.
+
+| Sectors changed | Delta on the wire | Fraction of a full image |
+|---|---|---|
+| 1 | 3 357 B | 5.9 % |
+| 5 | 7 705 B | 13.6 % |
+| 10 | 13 140 B | 23.2 % |
+| 20 | 24 010 B | 42.3 % |
+| 30 | 34 880 B | 61.5 % |
+| 40 | 45 750 B | 80.7 % |
+| 52 (everything) | 58 794 B | **103.7 %** |
+
+Two numbers matter in that table.
+
+**Break-even is 50 of 52 sectors.** Delta loses only when essentially the
+entire image has changed, and then it loses by 3.7 % — about 2 KB. There is no
+realistic update profile where delta is meaningfully worse, so the design does
+not need a "send it all instead" escape hatch; the manifest is a flat ~4 % tax
+on the worst case and a 5–20× saving on the normal one.
+
+**A one-sector change still costs 3.4 KB**, of which 1 KB is payload. For small
+or frequent updates the manifest dominates, which is what Section 17.1 fixes.
+
+**Sector-delta efficiency is hostage to code layout.** This is the real risk,
+and it is not visible in the table. Inserting one function near the start of
+the image shifts every byte after it, so every following sector's hash changes
+and a one-line fix turns into a near-full transfer. Mitigations, in order of
+value:
+
+* Build reproducibly — same toolchain, same flags, sorted link order, no
+  timestamps or paths baked into the binary. Without this the whole scheme
+  degrades toward full transfers for reasons unrelated to the actual change.
+* Compile with `-ffunction-sections -fdata-sections` and keep an explicit,
+  stable symbol order in the linker script, so unrelated edits do not permute
+  layout.
+* Place volatile, frequently-tuned data (calibration tables, strings, limits)
+  in their own sector-aligned section at the **end** of the image, so changing
+  them cannot shift code.
+* Accept the rest. Code churn genuinely spread across the image is a genuinely
+  large update, and no sector-granular scheme can fix that.
+
+**Against a compressed full image.** LZ-class compression on ARM Thumb code
+reaches roughly 60–70 % of the original, so a compressed full transfer is
+around 35 KB — better than delta once churn exceeds about 60 % of sectors, and
+much worse below it. Compressing each 1 KB blob independently gains little,
+because a 1 KB window has almost no history to exploit; compressing the blob
+*stream* compresses well but couples the sectors together and destroys
+per-sector resume. The two techniques are complementary rather than
+alternatives: if the link is expensive enough to justify both, compress each
+blob with a shared pre-trained dictionary, which keeps sectors independent and
+recovers most of the ratio. Not in v1.
+
+**Round trips, not just bytes.** On a high-latency link — NB-IoT with a 1–2 s
+RTT, or a polled field bus — the ACK-per-sector pattern dominates the transfer
+time. Delta already wins here (7 round trips instead of 52), but the protocol
+should allow a window of several outstanding sectors and a single ACK bitmap at
+`PLAN_END` rather than one ACK per sector. With a window of 8 the 7-sector case
+becomes 2 round trips.
+
+**Device-side CPU cost is noise.** Manifest hashing ~15 ms, manifest signing
+~250 ms, `image_sha256` ~18 ms, release-signature verify ~300 ms: under 0.6 s
+in total. The 7-sector transfer takes ~10 s at 9600 baud and the full image
+takes ~60 s, so the cryptography never shows up in the comparison.
+
+### 17.1 Manifest elision
+
+The manifest is a flat 1.9 KB per session, and on a metered or very slow link
+that is the dominant cost of a small update. It is also redundant: the server
+already knows what the device's flash contains, because the server is the only
+thing that ever changes it.
+
+So the device may send a digest instead of the full manifest:
+
+```
+MANIFEST_DIGEST
+  nonce         : u8[16]
+  manifest_sha256 : u8[32]   // over the canonical manifest body
+  signature     : u8[64]     // same ManifestAuth struct as Section 4
+```
+
+The server compares the digest with the manifest it has cached for this
+`device_id`. A match means its cached copy is byte-identical and planning
+proceeds immediately. A mismatch — first contact, a cache eviction, a device
+whose flash was changed by a debugger or a factory tool — gets
+`MANIFEST_NEEDED`, and the device sends the full manifest as in Section 4. The
+canonical body is defined bit-for-bit (Section 4) precisely so this digest is
+reproducible on both sides.
+
+Fixed session cost drops from ~2270 B to ~420 B, which moves the one-sector
+case from 3 357 B to **1 507 B**, 2.7 % of a full image. Break-even moves to 52
+of 52 sectors, so with elision delta is never worse than sending everything.
+
+The digest is signed and carries the nonce for the same reason the manifest
+does: it is a statement about device state, and the server must not plan against
+an unauthenticated or replayed one.
