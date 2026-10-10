@@ -12,4 +12,7 @@ int      write_file(const char *path, const void *buf, size_t len);
 void     die(const char *fmt, ...);
 void     rnd_bytes(uint8_t *out, size_t len);
 
+/* Monotonic wall clock in milliseconds, for the phase timers. */
+double   now_ms(void);
+
 #endif

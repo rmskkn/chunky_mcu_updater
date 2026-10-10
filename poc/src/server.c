@@ -63,6 +63,7 @@ static void report(const link_t *l, const plan_t *p, int full_bytes)
 
 static void session(int fd)
 {
+    double t_session = now_ms();
     link_t l;
     uint8_t pay[FRAME_MAX_PAYLOAD];
     size_t n;
@@ -174,7 +175,10 @@ static void session(int fd)
     free(bin);
 
     int dst_slot = hello.active_slot ? 0 : 1;
+    double t_plan = now_ms();
     plan_build(&dev, target, dst_slot, !opt_no_copy, opt_full, opt_tamper, &plan);
+    t_plan = now_ms() - t_plan;
+    printf("server: plan built in %.2f ms\n", t_plan);
 
     const image_desc_t *d = image_desc(target);
     msg_plan_begin_t pb;
@@ -234,6 +238,7 @@ static void session(int fd)
     frame_send(&l, MSG_COMMIT, NULL, 0);
 
 out:
+    printf("server: session wall time %.2f ms\n", now_ms() - t_session);
     report(&l, &plan, (int)(SLOT_SIZE + (SLOT_SIZE / WRITE_CHUNK) * FRAME_OVERHEAD));
     free(target);
 }

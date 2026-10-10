@@ -1050,10 +1050,39 @@ should allow a window of several outstanding sectors and a single ACK bitmap at
 `PLAN_END` rather than one ACK per sector. With a window of 8 the 7-sector case
 becomes 2 round trips.
 
-**Device-side CPU cost is noise.** Manifest hashing ~15 ms, manifest signing
-~250 ms, `image_sha256` ~18 ms, release-signature verify ~300 ms: under 0.6 s
-in total. The 7-sector transfer takes ~10 s at 9600 baud and the full image
-takes ~60 s, so the cryptography never shows up in the comparison.
+**Cryptography is cheap; flash programming is not.** The cryptography is
+roughly what it looks like: manifest hashing ~15 ms, manifest signing ~250 ms,
+`image_sha256` ~18 ms, release-signature verify ~300 ms. Under 0.6 s, and
+invisible next to a transfer that takes ~10 s at 9600 baud.
+
+Writing the flash is the part that is easy to forget. At RM0008 typicals for
+this part — 20 ms per page erase, 52.5 µs per half-word program — one 1 KB
+sector costs **46.9 ms** to erase and program, and a full 52 KB slot costs
+**2.44 s**. The PoC counts the operations and models the device time:
+
+| Attempt | Device time | of which flash |
+|---|---|---|
+| 2-sector update, whole session | 468 ms | 202 ms |
+| 5-sector update, whole session | 610 ms | 343 ms |
+| 12-sector update, whole session | 940 ms | 672 ms |
+| Bootloader apply plus verify | 428 ms | 108 ms |
+| Each further trial boot | 108 ms | 108 ms |
+| Revert after the last trial | 255 ms | 237 ms |
+| Ordinary boot, nothing pending | 18 ms | 0 ms |
+
+Two consequences. On a slow link flash time still disappears into the transfer,
+so the delta saving is what matters. On a fast link — CAN FD, TCP, a local
+gateway — **flash programming becomes the floor**, and it is proportional to
+sectors written, which is one more reason the planner should never send a sector
+the device already has.
+
+The third row is worth its own note: a trial boot costs 108 ms and does no
+useful work, because every state change rewrites a 4-page meta bank and a page
+erase is 20 ms. That is the measurement behind the attempt-token log in
+Section 2 — clearing one bit per attempt instead of rewriting the bank. The
+PoC skips that optimisation and pays the 108 ms, which is how the cost became
+visible. Merging the two bank writes the apply path originally did saved
+another 108 ms per update.
 
 ### 17.1 Manifest elision
 

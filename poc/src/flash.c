@@ -43,6 +43,9 @@ int flash_open(flash_t *f, const char *path, int fail_after)
     if (f->map == MAP_FAILED) { close(f->fd); return -1; }
     f->fail_after = fail_after;
     f->programs = 0;
+    f->n_erase = f->n_prog = 0;
+    f->prog_bytes = 0;
+    f->io_ms = 0;
     f->path = path;
     live_bank = -1;
     return 0;
@@ -72,8 +75,11 @@ static void maybe_power_fail(flash_t *f)
 void flash_erase_page(flash_t *f, int page)
 {
     size_t off = (size_t)page * PAGE_SIZE;
+    double t0 = now_ms();
     memset(f->map + off, 0xFF, PAGE_SIZE);
     sync_range(f, off, PAGE_SIZE);
+    f->io_ms += now_ms() - t0;
+    f->n_erase++;
     f->programs++;
     maybe_power_fail(f);
 }
@@ -93,8 +99,12 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
             die("flash: program at 0x%zx would set bits (0x%02x -> 0x%02x); "
                 "erase the page first", off + i, old, src[i]);
     }
+    double t0 = now_ms();
     memcpy(f->map + off, src, len);
     sync_range(f, off, len);
+    f->io_ms += now_ms() - t0;
+    f->n_prog++;
+    f->prog_bytes += len;
     f->programs++;
     maybe_power_fail(f);
 }

@@ -36,6 +36,9 @@ int  image_build(const uint8_t *bin, size_t binlen, uint32_t version,
 
 /* 0 = good, else a reason string in *why. */
 int  image_verify(const uint8_t *slot, const uint8_t root_key[32], const char **why);
+/* Same, reusing a hash the caller already computed over the slot. */
+int  image_verify_hashed(const uint8_t *slot, const uint8_t root_key[32],
+                         const uint8_t h[SHA256_LEN], const char **why);
 
 const image_desc_t *image_desc(const uint8_t *slot);
 
