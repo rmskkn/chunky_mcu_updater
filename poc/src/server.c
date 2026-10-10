@@ -52,18 +52,70 @@ static void cache_path(char *out, size_t len, const uint8_t id[16])
     snprintf(out, len, "%s/%s.manifest", opt_cache, hex);
 }
 
-static void report(const link_t *l, const plan_t *p, int full_bytes)
+/* What one written sector and one copy step cost on the wire, from the frame
+ * and message sizes rather than from a measurement, so the full-image baseline
+ * is exact for any run. */
+#define SECTOR_WIRE  ((PAGE_SIZE / WRITE_CHUNK) * (FRAME_OVERHEAD + 5 + WRITE_CHUNK) \
+                      + (FRAME_OVERHEAD + 1 + MD5_LEN)   /* STEP_WRITE_END */ \
+                      + (FRAME_OVERHEAD + 2))            /* STEP_ACK */
+#define COPY_WIRE    ((FRAME_OVERHEAD + (int)sizeof(msg_step_copy_t)) \
+                      + (FRAME_OVERHEAD + 2))
+
+static double link_s(double bytes, double baud) { return bytes * 10.0 / baud; }
+
+static void report(const link_t *l, const plan_t *p)
 {
-    uint64_t wire = l->tx_bytes + l->rx_bytes;
+    double wire = (double)(l->tx_bytes + l->rx_bytes);
+    /* Everything that is not a step is session overhead: manifest, plan
+     * header, closing messages. The full-image baseline pays it too. */
+    double fixed = wire - (double)p->n_write * SECTOR_WIRE
+                        - (double)p->n_copy * COPY_WIRE;
+    double full_wire = fixed + (double)SECTORS_SLOT * SECTOR_WIRE;
+
+    /* Copies program the destination as well, so both count as sectors written. */
+    int sectors = p->n_copy + p->n_write;
+    double fl_min = sectors * f103_sector_ms(0), fl_max = sectors * f103_sector_ms(1);
+    double ffl_min = SECTORS_SLOT * f103_sector_ms(0);
+    double ffl_max = SECTORS_SLOT * f103_sector_ms(1);
+
     printf("server: steps skip=%d copy=%d write=%d\n", p->n_skip, p->n_copy, p->n_write);
-    printf("server: wire tx=%llu rx=%llu total=%llu bytes in %llu frames\n",
+    printf("server: wire tx=%llu rx=%llu total=%.0f bytes in %llu frames\n",
            (unsigned long long)l->tx_bytes, (unsigned long long)l->rx_bytes,
-           (unsigned long long)wire, (unsigned long long)(l->tx_frames + l->rx_frames));
-    printf("STATS skip=%d copy=%d write=%d tx=%llu rx=%llu wire=%llu full=%d pct=%.1f\n",
+           wire, (unsigned long long)(l->tx_frames + l->rx_frames));
+
+    printf("server: data   %.0f B sent vs %.0f B for a full image"
+           "  ->  saved %.0f B (%.1f %%)\n",
+           wire, full_wire, full_wire - wire, 100.0 * (full_wire - wire) / full_wire);
+    printf("server: flash  %d sectors vs %d  ->  %.0f-%.0f ms vs %.0f-%.0f ms"
+           "  ->  saved %.0f-%.0f ms\n",
+           sectors, SECTORS_SLOT, fl_min, fl_max, ffl_min, ffl_max,
+           ffl_min - fl_min, ffl_max - fl_max);
+
+    static const double baud[] = { 9600, 115200 };
+    for (unsigned i = 0; i < sizeof baud / sizeof *baud; i++) {
+        double d = link_s(wire, baud[i]), f = link_s(full_wire, baud[i]);
+        printf("server: %6.0f baud  link %.2f s vs %.2f s   total %.2f-%.2f s vs "
+               "%.2f-%.2f s  ->  saved %.2f-%.2f s\n",
+               baud[i], d, f, d + fl_min / 1000.0, d + fl_max / 1000.0,
+               f + ffl_min / 1000.0, f + ffl_max / 1000.0,
+               (f + ffl_min / 1000.0) - (d + fl_min / 1000.0),
+               (f + ffl_max / 1000.0) - (d + fl_max / 1000.0));
+    }
+
+    printf("STATS skip=%d copy=%d write=%d tx=%llu rx=%llu wire=%.0f full=%.0f pct=%.1f\n",
            p->n_skip, p->n_copy, p->n_write,
            (unsigned long long)l->tx_bytes, (unsigned long long)l->rx_bytes,
-           (unsigned long long)wire, full_bytes,
-           full_bytes ? 100.0 * (double)wire / full_bytes : 0.0);
+           wire, full_wire, 100.0 * wire / full_wire);
+    printf("SAVE wire=%.0f full_wire=%.0f saved_bytes=%.0f saved_pct=%.1f "
+           "sectors=%d full_sectors=%d flash_min_ms=%.0f flash_max_ms=%.0f "
+           "full_flash_min_ms=%.0f full_flash_max_ms=%.0f "
+           "link9600_s=%.2f full_link9600_s=%.2f "
+           "link115200_s=%.2f full_link115200_s=%.2f\n",
+           wire, full_wire, full_wire - wire,
+           100.0 * (full_wire - wire) / full_wire,
+           sectors, SECTORS_SLOT, fl_min, fl_max, ffl_min, ffl_max,
+           link_s(wire, 9600), link_s(full_wire, 9600),
+           link_s(wire, 115200), link_s(full_wire, 115200));
     fflush(stdout);
 }
 
@@ -245,7 +297,7 @@ static void session(int fd)
 
 out:
     printf("server: session wall time %.2f ms\n", now_ms() - t_session);
-    report(&l, &plan, (int)(SLOT_SIZE + (SLOT_SIZE / WRITE_CHUNK) * FRAME_OVERHEAD));
+    report(&l, &plan);
     free(target);
 }
 

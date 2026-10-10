@@ -87,18 +87,41 @@ typedef struct {
     const char *path;
 } flash_t;
 
-/* STM32F103 flash timings from RM0008, used to model device time from the
- * operation counts the host PoC records. */
-#define F103_ERASE_MS      20.0     /* page erase, typical */
-#define F103_PROG_US_HW    52.5     /* half-word program, typical */
+/* STM32F103 flash timings, datasheet DS5319 Table 23 "Flash memory
+ * characteristics", TA = -40 to +105 C:
+ *
+ *   tprog   Word programming time    min 20 us   max 40 us
+ *   tERASE  Page (1kB) erase time    min 20 ms   max 40 ms
+ *   tME     Mass erase time          min 20 ms   max 40 ms
+ *
+ * The Typ column is empty in that table: ST gives only a min and a max, so
+ * every figure below is a range and not a typical. The part programs 16 bits
+ * per operation (PM0075), so "word" here is one half-word and a 1 KB page is
+ * 512 programming operations.
+ *
+ * Endurance is 1 kcycle min (DS5319 Rev 1; later revisions state 10 kcycles),
+ * which is why anything rewritten per boot should clear bits instead of
+ * erasing a page. */
+#define F103_ERASE_MS_MIN  20.0
+#define F103_ERASE_MS_MAX  40.0
+#define F103_PROG_US_MIN   20.0
+#define F103_PROG_US_MAX   40.0
 #define F103_MHZ           72.0
 #define F103_MD5_CYC_B     10.0
 #define F103_SHA256_CYC_B  25.0
 
-static inline double f103_flash_ms(long erases, size_t prog_bytes)
+/* worst = 0 uses the datasheet minimums, worst = 1 the maximums. */
+static inline double f103_flash_ms(long erases, size_t prog_bytes, int worst)
 {
-    return (double)erases * F103_ERASE_MS +
-           (double)(prog_bytes / 2) * F103_PROG_US_HW / 1000.0;
+    double e = worst ? F103_ERASE_MS_MAX : F103_ERASE_MS_MIN;
+    double p = worst ? F103_PROG_US_MAX  : F103_PROG_US_MIN;
+    return (double)erases * e + (double)(prog_bytes / 2) * p / 1000.0;
+}
+
+/* One sector: erase the page, then program every half-word of it. */
+static inline double f103_sector_ms(int worst)
+{
+    return f103_flash_ms(1, PAGE_SIZE, worst);
 }
 
 int  flash_create(const char *path);

@@ -1055,34 +1055,70 @@ roughly what it looks like: manifest hashing ~15 ms, manifest signing ~250 ms,
 `image_sha256` ~18 ms, release-signature verify ~300 ms. Under 0.6 s, and
 invisible next to a transfer that takes ~10 s at 9600 baud.
 
-Writing the flash is the part that is easy to forget. At RM0008 typicals for
-this part — 20 ms per page erase, 52.5 µs per half-word program — one 1 KB
-sector costs **46.9 ms** to erase and program, and a full 52 KB slot costs
-**2.44 s**. The PoC counts the operations and models the device time:
+Writing the flash is the part that is easy to forget. Datasheet DS5319
+Table 23, "Flash memory characteristics", gives for this part:
+
+| Symbol | Parameter | Min | Max | Unit |
+|---|---|---|---|---|
+| `tprog` | Word programming time | 20 | 40 | µs |
+| `tERASE` | Page (1 kB) erase time | 20 | 40 | ms |
+| `tME` | Mass erase time | 20 | 40 | ms |
+
+The **Typ column of that table is empty**: ST publishes a minimum and a
+maximum and no typical, so every device-time figure here is a range, and a
+schedule should be built on the maximum. The part programs 16 bits per
+operation, so one 1 KB page is one erase plus 512 programming operations:
+
+* one sector: **30.2 ms best case, 60.5 ms worst case**
+* a full 52 KB slot: **1.57 s to 3.14 s**
+
+Endurance is the other half of the same budget: 1 kcycle minimum in DS5319
+Rev 1, 10 kcycles in later revisions. Anything rewritten on every boot must
+therefore clear bits rather than erase a page, which is what the journal
+encoding and the attempt-token log in Section 2 are for.
+
+Measured from the PoC, which counts the operations and models the device time:
 
 | Attempt | Device time | of which flash |
 |---|---|---|
-| 2-sector update, whole session | 468 ms | 202 ms |
-| 5-sector update, whole session | 610 ms | 343 ms |
-| 12-sector update, whole session | 940 ms | 672 ms |
-| Bootloader apply plus verify | 428 ms | 108 ms |
-| Each further trial boot | 108 ms | 108 ms |
-| Revert after the last trial | 255 ms | 237 ms |
+| 2-sector update, whole session | 417–569 ms | 151–303 ms |
+| 5-sector update, whole session | 509–751 ms | 242–484 ms |
+| 12-sector update, whole session | 723–1177 ms | 454–908 ms |
+| Bootloader apply plus verify | 410–504 ms | 91–182 ms |
+| Each further trial boot | 91–182 ms | 91–182 ms |
+| Revert after the last trial | 220–422 ms | 202–403 ms |
 | Ordinary boot, nothing pending | 18 ms | 0 ms |
 
-Two consequences. On a slow link flash time still disappears into the transfer,
-so the delta saving is what matters. On a fast link — CAN FD, TCP, a local
-gateway — **flash programming becomes the floor**, and it is proportional to
-sectors written, which is one more reason the planner should never send a sector
-the device already has.
+### Savings, both currencies
 
-The third row is worth its own note: a trial boot costs 108 ms and does no
-useful work, because every state change rewrites a 4-page meta bank and a page
-erase is 20 ms. That is the measurement behind the attempt-token log in
-Section 2 — clearing one bit per attempt instead of rewriting the bank. The
-PoC skips that optimisation and pays the 108 ms, which is how the cost became
-visible. Merging the two bank writes the apply path originally did saved
-another 108 ms per update.
+Measured end to end for a 5-sector change in steady state, against the same
+protocol sending every sector:
+
+| | Delta | Full image | Saved |
+|---|---|---|---|
+| Wire | 7 943 B | 60 724 B | **52 781 B, 86.9 %** |
+| Sectors written | 5 | 52 | 47 |
+| Flash time | 151–302 ms | 1 572–3 145 ms | **1.4–2.8 s** |
+| Link at 9600 baud | 8.3 s | 63.2 s | 54.9 s |
+| Link at 115200 baud | 0.7 s | 5.3 s | 4.6 s |
+| Total at 9600 baud | 8.4–8.6 s | 64.8–66.4 s | **56.2–57.8 s** |
+| Total at 115200 baud | 0.8–1.0 s | 6.8–8.4 s | **6.0–7.4 s** |
+
+**Copies save bytes but not flash time, and that changes where rule 2 is
+worth having.** A `STEP_COPY` still erases and programs the destination page,
+so it costs the device exactly what a `STEP_WRITE` costs: the only thing it
+saves is airtime. Measured on a first update into an erased slot, rule 2 takes
+the wire cost from 87.1 % to 15.8 % of a full image while the flash cost stays
+at 1.36–2.72 s either way. Two consequences:
+
+* On a slow or metered link, rule 2 is close to free money.
+* On a fast link, rule 2 buys almost nothing, because flash programming is the
+  floor. What matters there is rule 1 — the sector that is **already correct**
+  and so is neither sent nor written.
+
+Rule 1 is the only rule that saves both currencies, and it is also the rule
+that makes resume cheap, which is the strongest argument for diffing against
+the destination slot rather than against the running image.
 
 ### 17.1 Manifest elision
 

@@ -27,24 +27,29 @@ static int opt_fail_after = -1;
 static size_t md5_bytes, sha_bytes;
 static double ecdsa_ms;
 
-static double model_ms(const flash_t *f)
+static double model_ms(const flash_t *f, int worst)
 {
     double cyc_per_ms = F103_MHZ * 1000.0;
     return (double)md5_bytes * F103_MD5_CYC_B / cyc_per_ms +
            (double)sha_bytes * F103_SHA256_CYC_B / cyc_per_ms +
-           f103_flash_ms(f->n_erase, f->prog_bytes) + ecdsa_ms;
+           f103_flash_ms(f->n_erase, f->prog_bytes, worst) + ecdsa_ms;
 }
 
 static void time_report(const char *phase, double host_ms, const flash_t *f)
 {
-    printf("time: %-10s host %8.2f ms   F103 model %8.1f ms"
-           "  (flash %.1f ms: %ld erase, %zu B prog)\n",
-           phase, host_ms, model_ms(f),
-           f103_flash_ms(f->n_erase, f->prog_bytes), f->n_erase, f->prog_bytes);
-    printf("TIME phase=%s host_ms=%.3f model_ms=%.1f flash_ms=%.1f erases=%ld "
+    printf("time: %-10s host %8.2f ms   F103 %8.1f - %.1f ms"
+           "  (flash %.1f - %.1f ms: %ld erase, %zu B prog)\n",
+           phase, host_ms, model_ms(f, 0), model_ms(f, 1),
+           f103_flash_ms(f->n_erase, f->prog_bytes, 0),
+           f103_flash_ms(f->n_erase, f->prog_bytes, 1),
+           f->n_erase, f->prog_bytes);
+    printf("TIME phase=%s host_ms=%.3f model_min_ms=%.1f model_max_ms=%.1f "
+           "flash_min_ms=%.1f flash_max_ms=%.1f erases=%ld "
            "prog_bytes=%zu md5_bytes=%zu sha_bytes=%zu ecdsa_ms=%.0f\n",
-           phase, host_ms, model_ms(f),
-           f103_flash_ms(f->n_erase, f->prog_bytes), f->n_erase, f->prog_bytes,
+           phase, host_ms, model_ms(f, 0), model_ms(f, 1),
+           f103_flash_ms(f->n_erase, f->prog_bytes, 0),
+           f103_flash_ms(f->n_erase, f->prog_bytes, 1),
+           f->n_erase, f->prog_bytes,
            md5_bytes, sha_bytes, ecdsa_ms);
     fflush(stdout);
 }
@@ -269,8 +274,9 @@ done:
            MANIFEST_ENTRIES);
     printf("time: sign       host %8.2f ms   F103 model %8.1f ms  (ECDSA P-256, budgeted)\n",
            t_auth, ECDSA_SIGN_MS);
-    printf("time: stage      host %8.2f ms   F103 model %8.1f ms  (receive, verify, program)\n",
-           t_stage, f103_flash_ms(f.n_erase, f.prog_bytes));
+    printf("time: stage      host %8.2f ms   F103 %8.1f - %.1f ms  (receive, verify, program)\n",
+           t_stage, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
+           f103_flash_ms(f.n_erase, f.prog_bytes, 1));
     printf("time: persist    host %8.2f ms\n", t_persist);
     time_report("session", now_ms() - t_start, &f);
     close(fd);
@@ -372,10 +378,11 @@ static int cmd_boot(void)
         printf("boot: jumping to slot %u (run `confirm` if the self-test passes)\n",
                m.pending_slot);
         if (t_apply > 0)
-            printf("time: apply      host %8.2f ms   F103 model %8.1f ms  (copies)\n",
-                   t_apply, f103_flash_ms(f.n_erase, f.prog_bytes));
+            printf("time: apply      host %8.2f ms   F103 %8.1f - %.1f ms  (copies)\n",
+                   t_apply, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
+                   f103_flash_ms(f.n_erase, f.prog_bytes, 1));
         if (t_verify > 0)
-            printf("time: verify     host %8.2f ms   F103 model %8.1f ms  "
+            printf("time: verify     host %8.2f ms   F103 %8.1f ms  "
                    "(image_sha256 + signature)\n", t_verify,
                    (double)(SLOT_SIZE - DESC_LEN) * F103_SHA256_CYC_B / (F103_MHZ * 1000.0)
                    + ECDSA_VERIFY_MS);
