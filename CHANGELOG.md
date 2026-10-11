@@ -5,6 +5,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `embassy_torn`: minimal NOR flash model with torn erases (word, bit and ECC tears) and a test suite that runs
+  stock embassy-boot 0.7.0 and git master through update, swap, trial boot, revert and confirm with power cut
+  during every state erase; shows the lost-images bug and that zeroing the magic first fixes it. (BOOT-5)
+
 ## [0.2.0] - 2026-10-11
 
 ### Added

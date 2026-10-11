@@ -167,8 +167,13 @@ Flash saved by leaving the verifier out, per family: to be measured (SEC-8).
 - **embassy-boot erases its state page while the page still says "swap".** If that erase is cut by power loss
   so that the magic survives and the progress words do not, the next boot runs swap steps again over partitions
   that are already swapped, and both images are lost. Found by the G0 sweep. `chunky_swap::Guarded` writes zeros
-  over the magic before every state erase, so a torn erase reads as "boot". Worth reporting upstream.
-- **embassy-boot writes its "progress invalid" word a second time on some paths.** Zeros over zeros are
+  over the magic before every state erase, so a torn erase reads as "boot". Reproduced stand-alone on stock
+  embassy-boot 0.7.0 and git master (BOOT-5, `embassy_torn/REPORT.md`): about a quarter of all word-granular tears
+  of the state erase end with a mixed ACTIVE, on the revert path and on `mark_booted` alike. Worth reporting
+  upstream.
+- **embassy-boot writes its "progress invalid" word a second time on some paths.** Confirmed in the BOOT-5
+  model: a cut after the invalidating write and before the erase lands makes the next boot's revert write it again
+  (`prepare_boot` does not check first; `set_magic` does). Zeros over zeros are
   harmless; on H7 zeros over a torn word may leave it faulting. All state reads go through `Masked`, so it reads
   as zero either way. To be confirmed on hardware (ECC-2).
 - **A reverted update can read as "confirmed" rather than "reverted"** when power is lost at the very end of

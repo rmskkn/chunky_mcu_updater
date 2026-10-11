@@ -79,6 +79,9 @@ Design: [SECURITY.md](SECURITY.md).
 - ✅ **BOOT-1 swap-backend** — embassy-boot, unmodified: staged image verified before the swap, ACTIVE verified on
   every boot, one trial boot, revert, floor raised at confirm; ECC faults masked; state erases guarded. Driven end
   to end in the simulator.
+- ✅ **BOOT-5 embassy-torn-erase-repro** — stand-alone reproduction of the embassy-boot torn state-erase bug
+  (`embassy_torn/`, report in `embassy_torn/REPORT.md`): stock 0.7.0 and git master both lose the images, the
+  zero-the-magic-first guard survives every tear. Open: send it upstream.
 - 📋 **BOOT-2 bank-swap-backend** — hardware bank swap (H7 and other dual-bank parts), simulator first.
 - 📋 **BOOT-3 rp-bootrom-backend** — RP2350/RP2354 boot ROM A/B with try-before-you-buy.
 - 💡 **BOOT-4 rot-fallback** — ACTIVE that rots after it was confirmed falls back to the previous image instead of
@@ -108,7 +111,8 @@ Design: [SECURITY.md](SECURITY.md).
 ## Known gaps and findings
 
 - embassy-boot's state-page erase can leave "swap" standing after a power cut (found by the G0 sweep, guarded in
-  `chunky_swap::Guarded`); to report upstream. See SECURITY.md "Findings so far".
+  `chunky_swap::Guarded`); reproduced on stock 0.7.0 and master with a minimal model, report ready (BOOT-5).
+  Both `prepare_boot`'s revert and `set_magic` (mark_booted) erase that way. See SECURITY.md "Findings so far".
 - After a confirmed update DFU holds the old image shifted by one page, so the next update erases and rewrites
   every DFU block even when little changed: no airtime (COPY), but one erase cycle per block per update, on top of
   the swap's two. Inherent to the swap backend; the bank and boot ROM backends do not have it.

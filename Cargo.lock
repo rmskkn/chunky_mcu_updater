@@ -142,7 +142,7 @@ name = "chunky_swap"
 version = "0.2.0"
 dependencies = [
  "chunky",
- "embassy-boot",
+ "embassy-boot 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-storage",
 ]
 
@@ -268,6 +268,7 @@ dependencies = [
  "ed25519",
  "serde",
  "sha2",
+ "signature",
  "subtle",
  "zeroize",
 ]
@@ -280,8 +281,23 @@ checksum = "73bfc955c9238df2ce9fecc6f18a64b13ecaa41a3cd42d940a09f304765d10db"
 dependencies = [
  "digest",
  "document-features",
- "embassy-embedded-hal",
- "embassy-sync",
+ "embassy-embedded-hal 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-sync 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-storage",
+ "embedded-storage-async",
+ "signature",
+]
+
+[[package]]
+name = "embassy-boot"
+version = "0.7.0"
+source = "git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb#34191ee2badce9d4ba63ac4545dc1d8abd1495eb"
+dependencies = [
+ "digest",
+ "document-features",
+ "ed25519-dalek",
+ "embassy-embedded-hal 0.6.0 (git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb)",
+ "embassy-sync 0.8.0 (git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb)",
  "embedded-storage",
  "embedded-storage-async",
  "signature",
@@ -293,9 +309,24 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0641612053b2f34fc250bb63f6630ae75de46e02ade7f457268447081d709ce"
 dependencies = [
- "embassy-futures",
+ "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "embassy-hal-internal",
- "embassy-sync",
+ "embassy-sync 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-storage",
+ "embedded-storage-async",
+ "nb 1.1.0",
+]
+
+[[package]]
+name = "embassy-embedded-hal"
+version = "0.6.0"
+source = "git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb#34191ee2badce9d4ba63ac4545dc1d8abd1495eb"
+dependencies = [
+ "embassy-futures 0.1.2 (git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb)",
+ "embassy-sync 0.8.0 (git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb)",
  "embedded-hal 0.2.7",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -309,6 +340,11 @@ name = "embassy-futures"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
+
+[[package]]
+name = "embassy-futures"
+version = "0.1.2"
+source = "git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb#34191ee2badce9d4ba63ac4545dc1d8abd1495eb"
 
 [[package]]
 name = "embassy-hal-internal"
@@ -331,6 +367,28 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "heapless",
+]
+
+[[package]]
+name = "embassy-sync"
+version = "0.8.0"
+source = "git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb#34191ee2badce9d4ba63ac4545dc1d8abd1495eb"
+dependencies = [
+ "cfg-if",
+ "critical-section",
+ "embedded-io-async",
+ "futures-core",
+ "futures-sink",
+ "heapless",
+]
+
+[[package]]
+name = "embassy_torn"
+version = "0.2.0"
+dependencies = [
+ "embassy-boot 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-boot 0.7.0 (git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb)",
+ "embedded-storage",
 ]
 
 [[package]]
@@ -752,6 +810,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
+ "digest",
  "rand_core 0.6.4",
 ]
 
