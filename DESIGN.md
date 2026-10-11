@@ -1190,6 +1190,38 @@ The digest is signed and carries the nonce for the same reason the manifest
 does: it is a statement about device state, and the server must not plan against
 an unauthenticated or replayed one.
 
+### 17.2 Sector blob compression candidates
+
+Survey of general-purpose compressors for the sector payload itself (not the
+manifest), measured against real sector content and a Cortex-M3 `-Os` decoder
+build:
+
+| Algorithm | Real-sector ratio | Uniform-sector size | Decoder code (M3, -Os) | Extra RAM |
+|---|---|---|---|---|
+| zlib-9 (ceiling, not embeddable) | −21.6% | 17 B | n/a | n/a |
+| brotli-q11 (ceiling) | −23.3% | 11 B | n/a (~60-100 KB) | n/a |
+| tinf (raw deflate, zlib-compatible) | ≈−21.6% | 17 B | 1294 B | window buf, bound to 1 KB |
+| LZO-1x | −18.2% | 12 B | not measured (fetch failed), commonly ~1-2 KB; GPL | small window |
+| heatshrink | −17.4% | 104-106 B | 708 B | window buf, 256 B-1 KB, choosable |
+| LZ4 | −14.9% | 14 B | 604 B | ~0 — decodes straight into output, no window struct |
+| FastLZ | −13.0% | 15 B | 384 B | ~0, same in-place decode |
+| BriefLZ | −11.6% | 6 B | 236 B | ~0, same in-place decode |
+
+Against the 15 KB bootloader budget, smallest decoder and weakest ratio go
+together: BriefLZ (236 B / 11.6%) and FastLZ (384 B / 13.0%) are tiny enough
+that adding either barely dents the budget. LZ4 (604 B / 14.9%) gets a real
+ratio for barely more code, and is unique among these in having zero RAM
+overhead — no window state at all. heatshrink (708 B / 17.4%) is the best
+ratio-for-code tradeoff if a small window buffer is acceptable. tinf stands
+out structurally, not size-wise: it is real deflate, so a standard
+`zlib.compress()` on the server produces bytes this bootloader can decode
+with no custom encoder — but it costs roughly 2x the code of the LZ4-class
+decoders for the same ratio class.
+
+No compressor is wired into the protocol yet; this table is a decision input
+for whether Section 6's `WRITE_CHUNK` payload should ever carry compressed
+bytes, not a committed design.
+
 ---
 
 ## 18. Single-partition variant
