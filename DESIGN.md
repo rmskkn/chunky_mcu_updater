@@ -116,15 +116,24 @@ The device hashes **both** slots and reports all of it, as requested:
 ```
 MANIFEST                                 // fragmented over several frames
   sector_size   : u16      (1024)
-  slot_count    : u8       (2)
-  sectors_slot  : u8       (52)
-  active_slot   : u8
-  entries[]     : { slot:u8, index:u8, md5:u8[16] }     // 104 entries
+  sectors       : u16      (104)
+  hashes[]      : u8[8]    // one per sector, order implicit
 
 MANIFEST_END                             // one frame, closes the manifest
   manifest_sha256 : u8[32] // over the reassembled MANIFEST body above
   signature       : u8[64] // device ECDSA P-256 over the struct below
 ```
+
+Two things are deliberately absent from an entry. There is **no index**: the
+manifest always describes every sector in ascending order, so sector `i` is at
+`hashes[i]`, and a manifest that repeats or omits a sector cannot be expressed
+-- which deletes that whole class of malformed input rather than validating
+against it. And the hash is **MD5 truncated to 8 bytes**, because a per-sector
+hash answers one question, "does this sector already hold the bytes the target
+needs", and is not a trust boundary: `image_sha256` and the release signature
+gate the result, so a collision costs a retried update, not a corrupt device.
+At 64 bits a false match runs at about 3e-16 for 104 sectors and 3e-14 for
+1000. Those two choices take the body from 18 bytes per sector to 8.
 
 The body carries **no nonce**. It is a pure function of what is in flash, so
 `manifest_sha256` is stable across sessions and the server can cache it, which
@@ -141,10 +150,22 @@ typedef struct {                /* 72 bytes, hashed then signed            */
 } ManifestAuth;
 ```
 
-104 entries × 18 B = 1872 B of body, fragmented across protocol frames, plus a
+104 sectors × 8 B = 832 B of body, fragmented across protocol frames, plus a
 96-byte `MANIFEST_END`. One hash and one signature for the whole manifest —
 never one per fragment, which would let an attacker splice fragments from two
 sessions.
+
+**Compressing the body is not worth it.** Measured on the PoC, `zstd -19` takes
+the old 1876-byte form to 928 B, which looks like a 50 % win and is not: it
+comes entirely from a partially used partition, where 59 of 104 sectors were an
+erased page and hashed identically. On a full partition the same experiment
+*grows* — 1664 B of distinct hashes becomes 1678 B — because hash output is
+uniformly random and has nothing to compress. Encoding beat compression here:
+implicit order and a truncated hash gave 55 % with no decompressor on the
+device, and Section 17.1's digest gives 95 % more when the server's cache is
+warm. A bitmap marking erased sectors would take the measured case to 373 B,
+below anything a general compressor achieved, and is held in reserve for a link
+slow enough to justify it.
 
 Hashing 104 KB with software MD5 at 72 MHz costs roughly 1.1 M cycles — about
 15 ms. The manifest is therefore computed fresh at the start of every session
@@ -391,9 +412,11 @@ idempotent, so a power cut during unroll just means unroll runs again.
 
 ## 10. Security
 
-MD5 is used **only** for per-sector equality and transport integrity, exactly as
-specified. It is not a trust boundary: a collision would let an attacker who
-already controls the server substitute a sector.
+MD5, truncated to 8 bytes, is used **only** for per-sector equality and
+transport integrity. It is not a trust boundary: a collision would let an
+attacker who already controls the server substitute a sector, and the
+truncation does not change that — what gates the result is the whole-image
+hash and the signature below.
 
 Authenticity comes from one signature per image, checked by the bootloader
 before the slot is ever made bootable:
@@ -519,15 +542,18 @@ only and rejects any manifest whose nonce does not match the one it issued.
    `domain` field exactly `"CBMAN"`-padded — domain separation prevents a
    signature made for one message type from being replayed as another.
 4. `nonce` equals the nonce issued in this session.
-5. Structure: `sector_size` and slot geometry match what is registered for this
-   `device_id`'s hardware revision; exactly `slot_count × sectors_slot` entries;
-   every `(slot, index)` present exactly once; no index out of range.
+5. Structure: `sector_size` and the sector count match what is registered for
+   this `device_id`'s hardware revision. With the order implicit there is
+   nothing else left to check: a duplicated or missing sector is
+   unrepresentable.
 6. `active_slot` is a valid slot and is consistent with the `HELLO` report.
 
-Check 5 is not ceremony. A manifest with a duplicated or missing `(slot, index)`
-would make the planner emit a plan that does not cover the destination slot, and
-the device would then stage an image that fails `image_sha256` — a wasted
-transfer that is far cheaper to reject up front.
+Check 5 used to carry more weight: when entries carried their own index, a
+manifest with a duplicated or missing one would make the planner emit a plan
+that does not cover the partition, and the device would stage an image that
+fails `image_sha256` — a wasted transfer. Making the order implicit removed the
+failure instead of validating for it, which is the better trade whenever it is
+available.
 
 **Why sign at all when the link is TLS.** TLS authenticates the *connection*;
 the signature authenticates the *statement*. They fail differently, and on this

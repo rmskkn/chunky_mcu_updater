@@ -10,16 +10,16 @@ void plan_build(const manifest_t *dev, const uint8_t target[SLOT_SIZE],
     memset(p, 0, sizeof *p);
 
     for (int i = 0; i < SECTORS_SLOT; i++) {
-        uint8_t h[MD5_LEN];
-        md5(target + (size_t)i * PAGE_SIZE, PAGE_SIZE, h);
+        uint8_t h[SECTOR_HASH_LEN];
+        sector_hash(target + (size_t)i * PAGE_SIZE, h);
 
         const uint8_t *at = manifest_hash_at(dev, i);
         step_t s;
         memset(&s, 0, sizeof s);
         s.dst = (sector_idx_t)i;
-        memcpy(s.md5, h, MD5_LEN);
+        memcpy(s.hash, h, SECTOR_HASH_LEN);
 
-        if (at && !memcmp(at, h, MD5_LEN)) {
+        if (at && !memcmp(at, h, SECTOR_HASH_LEN)) {
             p->n_skip++;                               /* rule 1 */
             continue;
         }

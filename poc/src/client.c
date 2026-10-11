@@ -225,7 +225,7 @@ static int cmd_session(void)
              * (DESIGN.md section 7 step 2). */
             np.op[c.dst]        = OP_COPY;
             np.src_index[c.dst] = c.src_index;
-            memcpy(np.target_md5[c.dst], c.md5, MD5_LEN);
+            memcpy(np.target_hash[c.dst], c.hash, SECTOR_HASH_LEN);
             pending_copies++;
             msg_step_ack_t a = { c.dst, 0 };
             frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
@@ -241,24 +241,24 @@ static int cmd_session(void)
         } else if (t == MSG_STEP_WRITE_END) {
             msg_step_write_end_t we;
             memcpy(&we, pay, sizeof we);
-            uint8_t got[MD5_LEN];
-            md5(sect, PAGE_SIZE, got);
-            if (memcmp(got, we.md5, MD5_LEN)) {
+            uint8_t got[SECTOR_HASH_LEN];
+            sector_hash(sect, got);
+            if (memcmp(got, we.hash, SECTOR_HASH_LEN)) {
                 msg_step_ack_t nak = { we.dst, NAK_MD5_MISMATCH };
                 frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
                 printf("device: sector %u md5 mismatch\n", we.dst);
                 continue;
             }
             write_sector(&f, we.dst, sect);
-            flash_sector_md5(&f, we.dst, got);
-            if (memcmp(got, we.md5, MD5_LEN)) {
+            flash_sector_hash(&f, we.dst, got);
+            if (memcmp(got, we.hash, SECTOR_HASH_LEN)) {
                 msg_step_ack_t nak = { we.dst, NAK_FLASH_FAIL };
                 frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
                 continue;
             }
             md5_bytes += 2 * PAGE_SIZE;   /* hash of the buffer and of the page */
             np.op[we.dst] = OP_WRITE;
-            memcpy(np.target_md5[we.dst], we.md5, MD5_LEN);
+            memcpy(np.target_hash[we.dst], we.hash, SECTOR_HASH_LEN);
             done[we.dst] = 1;
             msg_step_ack_t a = { we.dst, 0 };
             frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
@@ -335,22 +335,22 @@ static int cmd_boot(void)
         for (int i = 0; i < SECTORS_SLOT; i++) {
             if (m.op[i] == OP_NONE || journal_get(&f, i) == JRN_DONE) continue;
 
-            uint8_t got[MD5_LEN];
+            uint8_t got[SECTOR_HASH_LEN];
             if (m.op[i] == OP_COPY) {
                 /* Flash to flash inside the partition, through RAM. */
                 uint8_t tmp[PAGE_SIZE];
                 memcpy(tmp, flash_at(&f, APP_BASE +
                        (size_t)m.src_index[i] * PAGE_SIZE), PAGE_SIZE);
-                md5(tmp, PAGE_SIZE, got);
-                if (memcmp(got, m.target_md5[i], MD5_LEN)) {
+                sector_hash(tmp, got);
+                if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
                     printf("boot: copy source for sector %d no longer matches\n", i);
                     m.plan_state = PLAN_BAD;
                     break;
                 }
                 write_sector(&f, i, tmp);
             }
-            flash_sector_md5(&f, i, got);
-            if (memcmp(got, m.target_md5[i], MD5_LEN)) {
+            flash_sector_hash(&f, i, got);
+            if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
                 printf("boot: sector %d does not match the plan\n", i);
                 m.plan_state = PLAN_BAD;
                 break;

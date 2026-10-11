@@ -36,6 +36,17 @@
  * the plan the bootloader reads back. */
 typedef uint16_t sector_idx_t;
 
+/* Per-sector hashes are MD5 truncated to 8 bytes. They answer one question --
+ * does this sector already hold the bytes the target needs -- and they are not
+ * a trust boundary: image_sha256 and the release signature gate the result, so
+ * a collision costs a retried update rather than a corrupt device. At 64 bits
+ * the chance of a false match is about 3e-16 for 104 sectors and 3e-14 for
+ * 1000. Halving the hash halves the manifest and the stored plan, which is
+ * where the bytes actually are. */
+#define SECTOR_HASH_LEN 8
+
+void sector_hash(const void *page, uint8_t out[SECTOR_HASH_LEN]);
+
 /* Three things grow with the number of sectors, and only one of them is the
  * index width. The asserts below turn each cliff into a build error rather
  * than silent corruption on a bigger part. */
@@ -78,7 +89,7 @@ typedef struct {
     uint16_t step_count;
     uint8_t  op[SECTORS_SLOT];
     sector_idx_t src_index[SECTORS_SLOT];
-    uint8_t  target_md5[SECTORS_SLOT][MD5_LEN];
+    uint8_t  target_hash[SECTORS_SLOT][SECTOR_HASH_LEN];
     uint32_t last_result;
 } meta_t;
 
@@ -157,7 +168,7 @@ void flash_erase_page(flash_t *f, int page);
 void flash_program(flash_t *f, size_t off, const void *buf, size_t len);
 const uint8_t *flash_at(flash_t *f, size_t off);
 
-void flash_sector_md5(flash_t *f, int index, uint8_t out[MD5_LEN]);
+void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN]);
 
 /* Meta bank ping-pong. Returns 0 if a valid bank was found. */
 int  meta_load(flash_t *f, meta_t *m);
