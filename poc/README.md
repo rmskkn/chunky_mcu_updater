@@ -55,8 +55,8 @@ flash and is the only thing that writes it. Nothing else is shared.
   cb-server --image release.bin                     cb-client --flash flash.bin
   +-----------------------------------+             +-----------------------------------+
   | release.bin   raw firmware        |             | manifest.c  md5 of all 104        |
-  |                                   |             |             sectors of the        |
-  |                                   |             |             partition             |
+  |                                   |             |             sectors, 8 B each     |
+  |                                   |             |             order implicit        |
   | image.c   wrap into an image:     |             | client.c    receive blobs, write  |
   |           descriptor at 0x200,    |             |             them straight into    |
   |           image_sha256, MAC       |             |             them in place         |
@@ -114,7 +114,7 @@ the progress record, so the next request re-diffs and sends only the gap.
     |   md5 every sector of the partition (104 x 1 KB)            |
     |-- MANIFEST_DIGEST  sha256 of the body, MAC over the nonce ->|
     |<-- MANIFEST_NEEDED  only on a cache miss -------------------|
-    |-- MANIFEST  1876 B of body, fragmented -------------------->|
+    |-- MANIFEST  836 B of body, fragmented --------------------->|
     |-- MANIFEST_END  digest + MAC ------------------------------>|
     |                              verify MAC, nonce, structure   |
     |                      build the target, diff it per sector   |
@@ -145,16 +145,15 @@ bootable, rather than plausibly bootable and wrong.
 
 ```
 server: HELLO running_version=1 last_result=0
-server: manifest received and verified, 1876 B of body
-server: plan v2, 5 steps (99 skipped)
-sectors: 5 of 104 differ; 5 sent, 0 copied on the device, 99 already right
-  sent    0,8,19,41-42
+server: manifest received and verified, 836 B of body
+server: plan v2, 6 steps (98 skipped)
+sectors: 6 of 104 differ; 6 sent, 0 copied on the device, 98 already right
+  sent    0,3,5,7,16,34
   copied  -
 
 case                       skip copy write     wire of full   saved B   saved      flash ms
 -------------------------- ---- ---- ----- -------- ------- --------- ------- -------------
-v2                           99    0     5     7984    6.7%    111870   93.3%       151-302
-v3                           89    0    15    19284   16.1%    100570   83.9%       454-907
+v2                           98    0     6     7992    6.8%    109956   93.2%       181-363
 ```
 
 `wire` is every byte of the session, framing included. `of full` compares it
@@ -165,6 +164,14 @@ program 20–40 µs, with an empty Typ column, so one 1 KB sector is 30.2–60.5
 and the whole 104 KB partition is 3.15–6.29 s.
 
 Two things that table shows up:
+
+**The manifest is hashes and nothing else.** One 8-byte hash per sector, order
+implicit, so 104 sectors cost 836 B. Compressing it is not worth it: measured
+here, `zstd -19` halves the older 18-byte-per-entry form, but only because 59
+of 104 sectors are an erased page and hash alike; on a full partition the same
+test *grows* the file, since hash output has no structure to exploit. Encoding
+beat compression, and the digest in `DESIGN.md` 17.1 beats both when the
+server's cache is warm.
 
 **Rule 2 barely fires with one partition.** A copy needs the bytes to already
 exist somewhere in the flash the manifest covers, and with a single partition
@@ -243,3 +250,44 @@ Writing it turned up three mistakes in `DESIGN.md`, all fixed there:
 
 It also replaced two invented flash timings with the datasheet's, which changed
 the conclusion about what delta saves: see `DESIGN.md` section 17.
+
+## Manifest encoding, before and after
+
+The manifest started as one entry per sector carrying its own index and a full
+MD5. Both fields turned out to be payable.
+
+| | Before | After |
+|---|---|---|
+| Entry | `{index:u16, md5:u8[16]}` | `hash:u8[8]` |
+| Entry size | 18 B | **8 B** |
+| Order | explicit, in the entry | implicit: sector `i` is `hashes[i]` |
+| Body, 104 sectors | 1876 B | **836 B** |
+| Body, 1000 sectors (1 MB part) | 18 008 B | **8 004 B** |
+| Stored plan, `meta_t` | 2068 B | **1236 B** |
+| One request on the wire | 11 396 B | **7 992 B** |
+| Repeated or missing sector | a case to validate | unrepresentable |
+| False "already correct" | none | ~3e-16 at 104 sectors, ~3e-14 at 1000 |
+| Compressor on the device | — | still none |
+
+What the two changes cost, stated honestly: nothing for the implicit order, and
+a 64-bit equality test for the truncation. A collision there would make the
+planner skip a sector that really did differ, and the staged image would then
+fail `image_sha256` — so the failure mode is a retried update, not a corrupt
+device. `DESIGN.md` section 10 is the full argument.
+
+For comparison, what a general compressor achieves on the same data:
+
+| Form | Raw | gzip -9 | xz -9 | zstd -19 |
+|---|---|---|---|---|
+| Old entries, partition 57 % erased | 1876 | 1039 | 1000 | 928 |
+| Hashes only, 16 B, same device | 1664 | 810 | 840 | 759 |
+| Hashes only, 8 B, same device | 832 | 418 | 464 | 391 |
+| 16 B hashes, all distinct (full partition) | 1664 | **1695** | — | **1678** |
+| 8 B hashes, all distinct (full partition) | 832 | **862** | — | **846** |
+
+The last two rows are the point: compression of a full manifest is negative,
+because hash output is uniformly random. Every apparent win above comes from a
+partially used partition hashing many identical erased pages — a property of
+this device today, not of the format. Encoding got 55 % unconditionally;
+compression got 50 % only while the partition was half empty, and would have
+needed a decompressor in a 15 KB bootloader to do it.
