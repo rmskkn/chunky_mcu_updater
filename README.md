@@ -1,74 +1,95 @@
 # chunky_mcu_updater
 
-Remote firmware updater for small microcontrollers that transfers **only the
-flash sectors that actually changed**, and that can always get the device back
-to the firmware it was running before the update started.
+Remote firmware updater for small microcontrollers that transfers **only the flash chunks that actually
+changed**, and that can always get the device back to the firmware it was running before the update started.
 
-Reference platform: **STM32F103CB** — 128 KB flash, 20 KB RAM, 1 KB flash page,
-72 MHz Cortex-M3.
+Fork of Roman Skakun's [chunky_mcu_updater](https://github.com/rmskkn/chunky_mcu_updater). His design is in
+[DESIGN.md](DESIGN.md), unchanged. This fork builds it in Rust on top of
+[embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot), generic across STM32F1, G0, H7 and
+RP2350.
 
-> **Status: design only.** No code yet. [`DESIGN.md`](DESIGN.md) is the current
-> specification and is the thing to read, review, and argue with.
+> **Status: first prototype, host only.** The delta layer, the embassy-boot swap backend and the planner run in a
+> flash simulator and pass power-cut sweeps on every family model. No hardware and no transport yet.
+> [FEATURES.md](FEATURES.md) has the state of every piece.
 
 ## Purpose
 
-Updating firmware over a slow or expensive link (RS-485, LoRa, NB-IoT, a
-metered modem) is dominated by how many bytes you send. Most firmware releases
-change a small fraction of the image, so sending the whole image every time is
-mostly waste. Updating a device you cannot physically reach also means a failed
-update has to be survivable — a bricked device at the end of a field cable is a
-truck roll.
+Updating firmware over a slow or expensive link (RS-485, LoRa, NB-IoT, CAN, a metered modem) is dominated by how
+many bytes you send. Most releases change a small fraction of the image. And a device you cannot reach must
+survive a failed update.
 
-This project addresses both with one mechanism: the device tells the server
-exactly what it already has, sector by sector, and the server sends only the
-difference into a spare partition that the running firmware never depends on.
+## How it works
 
-## The idea
+1. **The device reports a manifest**: a truncated SHA-256 per chunk of its running image (ACTIVE) and of its
+   staging area (DFU), hashed fresh every session. The manifest is the only progress record; there is no journal.
+2. **The server plans.** Per erase block of the destination: leave it, fill in its blank chunks, or erase it and
+   program it. A chunk the running image already holds anywhere is **copied** on the device (zero bytes on the
+   wire); only chunks the device does not have are **written** from the wire.
+3. **The device applies the plan into DFU**, trusting none of it: order, ranges and hashes are checked, only blank
+   chunks are programmed, and the whole image must verify against its signed descriptor before a swap is asked for.
+4. **The bootloader swaps** (embassy-boot, power-fail safe), after verifying the staged image itself. The new
+   image gets **one trial boot**: it confirms, or the next reset reverts it.
+5. **A power cut anywhere** just means the device boots what it has, hashes again and gets a plan for what is
+   still missing.
 
-1. **The device reports a manifest.** It hashes every flash sector it holds, in
-   both partitions, and sends the list as `sector, hash`. On the reference part
-   that is 104 sectors and about 15 ms of work, so the manifest is computed
-   fresh every session and never cached.
-2. **The server diffs and sends only what differs.** For each sector of the
-   target image, if the device already has that content at that location,
-   nothing is sent. If it has the content *somewhere else* in flash, the server
-   names that location and the device copies it locally — still zero bytes on
-   the wire. Otherwise the sector is sent as `sector, blob, hash`. A typical
-   release lands around 10–15 % of a full image.
-3. **Received sectors go straight into the inactive partition.** There is no
-   separate staging area, because the inactive partition *is* the scratch
-   space. That is what makes two 52 KB application slots fit in 128 KB of
-   flash.
-4. **The bootloader applies the plan and can unroll it.** Apply is journalled
-   and resumable, and it never writes outside the inactive partition. So
-   abandoning an update is one page erase, with nothing to undo.
-5. **A new image gets a trial boot.** It must pass its own self-test and
-   confirm. A crash, a hang, or an unreachable server costs an attempt; three
-   failures and the device reverts to the partition it booted from before, then
-   retries the update into the partition that just failed.
+## What differs from DESIGN.md
 
-Integrity and authenticity are layered deliberately: per-sector hashes decide
-*what to transfer*, one signed hash over the whole image decides *whether the
-result is the real release*, the device signs its own manifest so the server
-can trust what it is diffing against, and the session always runs over TLS.
+| DESIGN.md | Here | Why |
+|---|---|---|
+| Custom A/B bootloader, two builds (one per slot) | embassy-boot swap, one build at one address | Every unchanged page of the new image equals a page of the running one, so COPY hits all unchanged code |
+| Meta banks, apply journal | None: DFU's own contents are the progress | Nothing to disagree with the flash |
+| Sector = erase page = delta unit, F103 numbers | Separate chunk, erase and write sizes, const-checked per chip | G0, H7 (128 KB sectors), RP2350; an unsupported layout fails the build |
+| MD5 per sector | SHA-256 truncated to 16 bytes | No weak primitive on the device |
+| ECDSA P-256, version compared with the running one | Ed25519, security counter against a stored floor that only rises | Pure Rust; a revert does not lower the bar |
+| Hash of the slot checked on boot | Signature checked on every boot | The stored hash sits in the slot it covers |
+| COPY from any slot | COPY from the running image only | It cannot be overwritten by an earlier step |
+| Device-signed manifest, TLS | Not yet (SEC-4, NET-1) | Every step is verified on the device anyway |
 
-## Read next
+The review behind these choices found that the original's journal encoding, commit marker and rollback rule
+would not hold on real F103 flash.
 
-[`DESIGN.md`](DESIGN.md) covers it properly:
+## Security in one paragraph
 
-| Section | |
+Images are sealed with an Ed25519 signature over a descriptor that names product, version, security counter,
+flash layout and the SHA-256 of the whole partition. The bootloader verifies before a swap and on every boot, so
+unsigned code does not survive a reset; a version floor that only the bootloader raises stops rollbacks; plans,
+manifests, the server and the transport are untrusted. What a compromised application can still do depends on
+the chip (on F103: everything, there is no RDP level 2). [SECURITY.md](SECURITY.md) has the full picture.
+
+**Unsigned builds.** Where the verifier does not fit, `--features unsigned` leaves it out, by name and never by
+default. Integrity (SHA-256) and the version floor stay. **An unsigned device is protected against bad luck and
+broken transfers, not against anyone who can talk to it**: whoever reaches the update channel can install any
+firmware for that product. The device reports it, the planner warns about every such device, and a device that
+trusts a key never accepts an unsigned image.
+
+## Crates
+
+| Crate | |
 |---|---|
-| 2 | Flash layout, meta banks, journal encoding |
-| 4–5 | Manifest format and the three planner rules |
-| 6 | Wire protocol and resume |
-| 7–8 | Boot state machine, unroll, revert |
-| 9 | Failure matrix |
-| 10 | Image signing, manifest signing, TLS |
-| 11 | Design decisions and their tradeoffs |
-| 15 | Integrating with [MCUboot](https://github.com/mcu-tools/mcuboot) instead of the custom bootloader |
+| `chunky` | `no_std` core: geometry, manifest, plan format, apply engine, descriptor, version floor, ECC-tolerant reads |
+| `chunky_swap` | `no_std` embassy-boot backend: the bootloader's decision and the application's handle |
+| `chunky_server` | Image builder and sealer, content-addressed blob store, planner |
+| `chunky_sim` | Flash simulator (F1, G0, H7, RP2350 write rules, torn writes, ECC faults) and a simulated device |
 
-## Scope
+```sh
+just test    # unit tests, planner properties, security cases, power-cut sweeps
+just lint    # clippy, fmt, firmware-target builds (signed and unsigned)
+CHUNKY_SWEEP_SEEDS=500 just test   # tear every operation 500 ways
+```
 
-Not planned: in-place single-partition updates, compression or binary diffing
-inside a sector, multi-generation rollback, or over-the-air updates of the
-bootloader itself. The reasoning for each is in `DESIGN.md`.
+## Supported chips
+
+A firmware build picks one `chip-*` feature or brings its own const-checked `FlashGeometry` (`chip-custom`);
+anything else is a compile error.
+
+| Chip | Chunk / erase / write | Backend | State |
+|---|---|---|---|
+| STM32F103CB | 1 KB / 1 KB / 16 bit | embassy-boot swap | simulated |
+| STM32G0B1RE | 2 KB / 2 KB / 64 bit + ECC | embassy-boot swap | simulated; first hardware (HW-1) |
+| STM32H743ZI | 2 KB / 128 KB / 256 bit + ECC | hardware bank swap | geometry and flash model; backend is BOOT-2 |
+| RP2350 / RP2354 | 4 KB / 4 KB / byte | boot ROM A/B | geometry and flash model; backend is BOOT-3 |
+
+## Not planned
+
+In-place single-partition updates, binary diffing inside a chunk, multi-generation rollback, and updates of the
+bootloader itself.

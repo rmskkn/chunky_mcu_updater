@@ -3,9 +3,27 @@
 //! A geometry is a `const`, checked at build time: `const GEO: FlashGeometry = FlashGeometry { .. }.checked();`
 //! fails the build with a named reason when the layout cannot work, instead of failing in the field.
 //!
+//! ```
+//! use chunky::geometry::*;
+//! const GOOD: FlashGeometry = FlashGeometry {
+//!     family: Family::Stm32G0,
+//!     backend: BackendKind::Swap,
+//!     chunk: 1024,
+//!     erase: 2048,
+//!     write: 8,
+//!     state: Region { offset: 0, len: 2048 },
+//!     floor: Region { offset: 2048, len: 2048 },
+//!     active: Region { offset: 4096, len: 8192 },
+//!     dfu: Region { offset: 12288, len: 10240 },
+//! }
+//! .checked();
+//! assert_eq!(GOOD.chunks(), 8);
+//! ```
+//!
+//! The same layout with a chunk that does not divide the erase unit stops the build:
+//!
 //! ```compile_fail
 //! use chunky::geometry::*;
-//! // chunk does not divide the erase unit: the build stops here.
 //! const BAD: FlashGeometry = FlashGeometry {
 //!     family: Family::Stm32G0,
 //!     backend: BackendKind::Swap,
