@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-11
+
 ### Added
 
 - `embassy_torn`: minimal NOR flash model with torn erases (word, bit and ECC tears) and a test suite that runs
