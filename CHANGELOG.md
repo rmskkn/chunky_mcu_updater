@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-11
+
 ### Added
 
 - `chunky::series`: flash layouts per MCU series. A `series-*` feature (`series-stm32f1`, `-stm32g0`,
