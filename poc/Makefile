@@ -17,7 +17,7 @@ $(BUILD)/cb-server: $(SRC)/server.c $(COMMON) | $(BUILD)
 	$(CC) $(CFLAGS) -I$(SRC) -o $@ $^
 
 $(BUILD)/cb-client: $(SRC)/client.c $(COMMON) | $(BUILD)
-	$(CC) $(CFLAGS) -I$(SRC) -o $@ $^
+	$(CC) $(CFLAGS) -I$(SRC) -pthread -o $@ $^
 
 $(BUILD)/cb-flash: $(SRC)/cbflash.c $(COMMON) | $(BUILD)
 	$(CC) $(CFLAGS) -I$(SRC) -o $@ $^

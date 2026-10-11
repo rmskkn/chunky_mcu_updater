@@ -12,6 +12,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <pthread.h>
 
 static const char *opt_flash = "flash.bin";
 static const char *opt_host  = "127.0.0.1";
@@ -106,6 +107,85 @@ static void write_sector(flash_t *f, int index, const uint8_t *data)
 {
     flash_erase_page(f, APP_PAGE + index);
     flash_program(f, (size_t)(APP_PAGE + index) * PAGE_SIZE, data, PAGE_SIZE);
+}
+
+/* Double-buffered flash write: one sector programs on this worker while the
+ * main thread keeps draining the socket into the other buffer, so the
+ * (modelled) erase/program time overlaps the next sector's transfer instead
+ * of stalling it. Only one job is ever in flight - a real part has one flash
+ * controller - so a new job joins the previous one before it starts, which
+ * is also what gives the run its backpressure if flashing falls behind the
+ * link. The job owns dst's slot in np/done; the main thread must join
+ * before it reads or writes that slot itself. */
+typedef struct {
+    pthread_t   tid;
+    int         active;
+    flash_t     *f;
+    link_t      *l;
+    meta_t      *np;
+    uint8_t     *done;
+    sector_idx_t dst;
+    const uint8_t *buf;
+    uint8_t     hash[SECTOR_HASH_LEN];
+} flash_job_t;
+
+static pthread_mutex_t io_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void *flash_worker(void *arg)
+{
+    flash_job_t *j = arg;
+    uint8_t got[SECTOR_HASH_LEN];
+
+    /* The sector may already hold this exact content - a stale manifest
+     * cache or a re-sent step, say. Check before erasing: an erase/program
+     * cycle is real wear and the slow part of this job, a hash is neither. */
+    flash_sector_hash(j->f, j->dst, got);
+    if (memcmp(got, j->hash, SECTOR_HASH_LEN)) {
+        write_sector(j->f, j->dst, j->buf);
+        flash_sector_hash(j->f, j->dst, got);
+    }
+
+    msg_step_ack_t a = { j->dst, 0 };
+    pthread_mutex_lock(&io_lock);
+    if (memcmp(got, j->hash, SECTOR_HASH_LEN)) {
+        a.code = NAK_FLASH_FAIL;
+        frame_send(j->l, MSG_STEP_NAK, &a, sizeof a);
+    } else {
+        j->np->op[j->dst] = OP_WRITE;
+        memcpy(j->np->target_hash[j->dst], j->hash, SECTOR_HASH_LEN);
+        j->done[j->dst] = 1;
+        md5_bytes += 2 * PAGE_SIZE;   /* hash of the buffer and of the page */
+        frame_send(j->l, MSG_STEP_ACK, &a, sizeof a);
+    }
+    pthread_mutex_unlock(&io_lock);
+    return NULL;
+}
+
+/* Verifies the assembled buffer against the sender's hash, then hands it to
+ * the flash worker and flips to the other buffer. Shared by STEP_WRITE_END
+ * and STEP_FILL - both close out one sector the same way. */
+static void stage_sector(link_t *l, meta_t *np, uint8_t *done, flash_job_t *job,
+                          flash_t *f, uint8_t sect[2][PAGE_SIZE], int *cur,
+                          sector_idx_t dst, const uint8_t hash[SECTOR_HASH_LEN])
+{
+    uint8_t got[SECTOR_HASH_LEN];
+    sector_hash(sect[*cur], got);
+    if (memcmp(got, hash, SECTOR_HASH_LEN)) {
+        msg_step_ack_t nak = { dst, NAK_MD5_MISMATCH };
+        pthread_mutex_lock(&io_lock);
+        frame_send(l, MSG_STEP_NAK, &nak, sizeof nak);
+        pthread_mutex_unlock(&io_lock);
+        printf("device: sector %u md5 mismatch\n", dst);
+        return;
+    }
+
+    if (job->active) { pthread_join(job->tid, NULL); job->active = 0; }
+    job->f = f; job->l = l; job->np = np; job->done = done;
+    job->dst = dst; job->buf = sect[*cur];
+    memcpy(job->hash, hash, SECTOR_HASH_LEN);
+    job->active = 1;
+    pthread_create(&job->tid, NULL, flash_worker, job);
+    *cur = 1 - *cur;
 }
 
 /* ---------------------------------------------------------------- session */
@@ -206,10 +286,12 @@ static int cmd_session(void)
     memcpy(np.target_sha256, pb.image_sha256, SHA256_LEN);
     memcpy(np.target_mac, pb.image_mac, SHA256_LEN);
 
-    uint8_t sect[PAGE_SIZE];
+    uint8_t sect[2][PAGE_SIZE];
     uint8_t done[SECTORS_SLOT];
     memset(done, 0, sizeof done);
     int pending_copies = 0;
+    int cur = 0;                /* buffer the next STEP_WRITE fills */
+    flash_job_t job = { .active = 0 };
     t0 = now_ms();
 
     for (;;) {
@@ -228,7 +310,9 @@ static int cmd_session(void)
             memcpy(np.target_hash[c.dst], c.hash, SECTOR_HASH_LEN);
             pending_copies++;
             msg_step_ack_t a = { c.dst, 0 };
+            pthread_mutex_lock(&io_lock);
             frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
+            pthread_mutex_unlock(&io_lock);
         } else if (t == MSG_STEP_WRITE) {
             sector_idx_t dst;
             uint16_t off, len;
@@ -237,35 +321,25 @@ static int cmd_session(void)
             memcpy(&len, pay + 4, 2);
             if (dst >= SECTORS_SLOT || (size_t)off + len > PAGE_SIZE)
                 die("bad write fragment");
-            memcpy(sect + off, pay + WRITE_HDR, len);
+            memcpy(sect[cur] + off, pay + WRITE_HDR, len);
         } else if (t == MSG_STEP_WRITE_END) {
             msg_step_write_end_t we;
             memcpy(&we, pay, sizeof we);
-            uint8_t got[SECTOR_HASH_LEN];
-            sector_hash(sect, got);
-            if (memcmp(got, we.hash, SECTOR_HASH_LEN)) {
-                msg_step_ack_t nak = { we.dst, NAK_MD5_MISMATCH };
-                frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
-                printf("device: sector %u md5 mismatch\n", we.dst);
-                continue;
-            }
-            write_sector(&f, we.dst, sect);
-            flash_sector_hash(&f, we.dst, got);
-            if (memcmp(got, we.hash, SECTOR_HASH_LEN)) {
-                msg_step_ack_t nak = { we.dst, NAK_FLASH_FAIL };
-                frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
-                continue;
-            }
-            md5_bytes += 2 * PAGE_SIZE;   /* hash of the buffer and of the page */
-            np.op[we.dst] = OP_WRITE;
-            memcpy(np.target_hash[we.dst], we.hash, SECTOR_HASH_LEN);
-            done[we.dst] = 1;
-            msg_step_ack_t a = { we.dst, 0 };
-            frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
+            stage_sector(&l, &np, done, &job, &f, sect, &cur, we.dst, we.hash);
+        } else if (t == MSG_STEP_FILL) {
+            msg_step_fill_t fl;
+            memcpy(&fl, pay, sizeof fl);
+            if (fl.dst >= SECTORS_SLOT) die("bad sector index %u", fl.dst);
+            memset(sect[cur], fl.value, PAGE_SIZE);
+            stage_sector(&l, &np, done, &job, &f, sect, &cur, fl.dst, fl.hash);
         } else {
             die("protocol: unexpected message %d during plan", t);
         }
     }
+
+    /* Every STEP_WRITE_END's job must land - and its ACK/NAK be sent, and its
+     * np/done slot be written - before np/done are read below. */
+    if (job.active) { pthread_join(job.tid, NULL); job.active = 0; }
 
     t_stage = now_ms() - t0;
 
