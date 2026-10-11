@@ -12,7 +12,8 @@ static int usage(void)
         "usage:\n"
         "  cb-flash manifest FLASH             per-sector hashes and the digest\n"
         "  cb-flash map FLASH                  the flash layout\n"
-        "  cb-flash mutate IN OUT RUNS SEED    a new release: RUNS patched runs\n");
+        "  cb-flash mutate IN OUT RUNS SEED    a new release: RUNS patched runs\n"
+        "  cb-flash find FLASH HASH            which sectors hold this hash\n");
     return 2;
 }
 
@@ -38,6 +39,43 @@ static int cmd_manifest(const char *path)
     printf("body %zu B  digest %s\n", MANIFEST_BODY_LEN, hex);
     flash_close(&f);
     return 0;
+}
+
+/* Reverse lookup. Index to hash is a subscript; hash to index is a scan, and
+ * it can match more than one sector -- an erased page hashes the same wherever
+ * it is. Any match is an equally good copy source, which is what makes the
+ * planner's rule 2 a content lookup rather than a positional one. */
+static int cmd_find(const char *path, const char *hex)
+{
+    flash_t f;
+    manifest_t man;
+    uint8_t want[SECTOR_HASH_LEN];
+    size_t n = strlen(hex) / 2;
+    char buf[64];
+
+    if (n == 0 || n > SECTOR_HASH_LEN || strlen(hex) % 2)
+        die("hash must be 2 to %d hex bytes", SECTOR_HASH_LEN);
+    for (size_t i = 0; i < n; i++) {
+        unsigned b;
+        if (sscanf(hex + i * 2, "%2x", &b) != 1) die("bad hex in %s", hex);
+        want[i] = (uint8_t)b;
+    }
+
+    if (flash_open(&f, path) < 0) die("cannot open %s", path);
+    manifest_build(&f, &man);
+
+    int hits = 0;
+    for (int i = 0; i < SECTORS_SLOT; i++)
+        if (!memcmp(man.h[i], want, n)) {
+            hexdump_line(man.h[i], SECTOR_HASH_LEN, buf);
+            printf("sector %3d  %s  at 0x%05zx\n", i, buf,
+                   APP_BASE + (size_t)i * PAGE_SIZE);
+            hits++;
+        }
+    printf("%d of %d sectors match %s%s\n", hits, SECTORS_SLOT, hex,
+           n < SECTOR_HASH_LEN ? " (prefix)" : "");
+    flash_close(&f);
+    return hits ? 0 : 1;
 }
 
 static int cmd_map(const char *path)
@@ -85,6 +123,7 @@ int main(int argc, char **argv)
     const char *c = argv[1];
     if (!strcmp(c, "manifest") && argc == 3) return cmd_manifest(argv[2]);
     if (!strcmp(c, "map") && argc == 3)      return cmd_map(argv[2]);
+    if (!strcmp(c, "find") && argc == 4)     return cmd_find(argv[2], argv[3]);
     if (!strcmp(c, "mutate") && argc == 6)
         return cmd_mutate(argv[2], argv[3], atoi(argv[4]), (unsigned)atoi(argv[5]));
     return usage();
