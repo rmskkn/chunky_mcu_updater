@@ -92,9 +92,9 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
 
 const uint8_t *flash_at(flash_t *f, size_t off) { return f->map + off; }
 
-void flash_sector_md5(flash_t *f, int slot, int index, uint8_t out[MD5_LEN])
+void flash_sector_md5(flash_t *f, int index, uint8_t out[MD5_LEN])
 {
-    md5(f->map + SLOT_BASE(slot) + (size_t)index * PAGE_SIZE, PAGE_SIZE, out);
+    md5(f->map + APP_BASE + (size_t)index * PAGE_SIZE, PAGE_SIZE, out);
 }
 
 identity_t *identity_get(flash_t *f)
@@ -110,8 +110,6 @@ void meta_init(meta_t *m)
     memset(m, 0, sizeof *m);
     m->magic        = META_MAGIC;
     m->generation   = 0;
-    m->active_slot  = 0;
-    m->pending_slot = 0xFF;
     m->plan_state   = PLAN_NONE;
 }
 

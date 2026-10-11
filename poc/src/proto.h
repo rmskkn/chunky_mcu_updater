@@ -24,10 +24,9 @@ enum { NAK_MD5_MISMATCH = 1, NAK_FLASH_FAIL, NAK_BAD_INDEX };
 typedef struct {
     uint8_t  device_id[16];
     uint16_t sector_size;
-    uint8_t  slot_count;
-    uint8_t  sectors_slot;
-    uint8_t  active_slot;
+    uint16_t sectors;
     uint8_t  last_result;
+    uint8_t  pad[3];
     uint32_t running_version;
     /* image_sha256 of the active slot, or zeros if it holds no image. The hash
      * excludes the descriptor (DESIGN.md 10.1), so it identifies the firmware
@@ -46,35 +45,32 @@ typedef struct {
 
 typedef struct {
     uint32_t version;
-    uint8_t  dst_slot;
     uint16_t step_count;
+    uint8_t  pad[2];
     uint8_t  image_sha256[SHA256_LEN];
     uint8_t  image_mac[SHA256_LEN];
 } msg_plan_begin_t;
 
+/* A copy inside the one partition: the bytes this sector needs already sit at
+ * src_index, so nothing goes over the wire. */
 typedef struct {
-    uint8_t dst;
-    uint8_t src_slot;
-    uint8_t src_index;
-    uint8_t md5[MD5_LEN];
+    sector_idx_t dst;
+    sector_idx_t src_index;
+    uint8_t      md5[MD5_LEN];
 } msg_step_copy_t;
 
 /* STEP_WRITE fragments a sector; STEP_WRITE_END closes it with the hash. */
 #define WRITE_CHUNK 256
-typedef struct {
-    uint8_t  dst;
-    uint16_t offset;
-    uint16_t len;
-    /* bytes follow */
-} msg_step_write_t;
+/* Serialised by hand as dst:u16, offset:u16, len:u16, then the bytes. */
+#define WRITE_HDR   6
 
-typedef struct { uint8_t dst; uint8_t md5[MD5_LEN]; } msg_step_write_end_t;
-typedef struct { uint8_t dst; uint8_t code; } msg_step_ack_t;
+typedef struct { sector_idx_t dst; uint8_t md5[MD5_LEN]; } msg_step_write_end_t;
+typedef struct { sector_idx_t dst; uint8_t code; } msg_step_ack_t;
 typedef struct { uint16_t pending; } msg_plan_ready_t;
 
 typedef struct {
     uint8_t  plan_state;
-    uint8_t  active_slot;
+    uint8_t  pad[3];
     uint32_t version;
     uint8_t  result;
 } msg_status_t;

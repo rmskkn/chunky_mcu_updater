@@ -5,11 +5,11 @@
 #include "image.h"
 
 typedef struct {
-    uint8_t op;          /* OP_COPY or OP_WRITE */
-    uint8_t dst;
-    uint8_t src_slot;
-    uint8_t src_index;
-    uint8_t md5[MD5_LEN];
+    uint8_t      op;          /* OP_COPY or OP_WRITE */
+    uint8_t      pad;
+    sector_idx_t dst;
+    sector_idx_t src_index;
+    uint8_t      md5[MD5_LEN];
 } step_t;
 
 typedef struct {
@@ -18,8 +18,8 @@ typedef struct {
     int    n_skip, n_copy, n_write;
 } plan_t;
 
-/* The three rules of DESIGN.md section 5, against the DESTINATION slot. */
+/* The three rules of DESIGN.md section 5, against the one partition. */
 void plan_build(const manifest_t *dev, const uint8_t target[SLOT_SIZE],
-                int dst_slot, plan_t *p);
+                plan_t *p);
 
 #endif

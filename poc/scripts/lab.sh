@@ -8,9 +8,9 @@
 #   scripts/lab.sh manifest|map   inspect the flash
 #   scripts/lab.sh reset          forget the device, so it ships fresh again
 #
-# The device is created on first use with the reference binary in slot 0, so
-# its first manifest describes real firmware. The server stays up across
-# requests and prints one stats row per request.
+# The device is created on first use with the reference binary in its one
+# application partition, so its first manifest describes real firmware. The
+# server stays up across requests and prints one stats row per request.
 source "$(dirname "$0")/common.sh"
 need_build
 
@@ -46,7 +46,7 @@ manifest|map)
     ;;
 reset)
     rm -f "$FLASH"; rm -rf "$CACHE"
-    echo "device forgotten; the next update creates it with $BASE in slot 0"
+    echo "device forgotten; the next update creates it with $BASE"
     ;;
 *)
     sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'

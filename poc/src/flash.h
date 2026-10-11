@@ -5,7 +5,13 @@
 #include "md5.h"
 #include "sha256.h"
 
-/* Flash geometry, STM32F103CB as in DESIGN.md section 2 / 10.2. */
+/* Flash geometry, STM32F103CB as in DESIGN.md section 2 / 10.2 / 18.
+ *
+ * One application partition, updated in place. There is no second slot, so
+ * there is nothing to fall back to: an update that fails to verify leaves the
+ * device without a bootable image and the bootloader asks for another one.
+ * That also means the running image cannot do the writing -- it would be
+ * overwriting itself -- so the update belongs to the bootloader. */
 #define PAGE_SIZE     1024
 #define PAGE_COUNT    128
 #define FLASH_SIZE    (PAGE_SIZE * PAGE_COUNT)
@@ -16,16 +22,25 @@
 #define META0_PAGE    16
 #define META1_PAGE    20
 #define META_PAGES    4
-#define SLOT0_PAGE    24
-#define SLOT1_PAGE    76
-#define SLOT_PAGES    52
+#define APP_PAGE      24
+#define APP_PAGES     104
 
-#define SLOT_SIZE     (SLOT_PAGES * PAGE_SIZE)
-#define SECTORS_SLOT  SLOT_PAGES
-#define SLOT_COUNT    2
-#define MANIFEST_ENTRIES (SLOT_COUNT * SECTORS_SLOT)
+#define SLOT_SIZE     (APP_PAGES * PAGE_SIZE)
+#define SECTORS_SLOT  APP_PAGES
+#define APP_BASE      ((size_t)APP_PAGE * PAGE_SIZE)
+#define MANIFEST_ENTRIES SECTORS_SLOT
 
-#define SLOT_BASE(s)  (((s) == 0 ? SLOT0_PAGE : SLOT1_PAGE) * PAGE_SIZE)
+/* Sector indices are partition-relative. A byte covers 256 sectors, which is
+ * a 256 KB partition at a 1 KB page and runs out on a 1 MB part, so the index
+ * has its own type everywhere it appears: in the manifest, on the wire, and in
+ * the plan the bootloader reads back. */
+typedef uint16_t sector_idx_t;
+
+/* Three things grow with the number of sectors, and only one of them is the
+ * index width. The asserts below turn each cliff into a build error rather
+ * than silent corruption on a bigger part. */
+_Static_assert(SECTORS_SLOT <= (1 << (8 * sizeof(sector_idx_t))) - 1,
+               "sector index type too narrow for this partition size");
 
 /* Journal states. Every transition only clears bits, which is what an
  * STM32F103 half-word program can do without erasing the page first. */
@@ -34,9 +49,9 @@
 #define JRN_VERIFIED  0xFF00u
 #define JRN_DONE      0x0000u
 
-/* plan_state */
-enum { PLAN_NONE = 0, PLAN_STAGING, PLAN_READY, PLAN_APPLYING,
-       PLAN_TRIAL, PLAN_COMMITTED };
+/* plan_state. Without a second partition there is no trial boot and no
+ * revert: the image either verifies or the device asks for another one. */
+enum { PLAN_NONE = 0, PLAN_STAGING, PLAN_APPLYING, PLAN_COMMITTED, PLAN_BAD };
 
 /* step ops */
 enum { OP_NONE = 0, OP_COPY, OP_WRITE };
@@ -55,25 +70,28 @@ typedef struct {
     uint32_t magic;
     uint32_t generation;
     uint32_t crc;            /* over everything that follows */
-    uint8_t  active_slot;
-    uint8_t  pending_slot;   /* 0xFF = none */
     uint8_t  plan_state;
-    uint8_t  try_count;
+    uint8_t  pad[3];
     uint32_t target_version;
     uint8_t  target_sha256[SHA256_LEN];
     uint8_t  target_mac[SHA256_LEN];
     uint16_t step_count;
     uint8_t  op[SECTORS_SLOT];
-    uint8_t  src_slot[SECTORS_SLOT];
-    uint8_t  src_index[SECTORS_SLOT];
+    sector_idx_t src_index[SECTORS_SLOT];
     uint8_t  target_md5[SECTORS_SLOT][MD5_LEN];
     uint32_t last_result;
 } meta_t;
 
-#define MAX_TRIES 3
+/* The plan and its hashes live in one meta bank, so ~20 B per sector has to
+ * fit there. A 1 MB part at a 1 KB page would need 10 KB and does not. */
+_Static_assert(sizeof(meta_t) <= META_PAGES * PAGE_SIZE,
+               "meta_t does not fit a meta bank: fewer, larger sectors, or a "
+               "bigger bank");
+_Static_assert(SECTORS_SLOT * 2 <= PAGE_SIZE,
+               "the progress journal does not fit its page");
 
 /* last_result codes reported back in HELLO */
-enum { RES_NONE = 0, RES_OK, RES_UNROLLED, RES_TRIAL_FAILED, RES_FLASH_FAIL };
+enum { RES_NONE = 0, RES_OK, RES_VERIFY_FAILED, RES_FLASH_FAIL };
 
 typedef struct {
     uint8_t *map;
@@ -130,7 +148,7 @@ void flash_erase_page(flash_t *f, int page);
 void flash_program(flash_t *f, size_t off, const void *buf, size_t len);
 const uint8_t *flash_at(flash_t *f, size_t off);
 
-void flash_sector_md5(flash_t *f, int slot, int index, uint8_t out[MD5_LEN]);
+void flash_sector_md5(flash_t *f, int index, uint8_t out[MD5_LEN]);
 
 /* Meta bank ping-pong. Returns 0 if a valid bank was found. */
 int  meta_load(flash_t *f, meta_t *m);
