@@ -34,9 +34,15 @@ server)
 release)
     bootstrap
     if [ -f "${1:-}" ]; then
-        # A real firmware binary: publish it as it is.
-        cp "$1" "$IMAGE"
-        echo "published $1 ($(stat -c %s "$1") B) as the release"
+        # A real firmware binary: publish it as it is. Naming the release file
+        # itself is a no-op rather than an error, so re-publishing what is
+        # already there works.
+        if [ "$(readlink -f "$1")" = "$(readlink -f "$IMAGE")" ]; then
+            echo "$1 is already the release ($(stat -c %s "$IMAGE") B), unchanged"
+        else
+            cp "$1" "$IMAGE"
+            echo "published $1 ($(stat -c %s "$1") B) as the release"
+        fi
     else
         # No file given, so synthesise one: the shipped firmware with RUNS
         # patched runs, which is what a release touching a few functions
