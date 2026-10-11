@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
 ### Added
 
 - `chunky_bank`: boot backend on hardware bank swap (dual-bank STM32 with a SWAP_BANK option bit). The other

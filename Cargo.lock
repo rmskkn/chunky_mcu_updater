@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "chunky"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chunky",
  "ed25519-dalek",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "chunky_bank"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chunky",
  "embedded-storage",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "chunky_server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chunky",
  "ed25519-dalek",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "chunky_sim"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chunky",
  "chunky_bank",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "chunky_swap"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chunky",
  "embassy-boot 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "embassy_torn"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "embassy-boot 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embassy-boot 0.7.0 (git+https://github.com/embassy-rs/embassy?rev=34191ee2badce9d4ba63ac4545dc1d8abd1495eb)",
