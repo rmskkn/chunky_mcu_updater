@@ -189,7 +189,7 @@ stable link order are what keep a one-line fix from costing a full transfer.
 |---|---|
 | `cb-server --image FILE` | serves one release; re-reads the file each request |
 | `cb-client --flash FILE --initial FILE` | the device: one request, start to finish |
-| `cb-flash` | `manifest`, `map`, `mutate` (build a test release) |
+| `cb-flash` | `manifest`, `find` (which sector holds a hash), `map`, `mutate` (build a test release) |
 
 | Source | Covers |
 |---|---|
@@ -250,6 +250,45 @@ Writing it turned up three mistakes in `DESIGN.md`, all fixed there:
 
 It also replaced two invented flash timings with the datasheet's, which changed
 the conclusion about what delta saves: see `DESIGN.md` section 17.
+
+## Looking a sector up
+
+The two directions are not symmetric, and that is the point of the encoding.
+
+**Sector to hash is a subscript.** Order is implicit, so sector `i` is at
+`h[i]`: `manifest_hash_at(m, i)`, no search.
+
+**Hash to sector is a scan, and may match several sectors.** An erased page
+hashes the same wherever it sits, so on this device 59 of 104 sectors share one
+hash. `manifest_find(m, hash, &index)` returns the first match, which is
+correct for its only caller: the planner asking "is there a sector that already
+holds these bytes" for a copy source, where any match is as good as another.
+That is what makes rule 2 a content lookup rather than a positional one.
+
+To see it from the outside:
+
+```sh
+$ cb-flash find run/flash.bin 271744fddbf0966b
+sector   0  271744fddbf0966b  at 0x06000
+1 of 104 sectors match 271744fddbf0966b
+
+$ cb-flash find run/flash.bin 9a8918b11878da50 | tail -2
+sector 103  9a8918b11878da50  at 0x1fc00
+59 of 104 sectors match 9a8918b11878da50      # the erased-page hash
+
+$ cb-flash find run/flash.bin 3715
+sector  41  371549cd779cf34a  at 0x10400
+1 of 104 sectors match 3715 (prefix)
+```
+
+It takes a prefix, prints the flash address of every match, and exits non-zero
+when nothing matches. `cb-flash manifest` prints the whole table if you would
+rather grep it.
+
+Note what the old encoding did *not* buy here: when an entry carried its own
+`index`, hash-to-sector was still a scan of every entry — the index field only
+told you where the matched entry claimed to live. Making the position the index
+removed the field and the possibility of it disagreeing with reality.
 
 ## Manifest encoding, before and after
 
