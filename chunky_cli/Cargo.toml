@@ -1,0 +1,21 @@
+[package]
+name = "chunky_cli"
+description = "chunky command line: keygen, image build, manifest, plan, store"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "chunky"
+path = "src/main.rs"
+
+[dependencies]
+chunky = { workspace = true, features = ["ed25519", "unsigned"] }
+chunky_server = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+anstream = "1"
+anstyle = "1"
+
+[dev-dependencies]
+tempfile = "3"

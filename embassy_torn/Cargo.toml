@@ -1,0 +1,16 @@
+[package]
+name = "embassy_torn"
+description = "Reproduction of a torn state-erase hazard in embassy-boot (0.7.0 and git master), with a minimal NOR flash model"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+embedded-storage.workspace = true
+
+[dev-dependencies]
+# Both versions side by side under different names; the test body is shared (a macro).
+eb07 = { package = "embassy-boot", version = "=0.7.0" }
+# Pinned to the master commit the report was made against (2026-10-11).
+ebmaster = { package = "embassy-boot", git = "https://github.com/embassy-rs/embassy", rev = "34191ee2badce9d4ba63ac4545dc1d8abd1495eb", features = ["ed25519-dalek"] }

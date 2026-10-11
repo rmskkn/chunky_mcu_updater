@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["chunky", "chunky_swap", "chunky_bank", "chunky_server", "chunky_sim", "embassy_torn", "chunky_cli"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+repository = "https://github.com/romixlab/chunky_mcu_updater"
+
+[workspace.dependencies]
+chunky = { path = "chunky" }
+chunky_swap = { path = "chunky_swap" }
+chunky_bank = { path = "chunky_bank" }
+chunky_server = { path = "chunky_server" }
+chunky_sim = { path = "chunky_sim" }
+chunky_cli = { path = "chunky_cli" }
+embedded-storage = "0.3.1"
+embassy-boot = "0.7.0"
+sha2 = { version = "0.10", default-features = false }
+ed25519-dalek = { version = "2", default-features = false }
+proptest = "1"
+
+# The power-cut sweeps hash and sign thousands of times: unoptimised crypto makes them crawl.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 1
