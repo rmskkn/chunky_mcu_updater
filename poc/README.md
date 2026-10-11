@@ -120,14 +120,22 @@ the progress record, so the next request re-diffs and sends only the gap.
     |                      build the target, diff it per sector   |
     |<-- PLAN_BEGIN  version, steps, sha256 + MAC ----------------|
     |                                                             |
+    |   every step streamed with no per-step wait:                |
     |<-- STEP_WRITE  dst, offset, 256 B   (x4 per sector) --------|
     |<-- STEP_WRITE_END  dst, md5 --------------------------------|
-    |   check md5, erase the page, program, re-read, check        |
-    |-- STEP_ACK  dst ------------------------------------------->|
     |<-- STEP_COPY  dst, src index, md5 --------------------------|
-    |   recorded only; the bootloader does the copying            |
-    |-- STEP_ACK  dst ------------------------------------------->|
+    |   ... (one of the two, once per step, until the plan ends)  |
     |<-- PLAN_END ------------------------------------------------|
+    |                                                             |
+    |   per STEP_WRITE_END: check md5 against the buffer, then    |
+    |   hand the sector to a flash-write worker and start filling |
+    |   the other buffer with the next STEP_WRITE - so one        |
+    |   sector's erase/program overlaps the next one's transfer;  |
+    |   per STEP_COPY: recorded only, the bootloader copies later |
+    |   each step's ACK/NAK follows once its work is done, in the |
+    |   order the steps were sent:                                |
+    |-- STEP_ACK/NAK  dst  (one per step, same order as above) -->|
+    |                                                             |
     |-- PLAN_READY  steps left for the bootloader --------------->|
     |<-- COMMIT --------------------------------------------------|
     |                                                             |

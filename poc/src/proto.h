@@ -9,7 +9,7 @@ enum {
     MSG_MANIFEST_DIGEST, MSG_MANIFEST_NEEDED, MSG_MANIFEST_REJECT,
     MSG_PLAN_BEGIN, MSG_STEP_COPY, MSG_STEP_WRITE, MSG_STEP_WRITE_END,
     MSG_STEP_ACK, MSG_STEP_NAK, MSG_PLAN_END, MSG_PLAN_READY,
-    MSG_COMMIT, MSG_STATUS, MSG_ABORT, MSG_NO_UPDATE
+    MSG_COMMIT, MSG_STATUS, MSG_ABORT, MSG_NO_UPDATE, MSG_STEP_FILL
 };
 
 /* MANIFEST_REJECT reasons */
@@ -65,6 +65,10 @@ typedef struct {
 #define WRITE_HDR   6
 
 typedef struct { sector_idx_t dst; uint8_t hash[SECTOR_HASH_LEN]; } msg_step_write_end_t;
+
+/* STEP_FILL: the whole sector is one repeated byte (0xFF erased, or 0x00),
+ * so send the byte instead of PAGE_SIZE/WRITE_CHUNK fragments. */
+typedef struct { sector_idx_t dst; uint8_t value; uint8_t hash[SECTOR_HASH_LEN]; } msg_step_fill_t;
 typedef struct { sector_idx_t dst; uint8_t code; } msg_step_ack_t;
 typedef struct { uint16_t pending; } msg_plan_ready_t;
 

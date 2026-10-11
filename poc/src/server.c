@@ -244,6 +244,11 @@ static void session(int fd)
     printf("server: plan v%d, %d steps (%d skipped)\n",
            ver, plan.count, plan.n_skip);
 
+    /* Stream every step without waiting for its ACK (DESIGN.md 6, revised):
+     * the device flashes one sector in the background while the next one's
+     * bytes are still arriving, so a lockstep wait here would just reintroduce
+     * the stall the double buffer on the device side is there to hide. ACKs
+     * are drained as a second pass, after PLAN_END, in send order. */
     for (int k = 0; k < plan.count; k++) {
         step_t *s = &plan.step[k];
         if (s->op == OP_COPY) {
@@ -256,31 +261,53 @@ static void session(int fd)
             memcpy(sect, target + (size_t)s->dst * PAGE_SIZE, PAGE_SIZE);
             uint8_t hsh[SECTOR_HASH_LEN];
             memcpy(hsh, s->hash, SECTOR_HASH_LEN);
-            for (size_t off = 0; off < PAGE_SIZE; off += WRITE_CHUNK) {
-                uint8_t buf[WRITE_HDR + WRITE_CHUNK];
-                uint16_t len = WRITE_CHUNK;
-                uint16_t o16 = (uint16_t)off;
-                memcpy(buf + 0, &s->dst, 2);
-                memcpy(buf + 2, &o16, 2);
-                memcpy(buf + 4, &len, 2);
-                memcpy(buf + WRITE_HDR, sect + off, len);
-                frame_send(&l, MSG_STEP_WRITE, buf, WRITE_HDR + len);
+
+            /* Erased (0xFF) or zeroed (0x00) sectors are common padding at
+             * the tail of a short image. Send the repeated byte instead of
+             * the page: one small frame instead of four. */
+            uint8_t fill = sect[0];
+            int fillable = (fill == 0xFF || fill == 0x00);
+            for (size_t i = 1; fillable && i < PAGE_SIZE; i++)
+                fillable = (sect[i] == fill);
+
+            if (fillable) {
+                msg_step_fill_t fl;
+                fl.dst = s->dst; fl.value = fill;
+                memcpy(fl.hash, hsh, SECTOR_HASH_LEN);
+                frame_send(&l, MSG_STEP_FILL, &fl, sizeof fl);
+            } else {
+                for (size_t off = 0; off < PAGE_SIZE; off += WRITE_CHUNK) {
+                    uint8_t buf[WRITE_HDR + WRITE_CHUNK];
+                    uint16_t len = WRITE_CHUNK;
+                    uint16_t o16 = (uint16_t)off;
+                    memcpy(buf + 0, &s->dst, 2);
+                    memcpy(buf + 2, &o16, 2);
+                    memcpy(buf + 4, &len, 2);
+                    memcpy(buf + WRITE_HDR, sect + off, len);
+                    frame_send(&l, MSG_STEP_WRITE, buf, WRITE_HDR + len);
+                }
+                msg_step_write_end_t we;
+                we.dst = s->dst;
+                memcpy(we.hash, hsh, SECTOR_HASH_LEN);
+                frame_send(&l, MSG_STEP_WRITE_END, &we, sizeof we);
             }
-            msg_step_write_end_t we;
-            we.dst = s->dst;
-            memcpy(we.hash, hsh, SECTOR_HASH_LEN);
-            frame_send(&l, MSG_STEP_WRITE_END, &we, sizeof we);
-        }
-        int t = frame_recv(&l, pay, &n);
-        if (t < 0) { printf("server: device went away after %d steps\n", k); goto out; }
-        if (t == MSG_STEP_NAK) {
-            msg_step_ack_t nak;
-            memcpy(&nak, pay, sizeof nak);
-            printf("server: NAK on sector %u reason %u\n", nak.dst, nak.code);
         }
     }
 
     frame_send(&l, MSG_PLAN_END, NULL, 0);
+
+    for (int k = 0; k < plan.count; k++) {
+        int t = frame_recv(&l, pay, &n);
+        if (t < 0) { printf("server: device went away after %d of %d acks\n", k, plan.count); goto out; }
+        if (t == MSG_STEP_NAK) {
+            msg_step_ack_t nak;
+            memcpy(&nak, pay, sizeof nak);
+            printf("server: NAK on sector %u reason %u\n", nak.dst, nak.code);
+        } else if (t != MSG_STEP_ACK) {
+            die("protocol: expected STEP_ACK/NAK, got %d", t);
+        }
+    }
+
     if (frame_expect(&l, MSG_PLAN_READY, pay, &n) < 0) goto out;
     printf("server: device staged the plan, %u steps left for the bootloader\n",
            (unsigned)((msg_plan_ready_t *)pay)->pending);
