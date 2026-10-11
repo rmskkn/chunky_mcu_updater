@@ -88,6 +88,10 @@ only ever go from 1 to 0:
 | **Update client** | Application firmware | Owns the transport. Computes the device manifest, receives steps, writes blob sectors into the inactive slot, fills the meta bank, reboots. |
 | **Bootloader** | Pages 0–15 | Executes COPY steps, verifies the whole image, flips slots, runs trial boots, reverts, unrolls. No network. |
 
+The host PoC in `poc/` implements exactly this split, and
+[`poc/README.md`](poc/README.md) draws it: which process owns what, how the
+flash regions relate, and the whole message exchange of one request.
+
 The transport lives in the application because that is where the UART/CAN/
 Ethernet/modem driver already is. Keeping it out of the bootloader is the single
 biggest reliability decision in this design: the bootloader's job is small,
@@ -257,6 +261,9 @@ buffer (~300 B).
 Every session is protected as described in Section 10.3, and every manifest is
 signed by the device and verified by the server before a plan is generated
 (Section 10.2). A session that fails either check never reaches the planner.
+
+[`poc/README.md`](poc/README.md) has the same exchange as a sequence diagram,
+drawn from the working implementation.
 
 **Resume.** On reconnect the client repeats `HELLO`/`CHALLENGE` with the stored
 `target_version`, then re-sends only the journal: a 52-entry bitmap of verified

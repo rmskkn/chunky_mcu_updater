@@ -32,6 +32,96 @@ The server stays up across requests and prints one stats row per request, so
 `release` then `update` again adds another row. `scripts/lab.sh reset` forgets
 the device so it ships fresh again.
 
+## Architecture
+
+Two processes and one file. The server owns the releases; the device owns the
+flash and is the only thing that writes it. Nothing else is shared.
+
+```
+  cb-server --image release.bin                     cb-client --flash flash.bin
+  +-----------------------------------+             +-----------------------------------+
+  | release.bin   raw firmware        |             | manifest.c  md5 of all 104        |
+  |                                   |             |             sectors, both slots   |
+  | image.c   wrap into a slot image: |             | client.c    receive blobs, write  |
+  |           descriptor at 0x200,    |             |             them straight into    |
+  |           image_sha256, MAC       |             |             the inactive slot     |
+  |                                   |             |                                   |
+  | plan.c    3 rules against the     |             | flash.c     erase page,           |
+  |           device manifest:        |             |             program half-words,   |
+  |           skip / copy / write     |             |             refuse to set a bit   |
+  |                                   |             |                                   |
+  | cache/    last manifest per       |             | client.c    bootloader: copies,   |
+  |           device, for elision     |             |             verify, trial, confirm|
+  +-----------------------------------+             +-----------------------------------+
+                    |                                                 |
+                    +------------ frame.c over TCP -------------------+
+                                             |
+                       | A5 5A | len | type | seq | payload | crc32 |
+                         10 B of overhead, 256 B of sector per frame
+```
+
+The device never hands out its flash and the server never addresses it
+directly: every decision the server makes comes from the manifest the device
+chose to send.
+
+```
+                           flash.bin, 128 KB
+  +--------------+------+---------+---------+--------------+--------------+
+  | bootloader   | id   | meta 0  | meta 1  | slot 0       | slot 1       |
+  | 15 KB        | 1 KB | 4 KB    | 4 KB    | 52 KB        | 52 KB        |
+  +--------------+------+---------+---------+--------------+--------------+
+   pages 0-14     15     16-19     20-23     24-75          76-127
+```
+
+| Region | Who writes it | What it holds |
+|---|---|---|
+| bootloader | nobody, after provisioning | apply, verify, unroll, revert |
+| id | the factory | device key, root key; write-protected |
+| meta 0 / meta 1 | the bootloader and the update client | boot state, the plan, the progress journal; two banks ping-pong by generation so a torn write loses nothing |
+| slot 0 / slot 1 | whichever one is **inactive** | one application image each: the active one is read to build the manifest and never written, the inactive one is erased, rewritten, verified, then booted |
+
+A request moves firmware from the server into the inactive slot, verifies it
+there, and only then changes which slot boots. The active slot is read-only for
+the whole operation, which is what makes abandoning an update free.
+
+## One request, message by message
+
+```
+  device                                                      server
+    |                                                             |
+    |-- HELLO  id, geometry, active slot, version + image hash -->|
+    |<-- CHALLENGE  16-byte nonce --------------------------------|
+    |                                                             |
+    |   md5 every sector of both slots (104 x 1 KB, ~15 ms)       |
+    |-- MANIFEST_DIGEST  sha256 of the body, MAC over the nonce ->|
+    |<-- MANIFEST_NEEDED  only on a cache miss -------------------|
+    |-- MANIFEST  1880 B of body, fragmented -------------------->|
+    |-- MANIFEST_END  digest + MAC ------------------------------>|
+    |                              verify MAC, nonce, structure   |
+    |                      build the target, diff it per sector   |
+    |<-- PLAN_BEGIN  version, dst slot, steps, sha256 + MAC ------|
+    |                                                             |
+    |<-- STEP_WRITE  dst, offset, 256 B   (x4 per sector) --------|
+    |<-- STEP_WRITE_END  dst, md5 --------------------------------|
+    |   check md5, erase the page, program, re-read, check        |
+    |-- STEP_ACK  dst ------------------------------------------->|
+    |<-- STEP_COPY  dst, src slot, src index, md5 ----------------|
+    |   recorded only; the bootloader does the copying            |
+    |-- STEP_ACK  dst ------------------------------------------->|
+    |<-- PLAN_END ------------------------------------------------|
+    |-- PLAN_READY  steps left for the bootloader --------------->|
+    |<-- COMMIT --------------------------------------------------|
+    |                                                             |
+    |   arm the plan: clear one journal half-word, reboot         |
+    |   bootloader: run the copies, re-check every md5,           |
+    |               check image_sha256 and the signature,         |
+    |               trial boot the new slot                       |
+    |   self-test passes -> confirm, the new slot is active       |
+```
+
+Sector 0 carries the descriptor and is always sent last, so an interrupted
+request leaves a slot with no valid header and nothing to undo.
+
 ## What a request looks like
 
 ```
