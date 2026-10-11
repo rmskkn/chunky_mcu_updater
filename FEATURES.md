@@ -99,7 +99,12 @@ Design: [SECURITY.md](SECURITY.md).
 
 ## CLI — command line
 
-- 📋 **CLI-1 chunky-cli** — `chunky`: keygen, image build, manifest, plan with stats, store.
+- ✅ **CLI-1 chunky-cli** — `chunky` (crate `chunky_cli`): keygen (seed file mode 600, refused when readable by
+  others), pubkey, image build/info, manifest, plan (`--from` image or `--manifest`, skip/copy/write stats,
+  `-o` plan file), store add/ls, chips, completions (bash, zsh, fish; chip names with help). `--version` has
+  the git SHA and build time, colour off without a TTY or with `NO_COLOR`. Key files, `Manifest::of_running_image`
+  and `DirStore::list` are in `chunky_server`. Open: the Python wrapper (PY), no progress bar (nothing here takes
+  seconds), completion of store ids is not live.
 
 ## NET — transport
 

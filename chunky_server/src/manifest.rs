@@ -67,6 +67,27 @@ impl Manifest {
         }
     }
 
+    /// The manifest of a device running `active` (a full ACTIVE image) with an empty DFU, sealed as `scheme`.
+    pub fn of_running_image(geometry: &FlashGeometry, scheme: Scheme, active: &[u8]) -> Self {
+        let chunks = geometry.chunks() as usize;
+        let mut states: Vec<_> = active
+            .chunks(geometry.chunk as usize)
+            .take(chunks)
+            .map(ChunkState::of)
+            .collect();
+        states.resize(chunks, ChunkState::Blank);
+        Self {
+            header: ManifestHeader {
+                backend: geometry.backend as u8,
+                scheme: scheme as u8,
+                geometry_id: geometry.id(),
+                chunks: chunks as u16,
+            },
+            active: states,
+            dfu: vec![ChunkState::Blank; chunks],
+        }
+    }
+
     /// True when the device accepts images without a signature.
     pub fn unsigned(&self) -> bool {
         self.header.scheme == Scheme::Unsigned as u8

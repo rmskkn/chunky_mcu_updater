@@ -23,9 +23,10 @@ check-fw:
     cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features ed25519,chunky/chip-stm32h743zi
     cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features unsigned,chunky/chip-stm32h743zi
 
-# Build everything in release mode (the `chunky` binary is installed from here once CLI-1 lands)
+# Build everything in release mode and install the `chunky` binary (cargo bin dir)
 install:
     cargo build --release --workspace --locked
+    cargo install --path chunky_cli --locked
 
 # Bring this PC up to main: pull (refuses on local changes), then install
 deploy:

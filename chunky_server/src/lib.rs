@@ -7,6 +7,7 @@
 #![warn(missing_docs)]
 
 pub mod image;
+pub mod keys;
 pub mod manifest;
 pub mod planner;
 pub mod store;

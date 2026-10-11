@@ -72,6 +72,7 @@ trusts a key never accepts an unsigned image.
 | `chunky_swap` | `no_std` embassy-boot backend: the bootloader's decision and the application's handle |
 | `chunky_bank` | `no_std` hardware bank swap backend (dual-bank STM32): the same two things over a SWAP_BANK option bit |
 | `chunky_server` | Image builder and sealer, content-addressed blob store, planner |
+| `chunky_cli` | The `chunky` command: keygen, image build, manifest, plan, store (a thin layer over `chunky_server`) |
 | `chunky_sim` | Flash simulator (F1, G0, H7, RP2350 write rules, torn writes, ECC faults) and a simulated device |
 
 ```sh
@@ -79,6 +80,26 @@ just test    # unit tests, planner properties, security cases, power-cut sweeps
 just lint    # clippy, fmt, firmware-target builds (signed and unsigned)
 CHUNKY_SWEEP_SEEDS=500 just test   # tear every operation 500 ways
 ```
+
+## The `chunky` command
+
+```sh
+just install                                   # builds and installs `chunky`
+chunky keygen release.key                      # mode 600; prints the public key for the bootloader
+chunky image build app.bin -o app-1.img --chip stm32g0b1re --key release.key --product 7 --version 1
+chunky image build app2.bin -o app-2.img --chip stm32g0b1re --key release.key --product 7 --version 2
+chunky plan --chip stm32g0b1re --from app-1.img --to app-2.img -o update.plan
+                                               # skip / copy / write / erase counts and bytes on the wire
+chunky plan --chip stm32g0b1re --manifest device.manifest --to app-2.img
+chunky manifest device.manifest --chip stm32g0b1re
+chunky store add app-2.img --store ./blobs --chip stm32g0b1re ; chunky store ls --store ./blobs
+chunky chips                                   # presets
+chunky completions fish > ~/.config/fish/completions/chunky.fish   # also bash, zsh
+```
+
+`--unsigned` builds an image for devices built with the `unsigned` opt-out and warns about it. The key file is
+created with mode 600, never overwritten, and refused when group or others can read it; the CLI never prints it.
+Colour is off when the output is not a terminal or `NO_COLOR` is set.
 
 ## Supported chips
 

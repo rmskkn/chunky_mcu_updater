@@ -60,6 +60,30 @@ impl DirStore {
         })
     }
 
+    /// Every chunk in the store with its size, by hash. Entries that are not blobs (temporary files) are skipped.
+    pub fn list(&self) -> io::Result<Vec<(ChunkHash, u64)>> {
+        let mut out = Vec::new();
+        for dir in fs::read_dir(&self.root)? {
+            let dir = dir?;
+            if !dir.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(dir.path())? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(bytes) = name
+                    .to_str()
+                    .and_then(crate::keys::from_hex::<{ chunky::hash::HASH_LEN }>)
+                else {
+                    continue;
+                };
+                out.push((ChunkHash(bytes), entry.metadata()?.len()));
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     fn path(&self, hash: &ChunkHash) -> PathBuf {
         let name: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
         self.root.join(&name[..2]).join(name)
