@@ -69,18 +69,22 @@ can trust what it is diffing against, and the session always runs over TLS.
 
 ## Proof of concept
 
-[`poc/`](poc/) is a working host implementation of the update path: a server, a
-device client, and a 128 KB emulated STM32F103CB flash with page erase and
-programming that refuses to set a bit without an erase. It transfers a real
-45 772 B firmware binary sector by sector, applies it through the bootloader
-path, and demonstrates resume after power loss, unroll of a tampered image, and
-revert after an unconfirmed trial boot. `poc/scripts/overhead.sh` measures the
-wire cost that section 17 of the design claims, and writing the PoC corrected
-three errors in it.
+[`poc/`](poc/) is a working host implementation of one update request: a
+server, a device client, and a 128 KB emulated STM32F103CB flash with page
+erase and programming that refuses to set a bit without an erase. It transfers
+a real 45 772 B firmware binary sector by sector and applies it through the
+bootloader path, reporting which sectors differed, what went over the wire
+against a full transfer, and what the device spends in flash. Writing it
+corrected three errors in the design.
 
 ```sh
-cd poc && make && scripts/run_demo.sh
+cd poc
+make
+scripts/run_demo.sh
 ```
+
+[`poc/README.md`](poc/README.md) has the architecture diagrams, the message
+exchange, and what the PoC deliberately leaves out.
 
 ## Read next
 
@@ -109,37 +113,35 @@ cd poc && make && scripts/run_demo.sh
 
 ## Running the PoC by hand
 
-```sh
-cd poc
-scripts/lab.sh setup            # fresh flash, slot 0 provisioned with v1
-```
+There is no setup step: the device is created on first use with the reference
+binary in slot 0, so its first manifest describes real firmware.
 
 Terminal 1, left running:
 
 ```sh
-scripts/lab.sh server           # --no-copy, --full, --tamper N go here
+cd poc
+scripts/lab.sh server
 ```
 
 Terminal 2:
 
 ```sh
-scripts/lab.sh release 2        # publish v2 (4 patched runs)
-scripts/lab.sh session          # one update session
-scripts/lab.sh boot             # bootloader applies and verifies
-scripts/lab.sh confirm          # self-test passes
+scripts/lab.sh release 4        # publish a release with 4 patched runs
+scripts/lab.sh update           # one request: manifest, delta, apply, confirm
 scripts/lab.sh status
 ```
 
-The server stays up across sessions and re-reads the image directory each time,
-so `release 3 12` then `session` tests a new release without restarting it.
 Or one terminal, backgrounding the server in your own shell:
 
 ```sh
 scripts/lab.sh server &
-scripts/lab.sh release 2 && scripts/lab.sh session && scripts/lab.sh boot
+scripts/lab.sh release 4 && scripts/lab.sh update
 kill %1
 ```
 
-The server exits with the shell that started it, so background it from your own
-shell rather than from a script that then exits.
+The server stays up across requests, re-reads the release file each time, and
+prints one stats row per request, so `release` then `update` again adds another
+row. It exits with the shell that started it, so background it from your own
+shell rather than from a script that then exits. `scripts/lab.sh reset` forgets
+the device so it ships fresh again.
 
