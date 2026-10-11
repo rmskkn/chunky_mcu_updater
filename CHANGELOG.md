@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-11
+
 ### Added
 
 - `chunky` command line (crate `chunky_cli`): `keygen`, `pubkey`, `image build|info`, `manifest`, `plan`,
