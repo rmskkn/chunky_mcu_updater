@@ -16,7 +16,8 @@
 static const char *opt_flash = "flash.bin";
 static const char *opt_host  = "127.0.0.1";
 static int opt_port = 7700;
-static int opt_fail_after = -1;
+static const char *opt_initial = NULL;
+static int opt_status = 0;
 
 /* Device-time model. The host runs the same code thousands of times faster,
  * so the interesting number is what the work would cost on the part: hashing
@@ -44,6 +45,7 @@ static void time_report(const char *phase, double host_ms, const flash_t *f)
            f103_flash_ms(f->n_erase, f->prog_bytes, 0),
            f103_flash_ms(f->n_erase, f->prog_bytes, 1),
            f->n_erase, f->prog_bytes);
+    if (!machine_output()) { fflush(stdout); return; }
     printf("TIME phase=%s host_ms=%.3f model_min_ms=%.1f model_max_ms=%.1f "
            "flash_min_ms=%.1f flash_max_ms=%.1f erases=%ld "
            "prog_bytes=%zu md5_bytes=%zu sha_bytes=%zu ecdsa_ms=%.0f\n",
@@ -53,6 +55,39 @@ static void time_report(const char *phase, double host_ms, const flash_t *f)
            f->n_erase, f->prog_bytes,
            md5_bytes, sha_bytes, ecdsa_ms);
     fflush(stdout);
+}
+
+/* Opens the device, creating it on first use with the firmware it shipped
+ * with in slot 0. The manifest the client sends is a statement about real
+ * flash contents, so the device has to have some. */
+static void open_device(flash_t *f)
+{
+    if (flash_open(f, opt_flash) == 0) return;
+    if (errno != ENOENT) die("cannot open %s: %s", opt_flash, strerror(errno));
+    if (!opt_initial)
+        die("%s does not exist\n"
+            "  pass --initial FILE: the firmware the device shipped with,\n"
+            "  which is what its first manifest describes",
+            opt_flash);
+
+    size_t binlen;
+    uint8_t *bin = read_file(opt_initial, &binlen);
+    if (!bin) die("cannot read %s", opt_initial);
+    if (flash_create(opt_flash) < 0) die("cannot create %s", opt_flash);
+    /* Seed with the fault injection and the counters off: this is the factory
+     * programmer's work, not the update's, and it must not show up in either
+     * the timings or --fail-after. */
+    if (flash_open(f, opt_flash) < 0) die("cannot open %s", opt_flash);
+
+    uint8_t root_key[32];
+    poc_root_key(root_key);
+    if (image_install(f, 0, bin, binlen, 1, root_key) < 0)
+        die("%s is %zu B, over the %d B slot payload", opt_initial, binlen, IMG_MAX_PAYLOAD);
+    free(bin);
+    printf("device: created %s with %s in slot 0 as version 1\n", opt_flash, opt_initial);
+
+    f->n_erase = f->n_prog = 0;
+    f->prog_bytes = 0;
 }
 
 static const char *state_name(int s)
@@ -94,6 +129,7 @@ static void do_unroll(flash_t *f, meta_t *m, const char *why)
 
 /* ---------------------------------------------------------------- session */
 
+/* 0 = a plan was staged, 1 = nothing to do. */
 static int cmd_session(void)
 {
     flash_t f;
@@ -103,11 +139,12 @@ static int cmd_session(void)
     uint8_t pay[FRAME_MAX_PAYLOAD];
     size_t n;
     uint8_t dev_key[32], root_key[32];
+    int rc = 0;
 
     poc_dev_key(dev_key);
     poc_root_key(root_key);
 
-    if (flash_open(&f, opt_flash, opt_fail_after) < 0) die("cannot open %s", opt_flash);
+    open_device(&f);
     identity_t *id = identity_get(&f);
     meta_load(&f, &m);
 
@@ -130,6 +167,11 @@ static int cmd_session(void)
     h.active_slot     = m.active_slot;
     h.last_result     = (uint8_t)m.last_result;
     h.running_version = slot_version(&f, m.active_slot);
+    {
+        const uint8_t *slot = flash_at(&f, SLOT_BASE(m.active_slot));
+        const image_desc_t *d = image_desc(slot);
+        if (d->magic == IMG_MAGIC) image_hash(slot, h.running_sha256);
+    }
     frame_send(&l, MSG_HELLO, &h, sizeof h);
 
     if (frame_expect(&l, MSG_CHALLENGE, pay, &n) < 0) die("no CHALLENGE");
@@ -169,8 +211,8 @@ static int cmd_session(void)
         printf("device: manifest digest accepted, body elided\n");
     }
 
-    if (t == MSG_NO_UPDATE)        { printf("device: no update offered\n"); goto done; }
-    if (t == MSG_MANIFEST_REJECT)  { printf("device: manifest rejected, reason %u\n", pay[0]); goto done; }
+    if (t == MSG_NO_UPDATE)        { printf("device: no update offered\n"); rc = 1; goto done; }
+    if (t == MSG_MANIFEST_REJECT)  { printf("device: manifest rejected, reason %u\n", pay[0]); rc = 1; goto done; }
     if (t != MSG_PLAN_BEGIN)       die("protocol: expected PLAN_BEGIN, got %d", t);
 
     msg_plan_begin_t pb;
@@ -286,7 +328,7 @@ done:
     time_report("session", now_ms() - t_start, &f);
     close(fd);
     flash_close(&f);
-    return 0;
+    return rc;
 }
 
 /* ------------------------------------------------------------- bootloader */
@@ -299,7 +341,7 @@ static int cmd_boot(void)
     const char *why;
 
     poc_root_key(root_key);
-    if (flash_open(&f, opt_flash, opt_fail_after) < 0) die("cannot open %s", opt_flash);
+    open_device(&f);
     double t_start = now_ms(), t_apply = 0, t_verify = 0;
     if (meta_load(&f, &m) < 0) printf("boot: no valid meta bank, assuming slot 0\n");
 
@@ -420,7 +462,7 @@ static int cmd_confirm(void)
     flash_t f;
     meta_t m;
 
-    if (flash_open(&f, opt_flash, -1) < 0) die("cannot open %s", opt_flash);
+    open_device(&f);
     meta_load(&f, &m);
     if (m.plan_state != PLAN_TRIAL) {
         printf("confirm: nothing on trial (state %s)\n", state_name(m.plan_state));
@@ -439,17 +481,6 @@ static int cmd_confirm(void)
     return 0;
 }
 
-static int cmd_unroll(void)
-{
-    flash_t f;
-    meta_t m;
-    if (flash_open(&f, opt_flash, -1) < 0) die("cannot open %s", opt_flash);
-    meta_load(&f, &m);
-    do_unroll(&f, &m, "requested");
-    flash_close(&f);
-    return 0;
-}
-
 static int cmd_status(void)
 {
     flash_t f;
@@ -458,7 +489,7 @@ static int cmd_status(void)
     uint8_t d[SHA256_LEN];
     char hex[80];
 
-    if (flash_open(&f, opt_flash, -1) < 0) die("cannot open %s", opt_flash);
+    open_device(&f);
     identity_t *id = identity_get(&f);
     meta_load(&f, &m);
 
@@ -487,24 +518,61 @@ static int cmd_status(void)
     return 0;
 }
 
+/* Reads the live plan state, so the driver below knows when a trial has
+ * resolved one way or the other. */
+static int plan_state_now(void)
+{
+    flash_t f;
+    meta_t m;
+    open_device(&f);
+    meta_load(&f, &m);
+    int st = m.plan_state;
+    flash_close(&f);
+    return st;
+}
+
+static int usage(void)
+{
+    fprintf(stderr,
+        "usage: cb-client --flash FILE [options]\n"
+        "  runs one whole update attempt: send the manifest, take the sectors\n"
+        "  the server says differ, apply them, verify, boot and confirm.\n"
+        "\n"
+        "  --flash FILE       emulated flash device (required)\n"
+        "  --initial FILE     firmware to create the device with, first run only\n"
+        "  --host H           server address, default 127.0.0.1\n"
+        "  --port N           server port, default 7700\n"
+        "  --status           print the device state and exit\n");
+    return 2;
+}
+
 int main(int argc, char **argv)
 {
-    const char *cmd = argc > 1 ? argv[1] : "status";
-
-    for (int i = 2; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--flash") && i + 1 < argc)           opt_flash = argv[++i];
         else if (!strcmp(argv[i], "--host") && i + 1 < argc)       opt_host = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc)       opt_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--fail-after") && i + 1 < argc) opt_fail_after = atoi(argv[++i]);
-        else die("unknown option %s", argv[i]);
+        else if (!strcmp(argv[i], "--initial") && i + 1 < argc)    opt_initial = argv[++i];
+        else if (!strcmp(argv[i], "--status"))                     opt_status = 1;
+        else return usage();
     }
 
-    if (!strcmp(cmd, "session")) return cmd_session();
-    if (!strcmp(cmd, "boot"))    return cmd_boot();
-    if (!strcmp(cmd, "confirm")) return cmd_confirm();
-    if (!strcmp(cmd, "unroll"))  return cmd_unroll();
-    if (!strcmp(cmd, "status"))  return cmd_status();
+    if (opt_status) return cmd_status();
 
-    fprintf(stderr, "usage: cb-client {session|boot|confirm|unroll|status} [options]\n");
-    return 2;
+    /* 1. Ask for an update by reporting what is in flash. */
+    if (cmd_session() != 0) {
+        cmd_boot();
+        return 0;
+    }
+
+    /* 2. Reboot into the bootloader: apply, verify, start the trial. */
+    cmd_boot();
+
+    /* 3. Either pass the self-test, or let the trial boots run out and watch
+     *    the device revert on its own. */
+    if (plan_state_now() == PLAN_TRIAL)
+        cmd_confirm();
+
+    cmd_boot();
+    return cmd_status();
 }

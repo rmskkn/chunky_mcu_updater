@@ -29,6 +29,10 @@ typedef struct {
     uint8_t  active_slot;
     uint8_t  last_result;
     uint32_t running_version;
+    /* image_sha256 of the active slot, or zeros if it holds no image. The hash
+     * excludes the descriptor (DESIGN.md 10.1), so it identifies the firmware
+     * content independently of the version stamped on it. */
+    uint8_t  running_sha256[SHA256_LEN];
 } msg_hello_t;
 
 typedef struct { uint8_t nonce[NONCE_LEN]; } msg_challenge_t;

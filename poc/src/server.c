@@ -11,7 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 #ifdef __linux__
@@ -20,30 +19,11 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 
-static const char *opt_images = "images";
+static const char *opt_image = NULL;   /* the release to serve */
 static const char *opt_cache  = "cache";
 static int opt_port    = 7700;
-static int opt_full    = 0;
-static int opt_no_copy = 0;
-static int opt_tamper  = -1;
-static int opt_once    = 0;
 
 static uint8_t dev_key[32], root_key[32];
-
-static int newest_version(char *path_out, size_t pathlen)
-{
-    DIR *d = opendir(opt_images);
-    struct dirent *e;
-    int best = -1;
-    if (!d) die("cannot open image directory %s", opt_images);
-    while ((e = readdir(d))) {
-        int v;
-        if (sscanf(e->d_name, "v%d.bin", &v) == 1 && v > best) best = v;
-    }
-    closedir(d);
-    if (best >= 0) snprintf(path_out, pathlen, "%s/v%d.bin", opt_images, best);
-    return best;
-}
 
 static void cache_path(char *out, size_t len, const uint8_t id[16])
 {
@@ -61,67 +41,76 @@ static void cache_path(char *out, size_t len, const uint8_t id[16])
 #define COPY_WIRE    ((FRAME_OVERHEAD + (int)sizeof(msg_step_copy_t)) \
                       + (FRAME_OVERHEAD + 2))
 
-static double link_s(double bytes, double baud) { return bytes * 10.0 / baud; }
-
-static void report(const link_t *l, const plan_t *p)
+/* "1-7,9,20-40": sector indices, sorted and run-length folded, so a plan that
+ * touches most of the slot stays one readable line. */
+static void sector_list(const plan_t *p, int op, char *out, size_t cap)
 {
+    int idx[SECTORS_SLOT], n = 0;
+    size_t used = 0;
+
+    for (int k = 0; k < p->count; k++)
+        if (p->step[k].op == op) idx[n++] = p->step[k].dst;
+    for (int i = 1; i < n; i++)                 /* insertion sort, n <= 52 */
+        for (int j = i; j > 0 && idx[j - 1] > idx[j]; j--) {
+            int t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t;
+        }
+    if (!n) { snprintf(out, cap, "-"); return; }
+
+    for (int i = 0; i < n; ) {
+        int j = i;
+        while (j + 1 < n && idx[j + 1] == idx[j] + 1) j++;
+        int w = (j > i)
+            ? snprintf(out + used, cap - used, "%s%d-%d", used ? "," : "", idx[i], idx[j])
+            : snprintf(out + used, cap - used, "%s%d", used ? "," : "", idx[i]);
+        if (w < 0 || (size_t)w >= cap - used) { snprintf(out + used, cap - used, ",..."); return; }
+        used += (size_t)w;
+        i = j + 1;
+    }
+}
+
+/* One row per update request, so repeated requests build the table up. */
+static void report(const char *label, const link_t *l, const plan_t *p)
+{
+    static int header;
     double wire = (double)(l->tx_bytes + l->rx_bytes);
     /* Everything that is not a step is session overhead: manifest, plan
-     * header, closing messages. The full-image baseline pays it too. */
+     * header, closing messages. A full-image transfer pays it too. */
     double fixed = wire - (double)p->n_write * SECTOR_WIRE
                         - (double)p->n_copy * COPY_WIRE;
-    double full_wire = fixed + (double)SECTORS_SLOT * SECTOR_WIRE;
+    double full = fixed + (double)SECTORS_SLOT * SECTOR_WIRE;
 
-    /* Copies program the destination as well, so both count as sectors written. */
+    /* Copies program the destination as well, so both count as sectors
+     * written, and flash time is what the device spends on them. */
     int sectors = p->n_copy + p->n_write;
-    double fl_min = sectors * f103_sector_ms(0), fl_max = sectors * f103_sector_ms(1);
-    double ffl_min = SECTORS_SLOT * f103_sector_ms(0);
-    double ffl_max = SECTORS_SLOT * f103_sector_ms(1);
+    char flash[32];
+    snprintf(flash, sizeof flash, "%.0f-%.0f",
+             sectors * f103_sector_ms(0), sectors * f103_sector_ms(1));
 
-    printf("server: steps skip=%d copy=%d write=%d\n", p->n_skip, p->n_copy, p->n_write);
-    printf("server: wire tx=%llu rx=%llu total=%.0f bytes in %llu frames\n",
-           (unsigned long long)l->tx_bytes, (unsigned long long)l->rx_bytes,
-           wire, (unsigned long long)(l->tx_frames + l->rx_frames));
+    char wl[320], cl[320];
+    sector_list(p, OP_WRITE, wl, sizeof wl);
+    sector_list(p, OP_COPY, cl, sizeof cl);
+    printf("sectors: %d of %d differ; %d sent, %d copied on the device, %d already right\n",
+           p->n_copy + p->n_write, SECTORS_SLOT, p->n_write, p->n_copy, p->n_skip);
+    printf("  sent    %s\n", wl);
+    printf("  copied  %s\n", cl);
 
-    printf("server: data   %.0f B sent vs %.0f B for a full image"
-           "  ->  saved %.0f B (%.1f %%)\n",
-           wire, full_wire, full_wire - wire, 100.0 * (full_wire - wire) / full_wire);
-    printf("server: flash  %d sectors vs %d  ->  %.0f-%.0f ms vs %.0f-%.0f ms"
-           "  ->  saved %.0f-%.0f ms\n",
-           sectors, SECTORS_SLOT, fl_min, fl_max, ffl_min, ffl_max,
-           ffl_min - fl_min, ffl_max - fl_max);
-
-    static const double baud[] = { 9600, 115200 };
-    for (unsigned i = 0; i < sizeof baud / sizeof *baud; i++) {
-        double d = link_s(wire, baud[i]), f = link_s(full_wire, baud[i]);
-        printf("server: %6.0f baud  link %.2f s vs %.2f s   total %.2f-%.2f s vs "
-               "%.2f-%.2f s  ->  saved %.2f-%.2f s\n",
-               baud[i], d, f, d + fl_min / 1000.0, d + fl_max / 1000.0,
-               f + ffl_min / 1000.0, f + ffl_max / 1000.0,
-               (f + ffl_min / 1000.0) - (d + fl_min / 1000.0),
-               (f + ffl_max / 1000.0) - (d + fl_max / 1000.0));
+    if (!header) {
+        printf("\n%-26s %4s %4s %5s %8s %7s %9s %7s %13s\n",
+               "case", "skip", "copy", "write", "wire", "of full",
+               "saved B", "saved", "flash ms");
+        printf("%-26s %4s %4s %5s %8s %7s %9s %7s %13s\n",
+               "--------------------------", "----", "----", "-----",
+               "--------", "-------", "---------", "-------", "-------------");
+        header = 1;
     }
-
-    printf("STATS skip=%d copy=%d write=%d tx=%llu rx=%llu wire=%.0f full=%.0f pct=%.1f\n",
-           p->n_skip, p->n_copy, p->n_write,
-           (unsigned long long)l->tx_bytes, (unsigned long long)l->rx_bytes,
-           wire, full_wire, 100.0 * wire / full_wire);
-    printf("SAVE wire=%.0f full_wire=%.0f saved_bytes=%.0f saved_pct=%.1f "
-           "sectors=%d full_sectors=%d flash_min_ms=%.0f flash_max_ms=%.0f "
-           "full_flash_min_ms=%.0f full_flash_max_ms=%.0f "
-           "link9600_s=%.2f full_link9600_s=%.2f "
-           "link115200_s=%.2f full_link115200_s=%.2f\n",
-           wire, full_wire, full_wire - wire,
-           100.0 * (full_wire - wire) / full_wire,
-           sectors, SECTORS_SLOT, fl_min, fl_max, ffl_min, ffl_max,
-           link_s(wire, 9600), link_s(full_wire, 9600),
-           link_s(wire, 115200), link_s(full_wire, 115200));
+    printf("%-26s %4d %4d %5d %8.0f %6.1f%% %9.0f %6.1f%% %13s\n",
+           label, p->n_skip, p->n_copy, p->n_write, wire,
+           100.0 * wire / full, full - wire, 100.0 * (full - wire) / full, flash);
     fflush(stdout);
 }
 
 static void session(int fd)
 {
-    double t_session = now_ms();
     link_t l;
     uint8_t pay[FRAME_MAX_PAYLOAD];
     size_t n;
@@ -129,7 +118,7 @@ static void session(int fd)
     msg_challenge_t ch;
     manifest_t dev;
     plan_t plan;
-    char path[512], cpath[512];
+    char cpath[512];
 
     link_init(&l, fd);
 
@@ -215,26 +204,32 @@ static void session(int fd)
         printf("server: manifest received and verified, %zu B of body\n", MANIFEST_BODY_LEN);
     }
 
-    /* Target image. */
-    int ver = newest_version(path, sizeof path);
-    if (ver < 0) die("no images in %s", opt_images);
-    if ((uint32_t)ver == hello.running_version) {
+    /* Target image: whatever file was named on the command line, re-read each
+     * session so a new release can be dropped in without a restart. The
+     * version is the device's own plus one, which keeps it monotonic without
+     * the server tracking anything. */
+    size_t binlen;
+    uint8_t *bin = read_file(opt_image, &binlen);
+    if (!bin) die("cannot read %s", opt_image);
+    uint32_t ver = hello.running_version + 1;
+    uint8_t *target = malloc(SLOT_SIZE);
+    if (image_build(bin, binlen, ver, root_key, target) < 0)
+        die("%s is %zu B, over the %d B slot payload", opt_image, binlen, IMG_MAX_PAYLOAD);
+    free(bin);
+
+    /* The device already runs this firmware if its active slot has the same
+     * content hash. image_sha256 excludes the descriptor, so the version
+     * stamp does not affect the comparison. */
+    if (!memcmp(hello.running_sha256, image_desc(target)->sha256, SHA256_LEN)) {
         frame_send(&l, MSG_NO_UPDATE, NULL, 0);
-        printf("server: device already runs version %d, nothing to do\n", ver);
+        printf("server: device already runs this image, nothing to do\n");
+        free(target);
         return;
     }
 
-    size_t binlen;
-    uint8_t *bin = read_file(path, &binlen);
-    if (!bin) die("cannot read %s", path);
-    uint8_t *target = malloc(SLOT_SIZE);
-    if (image_build(bin, binlen, (uint32_t)ver, root_key, target) < 0)
-        die("%s is %zu B, over the %d B slot payload", path, binlen, IMG_MAX_PAYLOAD);
-    free(bin);
-
     int dst_slot = hello.active_slot ? 0 : 1;
     double t_plan = now_ms();
-    plan_build(&dev, target, dst_slot, !opt_no_copy, opt_full, opt_tamper, &plan);
+    plan_build(&dev, target, dst_slot, &plan);
     t_plan = now_ms() - t_plan;
     printf("server: plan built in %.2f ms\n", t_plan);
 
@@ -262,13 +257,6 @@ static void session(int fd)
             memcpy(sect, target + (size_t)s->dst * PAGE_SIZE, PAGE_SIZE);
             uint8_t md[MD5_LEN];
             memcpy(md, s->md5, MD5_LEN);
-            if (opt_tamper == s->dst) {
-                /* Alter the bytes AND the advertised hash, so the per-sector
-                 * check passes and only the image-level gate can catch it. */
-                sect[7] ^= 0xFF;
-                md5(sect, PAGE_SIZE, md);
-                printf("server: tampering with sector %u (consistent md5)\n", s->dst);
-            }
             for (size_t off = 0; off < PAGE_SIZE; off += WRITE_CHUNK) {
                 uint8_t buf[5 + WRITE_CHUNK];
                 uint16_t len = WRITE_CHUNK;
@@ -296,8 +284,11 @@ static void session(int fd)
     frame_send(&l, MSG_COMMIT, NULL, 0);
 
 out:
-    printf("server: session wall time %.2f ms\n", now_ms() - t_session);
-    report(&l, &plan);
+    {
+        char label[32];
+        snprintf(label, sizeof label, "v%u into slot %d", ver, dst_slot);
+        report(label, &l, &plan);
+    }
     free(target);
 }
 
@@ -308,12 +299,8 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc)        opt_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--images") && i + 1 < argc) opt_images = argv[++i];
+        else if (!strcmp(argv[i], "--image") && i + 1 < argc)  opt_image = argv[++i];
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc)  opt_cache = argv[++i];
-        else if (!strcmp(argv[i], "--tamper") && i + 1 < argc) opt_tamper = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--full"))                   opt_full = 1;
-        else if (!strcmp(argv[i], "--no-copy"))                opt_no_copy = 1;
-        else if (!strcmp(argv[i], "--once"))                   opt_once = 1;
         else die("unknown option %s", argv[i]);
     }
 
@@ -329,13 +316,20 @@ int main(int argc, char **argv)
 #endif
     mkdir(opt_cache, 0755);
 
+    if (!opt_image)
+        die("no image to serve\n"
+            "  usage: cb-server --image FILE [--port N] [--cache DIR]");
+
     int srv = tcp_listen(opt_port);
     if (srv < 0)
         die("cannot listen on port %d: %s\n"
             "  another server is probably still running: pkill cb-server\n"
             "  or pick a free port on both sides: --port N",
             opt_port, strerror(errno));
-    printf("server: listening on 127.0.0.1:%d, images from %s\n", opt_port, opt_images);
+    printf("server: listening on 127.0.0.1:%d, serving %s\n", opt_port, opt_image);
+    printf("server: a full image is %d sectors, %.0f-%.0f ms of flash on the device\n",
+           SECTORS_SLOT, SECTORS_SLOT * f103_sector_ms(0),
+           SECTORS_SLOT * f103_sector_ms(1));
     fflush(stdout);
 
     for (;;) {
@@ -343,7 +337,6 @@ int main(int argc, char **argv)
         if (fd < 0) continue;
         session(fd);
         close(fd);
-        if (opt_once) break;
     }
     close(srv);
     return 0;

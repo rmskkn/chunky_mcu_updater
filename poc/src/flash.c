@@ -35,17 +35,14 @@ int flash_create(const char *path)
     return rc;
 }
 
-int flash_open(flash_t *f, const char *path, int fail_after)
+int flash_open(flash_t *f, const char *path)
 {
     f->fd = open(path, O_RDWR);
     if (f->fd < 0) return -1;
     f->map = mmap(NULL, FLASH_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, f->fd, 0);
     if (f->map == MAP_FAILED) { close(f->fd); return -1; }
-    f->fail_after = fail_after;
-    f->programs = 0;
     f->n_erase = f->n_prog = 0;
     f->prog_bytes = 0;
-    f->io_ms = 0;
     f->path = path;
     live_bank = -1;
     return 0;
@@ -64,24 +61,12 @@ static void sync_range(flash_t *f, size_t off, size_t len)
     msync(f->map + start, len + (off - start), MS_SYNC);
 }
 
-static void maybe_power_fail(flash_t *f)
-{
-    if (f->fail_after >= 0 && f->programs >= f->fail_after) {
-        fprintf(stderr, "device: simulated power loss after %ld flash writes\n", f->programs);
-        _exit(9);
-    }
-}
-
 void flash_erase_page(flash_t *f, int page)
 {
     size_t off = (size_t)page * PAGE_SIZE;
-    double t0 = now_ms();
     memset(f->map + off, 0xFF, PAGE_SIZE);
     sync_range(f, off, PAGE_SIZE);
-    f->io_ms += now_ms() - t0;
     f->n_erase++;
-    f->programs++;
-    maybe_power_fail(f);
 }
 
 void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
@@ -99,14 +84,10 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
             die("flash: program at 0x%zx would set bits (0x%02x -> 0x%02x); "
                 "erase the page first", off + i, old, src[i]);
     }
-    double t0 = now_ms();
     memcpy(f->map + off, src, len);
     sync_range(f, off, len);
-    f->io_ms += now_ms() - t0;
     f->n_prog++;
     f->prog_bytes += len;
-    f->programs++;
-    maybe_power_fail(f);
 }
 
 const uint8_t *flash_at(flash_t *f, size_t off) { return f->map + off; }

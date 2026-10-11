@@ -1,39 +1,34 @@
 #!/usr/bin/env bash
-# End to end: provision v1, update to v2 over the wire, boot, confirm.
+# One update request, end to end. The device reports what is in its flash, the
+# server sends only the sectors that differ, the bootloader applies them.
+#
+# The server stays up, so each release here is another request and another row
+# in its stats table.
 source "$(dirname "$0")/common.sh"
 need_build
 need_reference
-fresh_run_dir
+
+rm -rf "$RUN"; mkdir -p "$CACHE"
+cp "$KLIPPER_BIN" "$BASE"
+cp "$BASE" "$IMAGE"
 trap server_stop EXIT
 
-cp "$KLIPPER_BIN" "$IMAGES/v1.bin"
-"$CB_FLASH" mutate "$IMAGES/v1.bin" "$IMAGES/v2.bin" 8 1234 >/dev/null
+server_start
 
-rule "flash map"
-"$CB_FLASH" init "$FLASH"
+rule "a release with 4 patched runs"
+"$CB_FLASH" mutate "$BASE" "$IMAGE" 4 1234 >/dev/null
+update 2>&1 | grep -Ev '^time:'
+
+rule "a release with 12 patched runs"
+"$CB_FLASH" mutate "$BASE" "$IMAGE" 12 12 >/dev/null
+update 2>&1 | grep -E 'plan v|booting'
+
+rule "the same release again: the manifest already matches it"
+update 2>&1 | grep -E 'no update|booting'
+
+rule "flash layout"
 "$CB_FLASH" map "$FLASH"
 
-rule "provision slot 0 with v1, slot 1 left erased"
-"$CB_FLASH" provision "$FLASH" 0 "$IMAGES/v1.bin" 1
-"$CB_CLIENT" boot --flash "$FLASH"
-"$CB_CLIENT" status --flash "$FLASH"
-
-rule "update session: v1 -> v2"
-mv "$IMAGES/v1.bin" "$RUN/v1.bin.keep"          # offer v2 as the newest
-server_start
-"$CB_CLIENT" session --flash "$FLASH" --port "$PORT"
 server_stop
-grep -E '^(server: (steps|wire|plan|manifest))' "$RUN/server.log" || true
-
-rule "bootloader applies the plan"
-"$CB_CLIENT" boot --flash "$FLASH"
-
-rule "self-test passes, confirm"
-"$CB_CLIENT" confirm --flash "$FLASH"
-"$CB_CLIENT" boot --flash "$FLASH"
-"$CB_CLIENT" status --flash "$FLASH"
-
-rule "second session: nothing to do"
-server_start
-"$CB_CLIENT" session --flash "$FLASH" --port "$PORT"
-server_stop
+rule "what the server saw"
+cat "$RUN/server.log"

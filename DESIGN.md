@@ -976,8 +976,8 @@ Framing costs 10 B per frame (2 magic + 2 length + 1 type + 1 sequence +
 
 The numbers below are **measured**, not modelled: they come from the host PoC
 in `poc/`, which runs the real protocol over a real socket against a 128 KB
-emulated flash and a 45 772 B reference binary. `scripts/overhead.sh` reproduces
-the table.
+emulated flash and a 45 772 B reference binary. The PoC prints the same
+figures, one row per update request, for whatever release it is given.
 
 Steady state, destination slot holding the previous release:
 
