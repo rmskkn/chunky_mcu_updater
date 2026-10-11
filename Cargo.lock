@@ -118,6 +118,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunky_bank"
+version = "0.3.0"
+dependencies = [
+ "chunky",
+ "embedded-storage",
+]
+
+[[package]]
 name = "chunky_server"
 version = "0.3.0"
 dependencies = [
@@ -131,6 +139,7 @@ name = "chunky_sim"
 version = "0.3.0"
 dependencies = [
  "chunky",
+ "chunky_bank",
  "chunky_server",
  "chunky_swap",
  "embedded-storage",

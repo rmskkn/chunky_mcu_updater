@@ -5,11 +5,12 @@ changed**, and that can always get the device back to the firmware it was runnin
 
 Fork of Roman Skakun's [chunky_mcu_updater](https://github.com/rmskkn/chunky_mcu_updater). His design is in
 [DESIGN.md](DESIGN.md), unchanged. This fork builds it in Rust on top of
-[embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot), generic across STM32F1, G0, H7 and
-RP2350.
+[embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot) and on hardware bank swap, generic
+across STM32F1, G0, H7 and RP2350.
 
-> **Status: first prototype, host only.** The delta layer, the embassy-boot swap backend and the planner run in a
-> flash simulator and pass power-cut sweeps on every family model. No hardware and no transport yet.
+> **Status: first prototype, host only.** The delta layer, the embassy-boot swap backend, the bank swap backend
+> and the planner run in a flash simulator and pass power-cut sweeps on every family model. No hardware and no
+> transport yet.
 > [FEATURES.md](FEATURES.md) has the state of every piece.
 
 ## Purpose
@@ -28,7 +29,8 @@ survive a failed update.
 3. **The device applies the plan into DFU**, trusting none of it: order, ranges and hashes are checked, only blank
    chunks are programmed, and the whole image must verify against its signed descriptor before a swap is asked for.
 4. **The bootloader swaps** (embassy-boot, power-fail safe), after verifying the staged image itself. The new
-   image gets **one trial boot**: it confirms, or the next reset reverts it.
+   image gets **one trial boot**: it confirms, or the next reset reverts it. On dual-bank parts nothing is
+   swapped: the bootloader verifies the other bank and flips the SWAP_BANK option bit, and a revert flips it back.
 5. **A power cut anywhere** just means the device boots what it has, hashes again and gets a plan for what is
    still missing.
 
@@ -68,6 +70,7 @@ trusts a key never accepts an unsigned image.
 |---|---|
 | `chunky` | `no_std` core: geometry, manifest, plan format, apply engine, descriptor, version floor, ECC-tolerant reads |
 | `chunky_swap` | `no_std` embassy-boot backend: the bootloader's decision and the application's handle |
+| `chunky_bank` | `no_std` hardware bank swap backend (dual-bank STM32): the same two things over a SWAP_BANK option bit |
 | `chunky_server` | Image builder and sealer, content-addressed blob store, planner |
 | `chunky_sim` | Flash simulator (F1, G0, H7, RP2350 write rules, torn writes, ECC faults) and a simulated device |
 
@@ -86,7 +89,7 @@ anything else is a compile error.
 |---|---|---|---|
 | STM32F103CB | 1 KB / 1 KB / 16 bit | embassy-boot swap | simulated |
 | STM32G0B1RE | 2 KB / 2 KB / 64 bit + ECC | embassy-boot swap | simulated; first hardware (HW-1) |
-| STM32H743ZI | 2 KB / 128 KB / 256 bit + ECC | hardware bank swap | geometry and flash model; backend is BOOT-2 |
+| STM32H743ZI | 2 KB / 128 KB / 256 bit + ECC | hardware bank swap | simulated; hardware is HW-2 |
 | RP2350 / RP2354 | 4 KB / 4 KB / byte | boot ROM A/B | geometry and flash model; backend is BOOT-3 |
 
 ## Not planned

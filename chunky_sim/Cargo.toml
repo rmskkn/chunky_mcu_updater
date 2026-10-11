@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 chunky = { workspace = true, features = ["ed25519", "unsigned"] }
 chunky_swap = { workspace = true, features = ["ed25519", "unsigned"] }
+chunky_bank = { workspace = true, features = ["ed25519", "unsigned"] }
 chunky_server.workspace = true
 embedded-storage.workspace = true
 

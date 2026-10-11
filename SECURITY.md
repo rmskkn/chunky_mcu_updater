@@ -58,6 +58,30 @@ result is the release is decided by the full SHA-256 under the signature.
 The application's checks save wear and airtime. Only the bootloader's checks are security: it does not believe
 the application.
 
+## Bank swap
+
+On dual-bank parts (`chunky_bank`) nothing is swapped page by page: the SWAP_BANK option bit says which bank is
+mapped first, and that bank is ACTIVE. The table above holds with "before a swap starts" read as "before the
+bit is programmed". What is particular to it:
+
+- **Every switch is checked, back as well as forward.** Before the bit is programmed the bootloader verifies
+  the other bank's image in full, floor included. That covers the revert: a trial that fails goes back only to
+  an image that passes the same checks. If nothing verified is there to go back to, the verified image on trial
+  keeps running as a trial, and the floor stays.
+- **The bootloader is in both banks.** The bit moves the whole bank, its first sector included, so after a
+  switch the other bank's copy of the bootloader runs. Both copies are provisioned and write-protected (SEC-6).
+  The bootloader does not program the bit unless the other bank's copy is byte for byte itself: an update can
+  not switch into a bank that would not boot.
+- **The old release stays in the other bank**, whole and validly signed, after every update. Nothing boots it
+  unchecked: once the floor is past it, a request to switch to it is refused, and if the bit is flipped behind
+  the bootloader's back the device ends in recovery instead of running it.
+- **State is a log of write-once flags** in STATE (`chunky_bank/src/log.rs`). The application sets "staged" and
+  "confirmed", the bootloader everything else, and only the bootloader erases. Flags the bootloader would never
+  write (a compromised application can write any) close the request; they do not start a switch. A log that
+  is lost means "nothing in flight": the device boots what it runs.
+- **What the simulator assumes**: a power cut during option byte programming leaves the old or the new bit,
+  nothing else. To be confirmed on hardware (HW-2).
+
 ## The version floor
 
 A partition of its own (FLOOR) holds a unary counter: the floor is the number of write units at its start that
@@ -81,7 +105,8 @@ have been written to zero (`chunky/src/floor.rs`). It only goes up, one write un
 | FLOOR | raise | read | never |
 | ACTIVE | swap and revert | read; it is handed over as `ReadOnly`, a type without a write | read (COPY sources) |
 | DFU, image part | swap and revert | the apply engine | ERASE, COPY, WRITE |
-| DFU, spare page | swap | never (the handle is cut short) | never |
+| DFU, spare page (swap backend) | swap | never (the handle is cut short) | never |
+| SWAP_BANK option bit (bank backend) | switch and revert | never | never |
 
 In our code these lines are types: a piece of code can only write what it was handed. On the chip they are only
 as strong as the chip's protection (next section).
@@ -122,7 +147,7 @@ previous image is BOOT-4.
 |---|---|---|
 | **F103** | Everything, in the end. There is no RDP level 2: the application can rewrite the option bytes, lift the write protection and replace the bootloader. Signed boot on F103 protects against the network and bad luck only | — |
 | **G0** | Erase or scribble ACTIVE, DFU, STATE and FLOOR: a denial of service that ends in recovery; erase FLOOR and bring back an older signed release | With RDP level 2 (option bytes frozen) and the bootloader write-protected: run anything unsigned after a reset, change the key |
-| **H7** | As G0 | As G0, with RDP level 2 and secure user memory |
+| **H7** | As G0; and program SWAP_BANK, which boots the other bank's release if it verifies at or above the floor and ends in recovery if not | As G0, with RDP level 2 and secure user memory |
 | **RP2350** | Scribble the other partition | Boot anything unsigned or rolled back: the boot ROM checks signatures and the OTP rollback version (BOOT-3) |
 
 So on parts without isolation the floor holds against the network, not against code execution in the

@@ -107,8 +107,12 @@ pub const STM32H743ZI_FLASH: [EraseRun; 1] = [EraseRun {
     erase: 128 * KB,
 }];
 
-/// STM32H743ZI, hardware bank swap, 2 KB chunks inside 128 KB sectors. Each bank: bootloader sector, six image
-/// sectors, one sector for STATE (bank 1) or FLOOR (bank 2). The bank backend (BOOT-2) fixes the final layout.
+/// STM32H743ZI, hardware bank swap (`chunky_bank`), 2 KB chunks inside 128 KB sectors.
+///
+/// Each bank: one sector for the bootloader (the same bytes in both banks, since SWAP_BANK moves the whole bank,
+/// its first sector included), six image sectors (768 KB), and one more sector: STATE in bank 1, FLOOR in
+/// bank 2. Offsets are as mapped with SWAP_BANK clear; with it set the banks trade addresses
+/// ([`FlashGeometry::swapped`]). STATE holds 511 updates before it is erased, FLOOR counts to 4096.
 pub const STM32H743ZI: FlashGeometry = FlashGeometry {
     family: Family::Stm32H7,
     backend: BackendKind::Bank,

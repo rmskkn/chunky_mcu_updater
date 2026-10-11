@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["chunky", "chunky_swap", "chunky_server", "chunky_sim", "embassy_torn"]
+members = ["chunky", "chunky_swap", "chunky_bank", "chunky_server", "chunky_sim", "embassy_torn"]
 
 [workspace.package]
 version = "0.3.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/romixlab/chunky_mcu_updater"
 [workspace.dependencies]
 chunky = { path = "chunky" }
 chunky_swap = { path = "chunky_swap" }
+chunky_bank = { path = "chunky_bank" }
 chunky_server = { path = "chunky_server" }
 chunky_sim = { path = "chunky_sim" }
 embedded-storage = "0.3.1"

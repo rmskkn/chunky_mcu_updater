@@ -14,6 +14,12 @@
 //! A power cut can be armed at any write or erase. The operation is then torn (some units done, one left
 //! half-way, the rest untouched) and the flash is dead until [`SimFlash::power_on`]. A torn unit on an ECC part
 //! faults on read ([`SimError::Ecc`]).
+//!
+//! A flash made with [`SimFlash::with_banks`] is two banks and a SWAP_BANK option bit, as on a dual-bank H7.
+//! Every offset is an address as the CPU sees it: with the bit in effect the second bank answers at offset 0
+//! and the first one bank further. The bit is programmed with [`SimFlash::program_swap`] (an operation like
+//! any other: it is counted and a power cut can hit it, leaving the old or the new value) and takes effect at
+//! the next [`SimFlash::reset`], as option bytes do.
 
 use std::marker::PhantomData;
 
@@ -149,6 +155,12 @@ pub struct SimFlash<M> {
     dead: bool,
     rng: Rng,
     erases: Vec<u32>,
+    /// Size of one bank; 0 for a flash without bank swap.
+    bank: usize,
+    /// The SWAP_BANK option bit as programmed.
+    swap_programmed: bool,
+    /// The SWAP_BANK bit in effect: the programmed one as it was at the last reset.
+    swap_now: bool,
     model: PhantomData<M>,
 }
 
@@ -164,7 +176,65 @@ impl<M: FlashModel> SimFlash<M> {
             dead: false,
             rng: Rng(0),
             erases: vec![0; size / M::ERASE_SIZE],
+            bank: 0,
+            swap_programmed: false,
+            swap_now: false,
             model: PhantomData,
+        }
+    }
+
+    /// An erased flash of two banks of `bank` bytes with a SWAP_BANK option bit, clear.
+    pub fn with_banks(bank: usize) -> Self {
+        let mut flash = Self::new(2 * bank);
+        flash.bank = bank;
+        flash
+    }
+
+    /// True while the banks are swapped: the bit as the last reset found it.
+    pub fn swapped(&self) -> bool {
+        self.swap_now
+    }
+
+    /// The SWAP_BANK bit as programmed; it takes effect at the next reset.
+    pub fn swap_programmed(&self) -> bool {
+        self.swap_programmed
+    }
+
+    /// Programs the SWAP_BANK option bit. Counted like a write; a power cut during it leaves the old or the
+    /// new value. That it never leaves anything else is this model's assumption about option byte programming,
+    /// to be confirmed on hardware (HW-2).
+    pub fn program_swap(&mut self, swapped: bool) -> Result<(), SimError> {
+        assert!(self.bank != 0, "{}: this flash has no bank swap", M::NAME);
+        if self.start_op()? {
+            if self.rng.below(2) == 1 {
+                self.swap_programmed = swapped;
+            }
+            self.dead = true;
+            return Err(SimError::PowerCut);
+        }
+        self.swap_programmed = swapped;
+        Ok(())
+    }
+
+    /// A system reset: the option bytes are loaded, so a programmed SWAP_BANK bit takes effect.
+    pub fn reset(&mut self) {
+        self.swap_now = self.swap_programmed;
+    }
+
+    /// Where `len` bytes at CPU address `offset` are in the memory array.
+    fn physical(&self, offset: usize, len: usize) -> usize {
+        if self.bank == 0 {
+            return offset;
+        }
+        assert!(
+            offset / self.bank == (offset + len.max(1) - 1) / self.bank,
+            "{}: access at {offset:#x} of {len} bytes crosses from one bank into the other",
+            M::NAME
+        );
+        match (self.swap_now, offset < self.bank) {
+            (false, _) => offset,
+            (true, true) => offset + self.bank,
+            (true, false) => offset - self.bank,
         }
     }
 
@@ -185,9 +255,10 @@ impl<M: FlashModel> SimFlash<M> {
         self.dead
     }
 
-    /// Power is back. An armed cut that has not hit stays armed.
+    /// Power is back, which is also a reset. An armed cut that has not hit stays armed.
     pub fn power_on(&mut self) {
         self.dead = false;
+        self.reset();
     }
 
     /// Disarms a cut that has not hit.
@@ -197,6 +268,7 @@ impl<M: FlashModel> SimFlash<M> {
 
     /// Puts `data` at `offset` the way a programmer on the debug port would: no rules, no faults left.
     pub fn load(&mut self, offset: usize, data: &[u8]) {
+        let offset = self.physical(offset, data.len());
         self.mem[offset..offset + data.len()].copy_from_slice(data);
         for unit in offset / M::UNIT..(offset + data.len()).div_ceil(M::UNIT) {
             self.bad[unit] = false;
@@ -205,18 +277,20 @@ impl<M: FlashModel> SimFlash<M> {
 
     /// The bytes at `offset`, whatever the ECC state.
     pub fn dump(&self, offset: usize, len: usize) -> Vec<u8> {
+        let offset = self.physical(offset, len);
         self.mem[offset..offset + len].to_vec()
     }
 
     /// Makes the unit at `offset` fault on read, as bit rot beyond what ECC corrects would. ECC models only.
     pub fn inject_ecc(&mut self, offset: usize) {
         assert!(M::RULE.ecc(), "{} has no ECC", M::NAME);
+        let offset = self.physical(offset, 1);
         self.bad[offset / M::UNIT] = true;
     }
 
     /// How often the erase block at `offset` was erased.
     pub fn erase_count(&self, offset: usize) -> u32 {
-        self.erases[offset / M::ERASE_SIZE]
+        self.erases[self.physical(offset, 1) / M::ERASE_SIZE]
     }
 
     /// The most often erased block's count.
@@ -337,10 +411,12 @@ impl<M: FlashModel> ReadNorFlash for SimFlash<M> {
         }
         let offset = offset as usize;
         let end = offset.checked_add(bytes.len()).filter(|&end| end <= self.mem.len());
-        let end = end.ok_or(SimError::OutOfBounds)?;
+        end.ok_or(SimError::OutOfBounds)?;
         if bytes.is_empty() {
             return Ok(());
         }
+        let offset = self.physical(offset, bytes.len());
+        let end = offset + bytes.len();
         if self.bad[offset / M::UNIT..end.div_ceil(M::UNIT)].iter().any(|&bad| bad) {
             return Err(SimError::Ecc);
         }
@@ -367,6 +443,7 @@ impl<M: FlashModel> NorFlash for SimFlash<M> {
         }
         let cut = self.start_op()?;
         let blocks = (to - from) / M::ERASE_SIZE;
+        let from = self.physical(from, to - from);
         let torn = cut.then(|| self.rng.below(blocks));
         for index in 0..blocks {
             let block = from + index * M::ERASE_SIZE;
@@ -395,6 +472,7 @@ impl<M: FlashModel> NorFlash for SimFlash<M> {
         }
         let cut = self.start_op()?;
         let units = bytes.len() / M::UNIT;
+        let offset = self.physical(offset, bytes.len());
         let torn = cut.then(|| self.rng.below(units));
         for (index, new) in bytes.chunks(M::UNIT).enumerate() {
             let at = offset + index * M::UNIT;

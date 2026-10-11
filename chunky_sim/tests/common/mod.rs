@@ -4,8 +4,7 @@
 use chunky::geometry::{FlashGeometry, Region};
 use chunky::{BootState, ImageDescriptor};
 use chunky_server::{ImageMeta, Manifest, MemStore, Policy, Release, Signer, build_image, plan};
-use chunky_sim::{Device, FlashModel, layout};
-use chunky_swap::BootOutcome;
+use chunky_sim::{Backend, Device, FlashModel, Swap};
 
 pub const PRODUCT: u32 = 0x434B_5931;
 
@@ -49,8 +48,17 @@ impl World {
     /// Version 1 and version 2 of a firmware that fills about three quarters of the partition. Version 2
     /// changes a chunk, moves a chunk and appends one; the rest is the same.
     pub fn new<M: FlashModel>(chunk: u32, blocks: u32, signer: Signer) -> Self {
-        let geometry = layout::<M>(chunk, blocks);
-        let chunk = chunk as usize;
+        Self::on::<M, Swap>(chunk, blocks, signer)
+    }
+
+    /// The same for a device on backend `B`.
+    pub fn on<M: FlashModel, B: Backend<M>>(chunk: u32, blocks: u32, signer: Signer) -> Self {
+        Self::with_geometry(B::layout(chunk, blocks), signer)
+    }
+
+    /// The same for a given layout, a chip preset for one.
+    pub fn with_geometry(geometry: FlashGeometry, signer: Signer) -> Self {
+        let chunk = geometry.chunk as usize;
         let chunks = geometry.chunks() as usize;
         let used = (chunks * 3 / 4).max(2);
         let old_payload = bytes(1, used * chunk);
@@ -82,6 +90,11 @@ impl World {
 
     /// A device running the old release. Its DFU holds what a real one would: leftovers of an earlier image.
     pub fn device<M: FlashModel>(&self) -> Device<M> {
+        self.device_on::<M, Swap>()
+    }
+
+    /// The same on backend `B`.
+    pub fn device_on<M: FlashModel, B: Backend<M>>(&self) -> Device<M, B> {
         let device = Device::new(self.geometry, self.signer.trust(), PRODUCT);
         device.install(&self.old);
         let leftovers = bytes(9, self.geometry.dfu.len as usize);
@@ -123,7 +136,14 @@ pub struct Seen {
 ///
 /// Checked at every boot: the bootloader always finds something to run, ACTIVE is byte for byte the old or the
 /// new release, and the floor never goes down or past the newest confirmed release.
-pub fn run_update<M: FlashModel>(device: &Device<M>, world: &World, app: App, cuts: &[(u64, u64)]) -> Seen {
+///
+/// The loop knows nothing about the backend: a device on any [`Backend`] runs through it.
+pub fn run_update<M: FlashModel, B: Backend<M>>(
+    device: &Device<M, B>,
+    world: &World,
+    app: App,
+    cuts: &[(u64, u64)],
+) -> Seen {
     let mut cuts = cuts.iter();
     let mut seen = Seen::default();
     let mut last_floor = 0;
@@ -149,7 +169,7 @@ pub fn run_update<M: FlashModel>(device: &Device<M>, world: &World, app: App, cu
                 continue;
             }
         };
-        let BootOutcome::Run { image, state, .. } = outcome else {
+        let Some((image, state)) = B::running(&outcome) else {
             panic!("the bootloader found nothing to run: {outcome:?} after {seen:?}");
         };
         let active = device.dump(world.geometry.active);
@@ -212,12 +232,13 @@ pub fn run_update<M: FlashModel>(device: &Device<M>, world: &World, app: App, cu
         App::Good => (&world.new, 2),
         App::Bad => (&world.old, 1),
     };
-    match device.boot() {
-        Ok(BootOutcome::Run { image, state, .. }) => {
+    let settled = device.boot();
+    match settled.as_ref().map(B::running) {
+        Ok(Some((image, state))) => {
             assert_ne!(state, BootState::Trial);
             assert_eq!(image.version, expected.1);
         }
-        other => panic!("the settled device does not boot: {other:?}"),
+        _ => panic!("the settled device does not boot: {settled:?}"),
     }
     assert!(device.dump(world.geometry.active) == expected.0);
     assert_eq!(device.floor(), expected.1);
@@ -226,20 +247,34 @@ pub fn run_update<M: FlashModel>(device: &Device<M>, world: &World, app: App, cu
 
 /// Runs the update once without cuts to count the flash operations, then once per operation with power cut
 /// there, for each of `seeds` ways of tearing it.
-pub fn sweep<M: FlashModel>(chunk: u32, blocks: u32, app: App, seeds: u64) {
-    let world = World::new::<M>(chunk, blocks, signer());
-    let device = world.device::<M>();
+pub fn sweep<M: FlashModel, B: Backend<M>>(chunk: u32, blocks: u32, app: App, seeds: u64) {
+    sweep_from::<M, B>(chunk, blocks, app, seeds, |_| {});
+}
+
+/// The same, with every device first brought into the state `prepare` leaves it in.
+pub fn sweep_from<M: FlashModel, B: Backend<M>>(
+    chunk: u32,
+    blocks: u32,
+    app: App,
+    seeds: u64,
+    prepare: impl Fn(&Device<M, B>),
+) {
+    let world = World::on::<M, B>(chunk, blocks, signer());
+    let device = world.device_on::<M, B>();
+    prepare(&device);
+    let start = device.flash.borrow().ops();
     let quiet = run_update(&device, &world, app, &[]);
     assert_eq!(quiet.sessions, 1);
     assert_eq!(quiet.trials, 1);
-    let operations = device.flash.borrow().ops();
+    let operations = device.flash.borrow().ops() - start;
     assert!(
         operations > 20,
         "the run is suspiciously short: {operations} operations"
     );
     for cut in 0..operations {
         for seed in 0..seeds {
-            let device = world.device::<M>();
+            let device = world.device_on::<M, B>();
+            prepare(&device);
             run_update(&device, &world, app, &[(cut, seed * 1_000_003 + cut)]);
         }
     }

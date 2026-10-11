@@ -19,6 +19,9 @@ check-fw:
     cargo check -q -p chunky_swap --target thumbv6m-none-eabi --features unsigned,chunky/chip-custom
     cargo check -q -p chunky_swap --target thumbv7em-none-eabihf --features ed25519,chunky/chip-custom
     cargo check -q -p chunky_swap --target thumbv7em-none-eabihf --features unsigned,chunky/chip-custom
+    cargo check -q -p chunky_bank --target thumbv6m-none-eabi --features ed25519,chunky/chip-custom
+    cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features ed25519,chunky/chip-stm32h743zi
+    cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features unsigned,chunky/chip-stm32h743zi
 
 # Build everything in release mode (the `chunky` binary is installed from here once CLI-1 lands)
 install:

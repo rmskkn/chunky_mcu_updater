@@ -55,20 +55,23 @@ adding a dependency.
   `try_read`, `Masked`), `part.rs` (`Part`, `ReadOnly`), `backend.rs` (`BootBackend`).
 - `chunky_swap/` — the embassy-boot backend, `no_std`: `boot()` is the bootloader's whole decision,
   `SwapUpdater` the application's handle, `Guarded` the state partition as embassy-boot gets it.
+- `chunky_bank/` — the hardware bank swap backend, `no_std`: `boot()` again the whole decision, `BankUpdater`
+  the application's handle, `BankSwitch` the SWAP_BANK option bit, `log.rs` the state log of write-once flags.
 - `chunky_server/` — host side: `image.rs` (build and seal), `store.rs` (blob store), `manifest.rs` (parse),
   `planner.rs`.
 - `chunky_sim/` — `flash.rs` (NOR flash with per-family write rules, torn writes and erases, ECC faults),
-  `device.rs` (a whole device on the swap backend), `tests/` (power-cut sweeps, security cases, planner
-  properties; `tests/common` is the update loop they share).
+  `device.rs` (a whole device on either backend, `Device<M, B>`), `tests/` (power-cut sweeps, security cases,
+  planner properties; `tests/common` is the update loop they share).
 
 A tool that drives a device is a library first: nothing the CLI can do is missing from `chunky_server`.
 
 ## How images are verified is a build option
 
-`chunky` and `chunky_swap` have no default features. A build picks `ed25519` (signed releases) or `unsigned` (the
-explicit opt-out for small flash: SHA-256 integrity and the version floor stay, authenticity goes). Neither is a
-compile error; so are both on a firmware target. Host crates enable both so they can build, plan and test either
-kind. Never add a default, and never make a code path that accepts an unsigned image where a key is trusted.
+`chunky`, `chunky_swap` and `chunky_bank` have no default features. A build picks `ed25519` (signed releases) or
+`unsigned` (the explicit opt-out for small flash: SHA-256 integrity and the version floor stay, authenticity
+goes). Neither is a compile error; so are both on a firmware target. Host crates enable both so they can build,
+plan and test either kind. Never add a default, and never make a code path that accepts an unsigned image where
+a key is trusted.
 
 ## Flash rules the code must keep
 

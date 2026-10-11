@@ -5,6 +5,27 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `chunky_bank`: boot backend on hardware bank swap (dual-bank STM32 with a SWAP_BANK option bit). The other
+  bank's image, its version floor and its bootloader copy are verified before the bit is programmed, ACTIVE on
+  every boot; one trial boot; revert by flipping the bit back. Its state is a log of write-once flags that is
+  erased only when used up. `BankSwitch` is the option bit, `BankMap` the addresses for the current mapping.
+  (BOOT-2)
+- Simulator: two banks with a SWAP_BANK option bit (`SimFlash::with_banks`, `program_swap`, `reset`), and the
+  simulated device on either backend (`Device<M, Bank>`, `bank_layout`). (SIM-1)
+- Power-cut sweeps for the bank backend: H7 rules with 2 KB chunks in big sectors, from either bank, with a
+  used-up state log, G4-like flash, and the real STM32H743ZI layout; security cases for forged state, rollback
+  through the other bank and a missing bootloader copy. (SIM-2, BOOT-2)
+
+### Changed
+
+- Bank geometries are checked for what bank swap needs: ACTIVE and DFU the same span of two banks, no partition
+  across both, STATE big enough for the log (`GeometryError::BankLayout`). The STM32H743ZI preset keeps its
+  numbers and its geometry id; they are now final. No wire format changed. (GEO-1)
+- `chunky_sim::Device` is generic over the boot backend (`Device<M, B = Swap>`), and the update loop of the
+  tests runs any backend. `Device<M>` is the swap device as before. (SIM-2)
+
 ## [0.3.0] - 2026-10-11
 
 ### Added

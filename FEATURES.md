@@ -10,7 +10,9 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
   aligned and disjoint, DFU and STATE are big enough for the backend, erase size is uniform across each partition
   (`checked_on` with the chip's erase runs). Presets for STM32F103CB, G0B1RE, H743ZI, RP2350; a firmware build
   without a `chip-*` feature is a compile error; the geometry id travels in manifest, plan and descriptor
-  (`GEOMETRY_MISMATCH`). The H7 and RP2350 presets get their final layout with BOOT-2 and BOOT-3.
+  (`GEOMETRY_MISMATCH`). Bank layouts: ACTIVE and DFU are the same span of two banks, no partition crosses a
+  bank, STATE holds the log; written with the swap bit clear, `swapped()` gives the addresses with it set. The
+  H743ZI preset is final (BOOT-2); the RP2350 preset gets its final layout with BOOT-3.
 
 ## MAN — device manifest
 
@@ -60,10 +62,12 @@ Design: [SECURITY.md](SECURITY.md).
 
 - ✅ **SIM-1 family-flash-sim** — NOR flash with the write rules of F1 (half-word once or zero), G0 (64 bit once,
   ECC), H7 (256 bit once, ECC) and RP2350 (bits to zero); torn writes and erases; ECC faults; a power cut at any
-  write or erase; a rule broken by our code panics.
+  write or erase; a rule broken by our code panics. Two banks with a SWAP_BANK option bit: addresses are as the
+  CPU sees them, the bit takes effect at reset, programming it is an operation a power cut can hit.
 - ✅ **SIM-2 power-cut-sweeps** — a cut at every flash operation of a whole update (stage, swap, trial, confirm or
   revert), several ways of tearing each, per family, with chunk equal to and smaller than the erase unit; property
-  test with up to four cuts per update.
+  test with up to four cuts per update. One update loop for every backend (`Device<M, B>`, `tests/common`): the
+  swap and the bank backend run through the same checks.
 - 📋 **SIM-3 parser-fuzz-proptests** — garbage into every parser and the apply engine at scale; fuzz targets.
 
 ## SRV — server
@@ -82,10 +86,16 @@ Design: [SECURITY.md](SECURITY.md).
 - ✅ **BOOT-5 embassy-torn-erase-repro** — stand-alone reproduction of the embassy-boot torn state-erase bug
   (`embassy_torn/`, report in `embassy_torn/REPORT.md`): stock 0.7.0 and git master both lose the images, the
   zero-the-magic-first guard survives every tear. Open: send it upstream.
-- 📋 **BOOT-2 bank-swap-backend** — hardware bank swap (H7 and other dual-bank parts), simulator first.
+- ✅ **BOOT-2 bank-swap-backend** — `chunky_bank`: hardware bank swap behind `BankSwitch` (the SWAP_BANK option
+  bit). The other bank is verified (image, floor, and that it holds this bootloader) before the bit is programmed,
+  ACTIVE on every boot, one trial boot, revert by flipping the bit back after verifying what it goes back to;
+  nothing is copied and the old release stays in place. State is a log of write-once flags (one write unit each),
+  erased only when used up, header zeroed first. Sweeps green on H7 rules with 2 KB chunks in big sectors, from
+  either bank, with a used-up log, on G4-like flash, and on the real STM32H743ZI preset. Simulator only: the
+  hardware side is HW-2.
 - 📋 **BOOT-3 rp-bootrom-backend** — RP2350/RP2354 boot ROM A/B with try-before-you-buy.
 - 💡 **BOOT-4 rot-fallback** — ACTIVE that rots after it was confirmed falls back to the previous image instead of
-  recovery.
+  recovery. Cheapest on the bank backend, where the previous image is one bit away.
 
 ## CLI — command line
 
@@ -98,6 +108,10 @@ Design: [SECURITY.md](SECURITY.md).
 ## HW — hardware
 
 - 📋 **HW-1 g0-nucleo-bringup** — bootloader binary and example app on a Nucleo G0B1RE; sizes and timings.
+- 📋 **HW-2 h7-nucleo-bank-bringup** — `BankSwitch` over the H7 option bytes, the bootloader in both banks, an
+  example app on a Nucleo H743ZI. To confirm there: option byte programming cut by power loss leaves the old or
+  the new SWAP_BANK value and nothing else; zeros over a used flash word; timings. Then the parts that pick the
+  bank another way (G4 and L4: BFB2 and the system bootloader).
 
 ## PY — Python
 
@@ -116,5 +130,12 @@ Design: [SECURITY.md](SECURITY.md).
 - After a confirmed update DFU holds the old image shifted by one page, so the next update erases and rewrites
   every DFU block even when little changed: no airtime (COPY), but one erase cycle per block per update, on top of
   the swap's two. Inherent to the swap backend; the bank and boot ROM backends do not have it.
+- The bank backend rests on one thing the simulator assumes and does not prove: a power cut during option byte
+  programming leaves the old or the new SWAP_BANK value (HW-2). Every other cut is swept.
+- SWAP_BANK moves the whole bank, the bootloader's sector too: the bootloader must be in both banks, the same
+  bytes, both write-protected (SEC-6). `chunky_bank` refuses to switch when the copies differ.
+- Bank backend: a power cut during the trial boot spends the trial (as on the swap backend); the server offers
+  the release again, and it is still in the other bank, so that costs no transfer. When the log is started over
+  right after a revert (once in 511 updates on H743ZI), that revert reads as "confirmed".
 - A planner that trusts blank chunks (the default where a chunk is smaller than an erase unit) programs into
   flash whose erase may have been cut short. The image hash catches wrong data at once, not marginal cells later.

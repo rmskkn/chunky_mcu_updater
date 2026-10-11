@@ -3,7 +3,7 @@
 
 mod common;
 
-use chunky_sim::{F1, G0, H7Mini, Rp2350};
+use chunky_sim::{F1, G0, H7Mini, Rp2350, Swap};
 use common::{App, World, run_update, signer, sweep};
 use proptest::prelude::*;
 
@@ -23,12 +23,12 @@ macro_rules! sweeps {
 
                 #[test]
                 fn good_release_survives_a_cut_anywhere() {
-                    sweep::<$model>($chunk, $blocks, App::Good, seeds());
+                    sweep::<$model, Swap>($chunk, $blocks, App::Good, seeds());
                 }
 
                 #[test]
                 fn bad_release_reverts_despite_a_cut_anywhere() {
-                    sweep::<$model>($chunk, $blocks, App::Bad, seeds());
+                    sweep::<$model, Swap>($chunk, $blocks, App::Bad, seeds());
                 }
             }
         )*

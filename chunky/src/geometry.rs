@@ -66,6 +66,9 @@ pub enum BackendKind {
     RpBootrom = 3,
 }
 
+/// Write units per record of the bank backend's state log (`chunky_bank`): six flags and two spare.
+pub const BANK_RECORD_UNITS: u32 = 8;
+
 /// A span of flash, in bytes from the start of the flash device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
@@ -120,8 +123,11 @@ pub enum GeometryError {
     Overlap,
     /// DFU is smaller than the backend needs (swap: ACTIVE plus one erase unit).
     DfuTooSmall,
-    /// STATE cannot hold the swap progress of ACTIVE.
+    /// STATE cannot hold what the backend keeps there (swap: the progress of ACTIVE; bank: header and a record).
     StateTooSmall,
+    /// Bank swap: ACTIVE and DFU are not the same span of two banks, or a partition crosses from one bank
+    /// into the other.
+    BankLayout,
     /// More chunks than a 16-bit index can address.
     TooManyChunks,
     /// A partition crosses flash with another erase size.
@@ -172,6 +178,29 @@ impl FlashGeometry {
     /// Bytes of the image the SHA-256 covers: everything but the descriptor at the end.
     pub const fn image_len(&self) -> u32 {
         self.active.len - DESCRIPTOR_LEN as u32
+    }
+
+    /// Bank backend: the size of one bank. ACTIVE and DFU are the same span of the first and the second bank,
+    /// so it is the distance between them.
+    pub const fn bank_len(&self) -> u32 {
+        self.dfu.offset - self.active.offset
+    }
+
+    /// Bank backend: where `region` is addressed while the banks are swapped.
+    ///
+    /// The partition table says where things are with the swap bit clear. With it set the two banks trade
+    /// addresses: ACTIVE and DFU keep their meaning (ACTIVE is always the image in the bank mapped first), and
+    /// STATE and FLOOR, which stay in the bank they were put in, are found one bank further or nearer.
+    pub const fn swapped(&self, region: Region) -> Region {
+        let bank = self.bank_len();
+        Region {
+            offset: if region.offset < bank {
+                region.offset + bank
+            } else {
+                region.offset - bank
+            },
+            len: region.len,
+        }
     }
 
     /// Checks every rule a layout must meet.
@@ -235,7 +264,31 @@ impl FlashGeometry {
                     return Err(GeometryError::StateTooSmall);
                 }
             }
-            BackendKind::Bank | BackendKind::RpBootrom => {
+            BackendKind::Bank => {
+                // The two image slots are the same span of two banks: the image is linked for one address
+                // and runs from whichever bank is mapped first.
+                if self.dfu.len != self.active.len || self.dfu.offset <= self.active.offset {
+                    return Err(GeometryError::BankLayout);
+                }
+                let bank = self.bank_len() as u64;
+                let mut i = 0;
+                while i < parts.len() {
+                    let first = parts[i].end() <= bank;
+                    let second = parts[i].offset as u64 >= bank && parts[i].end() <= 2 * bank;
+                    if !first && !second {
+                        return Err(GeometryError::BankLayout);
+                    }
+                    i += 1;
+                }
+                if self.active.end() > bank {
+                    return Err(GeometryError::BankLayout);
+                }
+                // The state log: a header record and at least one update.
+                if self.state.len / self.write < 2 * BANK_RECORD_UNITS {
+                    return Err(GeometryError::StateTooSmall);
+                }
+            }
+            BackendKind::RpBootrom => {
                 if self.dfu.len < self.active.len {
                     return Err(GeometryError::DfuTooSmall);
                 }
@@ -348,7 +401,12 @@ const fn fail(error: GeometryError) -> ! {
         GeometryError::DfuTooSmall => {
             panic!("chunky geometry: DFU is too small (swap backend: ACTIVE plus one erase unit)")
         }
-        GeometryError::StateTooSmall => panic!("chunky geometry: STATE cannot hold the swap progress of ACTIVE"),
+        GeometryError::StateTooSmall => panic!("chunky geometry: STATE is too small for the backend's boot state"),
+        GeometryError::BankLayout => {
+            panic!(
+                "chunky geometry: bank swap needs ACTIVE and DFU at the same place in two banks, no partition across both"
+            )
+        }
         GeometryError::TooManyChunks => panic!("chunky geometry: more than 65535 chunks; use a bigger chunk"),
         GeometryError::NonUniformErase => {
             panic!("chunky geometry: a partition crosses flash with another erase size (uneven sectors)")
@@ -427,6 +485,72 @@ mod tests {
         ];
         for (change, expected) in cases {
             let mut geometry = g0();
+            change(&mut geometry);
+            assert_eq!(geometry.validate(), Err(expected));
+        }
+    }
+
+    /// Two banks of eight 8 KB sectors: loader, six image sectors, then STATE (first bank) or FLOOR (second).
+    const fn banks() -> FlashGeometry {
+        const S: u32 = 8192;
+        FlashGeometry {
+            family: Family::Stm32H7,
+            backend: BackendKind::Bank,
+            chunk: 2048,
+            erase: S,
+            write: 32,
+            state: Region { offset: 7 * S, len: S },
+            floor: Region { offset: 15 * S, len: S },
+            active: Region { offset: S, len: 6 * S },
+            dfu: Region {
+                offset: 9 * S,
+                len: 6 * S,
+            },
+        }
+    }
+
+    #[test]
+    fn bank_layout_rules() {
+        const GOOD: FlashGeometry = banks().checked();
+        assert_eq!(GOOD.bank_len(), 8 * 8192);
+        // Swapped, STATE is found in the second bank and FLOOR in the first.
+        assert_eq!(GOOD.swapped(GOOD.state).offset, 15 * 8192);
+        assert_eq!(GOOD.swapped(GOOD.floor).offset, 7 * 8192);
+        assert_eq!(GOOD.swapped(GOOD.active), GOOD.dfu);
+        assert_eq!(GOOD.swapped(GOOD.dfu), GOOD.active);
+
+        type Change = fn(&mut FlashGeometry);
+        let cases: [(Change, GeometryError); 5] = [
+            // The slots differ in size.
+            (|g| g.dfu.len -= 8192, GeometryError::BankLayout),
+            // DFU before ACTIVE: no second bank.
+            (
+                |g| core::mem::swap(&mut g.active, &mut g.dfu),
+                GeometryError::BankLayout,
+            ),
+            // STATE beyond the second bank.
+            (|g| g.state.offset = 16 * 8192, GeometryError::BankLayout),
+            // ACTIVE and DFU so close that ACTIVE runs into the second bank.
+            (
+                |g| {
+                    g.dfu.offset = 7 * 8192;
+                    g.state.offset = 13 * 8192;
+                    g.floor.offset = 0;
+                },
+                GeometryError::BankLayout,
+            ),
+            // A state partition of one erase unit of 256 bytes cannot hold a header and a record.
+            (
+                |g| {
+                    g.erase = 256;
+                    g.chunk = 256;
+                    g.state.len = 256;
+                },
+                GeometryError::StateTooSmall,
+            ),
+        ];
+        for (change, expected) in cases {
+            let mut geometry = banks();
             change(&mut geometry);
             assert_eq!(geometry.validate(), Err(expected));
         }
