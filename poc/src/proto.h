@@ -56,7 +56,7 @@ typedef struct {
 typedef struct {
     sector_idx_t dst;
     sector_idx_t src_index;
-    uint8_t      md5[MD5_LEN];
+    uint8_t      hash[SECTOR_HASH_LEN];
 } msg_step_copy_t;
 
 /* STEP_WRITE fragments a sector; STEP_WRITE_END closes it with the hash. */
@@ -64,7 +64,7 @@ typedef struct {
 /* Serialised by hand as dst:u16, offset:u16, len:u16, then the bytes. */
 #define WRITE_HDR   6
 
-typedef struct { sector_idx_t dst; uint8_t md5[MD5_LEN]; } msg_step_write_end_t;
+typedef struct { sector_idx_t dst; uint8_t hash[SECTOR_HASH_LEN]; } msg_step_write_end_t;
 typedef struct { sector_idx_t dst; uint8_t code; } msg_step_ack_t;
 typedef struct { uint16_t pending; } msg_plan_ready_t;
 

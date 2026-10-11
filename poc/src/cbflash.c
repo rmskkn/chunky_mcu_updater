@@ -29,9 +29,8 @@ static int cmd_manifest(const char *path)
     (void)m;
     manifest_build(&f, &man);
     for (int k = 0; k < MANIFEST_ENTRIES; k++) {
-        hexdump_line(man.e[k].md5, 6, hex);
-        printf("sector %3u  %s%s", man.e[k].index, hex,
-               (k % 5 == 4) ? "\n" : "   ");
+        hexdump_line(man.h[k], SECTOR_HASH_LEN, hex);
+        printf("%3d %s%s", k, hex, (k % 5 == 4) ? "\n" : "   ");
     }
     if (MANIFEST_ENTRIES % 5) printf("\n");
     manifest_digest(&man, d);

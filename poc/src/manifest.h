@@ -6,14 +6,15 @@
 #include "proto.h"
 
 /* Canonical manifest body, DESIGN.md section 4. Nonce-free on purpose: the
- * digest must be reproducible across sessions for the elision in 17.1. */
+ * digest must be reproducible across sessions for the elision in 17.1.
+ *
+ * Entry order is implicit: sector i is at h[i], every sector always present.
+ * That drops the index field, and with it the whole class of manifests that
+ * repeat or omit a sector -- they cannot be expressed. */
 typedef struct {
     uint16_t sector_size;
     uint16_t sectors;
-    struct {
-        sector_idx_t index;
-        uint8_t      md5[MD5_LEN];
-    } e[MANIFEST_ENTRIES];
+    uint8_t  h[MANIFEST_ENTRIES][SECTOR_HASH_LEN];
 } manifest_t;
 
 #define MANIFEST_BODY_LEN (sizeof(manifest_t))
@@ -26,8 +27,8 @@ void manifest_mac(const uint8_t key[32], const uint8_t device_id[16],
 
 /* Structural checks, DESIGN.md section 10.2 step 5. 0 = good. */
 int  manifest_check(const manifest_t *m, const char **why);
-/* Content-addressed lookup: finds any sector whose hash equals md5. */
-int  manifest_find(const manifest_t *m, const uint8_t md5[MD5_LEN],
+/* Content-addressed lookup: finds any sector whose hash equals this one. */
+int  manifest_find(const manifest_t *m, const uint8_t hash[SECTOR_HASH_LEN],
                    sector_idx_t *index);
 const uint8_t *manifest_hash_at(const manifest_t *m, int index);
 

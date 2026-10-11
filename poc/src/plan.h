@@ -9,7 +9,7 @@ typedef struct {
     uint8_t      pad;
     sector_idx_t dst;
     sector_idx_t src_index;
-    uint8_t      md5[MD5_LEN];
+    uint8_t      hash[SECTOR_HASH_LEN];
 } step_t;
 
 typedef struct {

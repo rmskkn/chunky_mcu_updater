@@ -92,9 +92,16 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
 
 const uint8_t *flash_at(flash_t *f, size_t off) { return f->map + off; }
 
-void flash_sector_md5(flash_t *f, int index, uint8_t out[MD5_LEN])
+void sector_hash(const void *page, uint8_t out[SECTOR_HASH_LEN])
 {
-    md5(f->map + APP_BASE + (size_t)index * PAGE_SIZE, PAGE_SIZE, out);
+    uint8_t full[MD5_LEN];
+    md5(page, PAGE_SIZE, full);
+    memcpy(out, full, SECTOR_HASH_LEN);
+}
+
+void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN])
+{
+    sector_hash(f->map + APP_BASE + (size_t)index * PAGE_SIZE, out);
 }
 
 identity_t *identity_get(flash_t *f)

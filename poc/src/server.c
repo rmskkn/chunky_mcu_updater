@@ -249,13 +249,13 @@ static void session(int fd)
         if (s->op == OP_COPY) {
             msg_step_copy_t c;
             c.dst = s->dst; c.src_index = s->src_index;
-            memcpy(c.md5, s->md5, MD5_LEN);
+            memcpy(c.hash, s->hash, SECTOR_HASH_LEN);
             frame_send(&l, MSG_STEP_COPY, &c, sizeof c);
         } else {
             uint8_t sect[PAGE_SIZE];
             memcpy(sect, target + (size_t)s->dst * PAGE_SIZE, PAGE_SIZE);
-            uint8_t md[MD5_LEN];
-            memcpy(md, s->md5, MD5_LEN);
+            uint8_t hsh[SECTOR_HASH_LEN];
+            memcpy(hsh, s->hash, SECTOR_HASH_LEN);
             for (size_t off = 0; off < PAGE_SIZE; off += WRITE_CHUNK) {
                 uint8_t buf[WRITE_HDR + WRITE_CHUNK];
                 uint16_t len = WRITE_CHUNK;
@@ -268,7 +268,7 @@ static void session(int fd)
             }
             msg_step_write_end_t we;
             we.dst = s->dst;
-            memcpy(we.md5, md, MD5_LEN);
+            memcpy(we.hash, hsh, SECTOR_HASH_LEN);
             frame_send(&l, MSG_STEP_WRITE_END, &we, sizeof we);
         }
         int t = frame_recv(&l, pay, &n);
