@@ -2,7 +2,7 @@
 //!
 //! A `series-*` feature picks the series a firmware is built for. What is fixed for the series lives here
 //! ([`Line::facts`]: write unit and rule, ECC fault, how banks are switched; the erase size per sub-family, density
-//! and bank mode). The application gives what varies: the [`Part`] (line, flash size, bank mode) and its
+//! and bank mode). The application gives what varies: the [`Chip`] (line, flash size, bank mode) and its
 //! [`Board`] choices (profile, bootloader and config sizes, chunk, image size, factory slot). [`Layout::checked`]
 //! computes the partition table in a `const`, and every inconsistency stops the build with its reason.
 //!
@@ -10,7 +10,7 @@
 //! use chunky::series::*;
 //! // A Nucleo G071RB: 128 KB, single bank, embassy-boot A/B swap behind a 16 KB bootloader.
 //! const LAYOUT: Layout = Layout::checked(
-//!     Part::single(Line::G0, 128 * 1024),
+//!     Chip::single(Line::G0, 128 * 1024),
 //!     Board {
 //!         profile: Profile::Swap,
 //!         bootloader: 16 * 1024,
@@ -29,7 +29,7 @@
 //! ```compile_fail
 //! use chunky::series::*;
 //! const LAYOUT: Layout = Layout::checked(
-//!     Part::single(Line::G0, 128 * 1024),
+//!     Chip::single(Line::G0, 128 * 1024),
 //!     Board {
 //!         profile: Profile::BankSwap,
 //!         bootloader: 16 * 1024,
@@ -42,7 +42,7 @@
 //! ```
 //!
 //! Offsets are from the start of the flash device (STM32: `0x0800_0000`). Where the application uses
-//! embassy-stm32, [`embassy_stm32_part!`](crate::embassy_stm32_part) reads flash size, erase size, write size and
+//! embassy-stm32, [`embassy_stm32_chip!`](crate::embassy_stm32_chip) reads flash size, erase size, write size and
 //! bank layout from the HAL's generated metadata instead.
 //!
 //! # How the flash is divided
@@ -345,9 +345,9 @@ pub enum Banks {
     Dual,
 }
 
-/// The part on the board: what varies inside a series.
+/// The chip on the board: what varies inside a series.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Part {
+pub struct Chip {
     /// Sub-family.
     pub line: Line,
     /// Flash size in bytes, both banks together.
@@ -360,7 +360,7 @@ pub struct Part {
     pub write: Option<u32>,
 }
 
-/// One flash region as a HAL lists it, for [`Part::from_regions`].
+/// One flash region as a HAL lists it, for [`Chip::from_regions`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BankRun {
     /// 1 or 2; anything else (OTP) is skipped.
@@ -383,7 +383,7 @@ impl BankRun {
     };
 }
 
-impl Part {
+impl Chip {
     /// A part with one bank of `flash` bytes.
     pub const fn single(line: Line, flash: u32) -> Self {
         Self {
@@ -475,17 +475,17 @@ impl Part {
 /// `embassy_stm32::flash::FLASH_REGIONS` in the crate that calls it.
 ///
 /// ```ignore
-/// const PART: Part = chunky::embassy_stm32_part!(Line::G0B1);
+/// const PART: Chip = chunky::embassy_stm32_chip!(Line::G0B1);
 /// // or, when the HAL is renamed or re-exported:
-/// const PART: Part = chunky::embassy_stm32_part!(Line::G0B1, my_bsp::hal::flash);
+/// const PART: Chip = chunky::embassy_stm32_chip!(Line::G0B1, my_bsp::hal::flash);
 /// ```
 ///
 /// On parts with a bank mode to choose, embassy-stm32's `single-bank` / `dual-bank` feature decides what the
 /// regions say. Only the line is still typed, and a line that does not fit the regions stops the build.
 #[macro_export]
-macro_rules! embassy_stm32_part {
+macro_rules! embassy_stm32_chip {
     ($line:expr) => {
-        $crate::embassy_stm32_part!($line, embassy_stm32::flash)
+        $crate::embassy_stm32_chip!($line, embassy_stm32::flash)
     };
     ($line:expr, $($flash:ident)::+) => {{
         const REGIONS: usize = $($flash)::+::FLASH_REGIONS.len();
@@ -508,7 +508,7 @@ macro_rules! embassy_stm32_part {
             }
             runs
         };
-        $crate::series::Part::checked_from_regions($line, &RUNS)
+        $crate::series::Chip::checked_from_regions($line, &RUNS)
     }};
 }
 
@@ -603,8 +603,8 @@ pub struct BankSpan {
 /// The partition table of one device, computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
-    /// The part it is for.
-    pub part: Part,
+    /// The chip it is for.
+    pub chip: Chip,
     /// The profile it is for.
     pub profile: Profile,
     /// What is fixed for the part's line.
@@ -643,7 +643,7 @@ struct Rules {
     bank: Option<BankSpan>,
 }
 
-const fn rules(part: &Part) -> Result<Rules, LayoutError> {
+const fn rules(part: &Chip) -> Result<Rules, LayoutError> {
     let dual = matches!(part.banks, Banks::Dual);
     let flash = part.flash;
     // (erase size, biggest flash, single bank exists, dual bank exists, distance of the banks or 0 for adjacent)
@@ -751,13 +751,13 @@ const fn optional(offset: u32, len: u32) -> Option<Region> {
 }
 
 /// Computes the layout of `part` for `board`, for the series this build selected ([`SELECTED`]).
-pub const fn layout(part: &Part, board: &Board) -> Result<Layout, LayoutError> {
+pub const fn layout(part: &Chip, board: &Board) -> Result<Layout, LayoutError> {
     layout_for(SELECTED, part, board)
 }
 
 /// Computes the layout for a build of series `selected`; `None` lays out a part of any series, as host tools and
 /// the worked examples in [`crate::chips`] need.
-pub const fn layout_for(selected: Option<Series>, part: &Part, board: &Board) -> Result<Layout, LayoutError> {
+pub const fn layout_for(selected: Option<Series>, part: &Chip, board: &Board) -> Result<Layout, LayoutError> {
     let facts = part.line.facts();
     if let Some(series) = selected
         && series as u8 != facts.series as u8
@@ -899,7 +899,7 @@ pub const fn layout_for(selected: Option<Series>, part: &Part, board: &Board) ->
         _ => config,
     };
     let layout = Layout {
-        part: *part,
+        chip: *part,
         profile,
         facts,
         chunk: board.chunk,
@@ -933,7 +933,7 @@ pub const fn layout_for(selected: Option<Series>, part: &Part, board: &Board) ->
 
 impl Layout {
     /// Computes the layout, or stops the build (in a `const`) with the reason.
-    pub const fn checked(part: Part, board: Board) -> Self {
+    pub const fn checked(part: Chip, board: Board) -> Self {
         match layout(&part, &board) {
             Ok(layout) => layout,
             Err(e) => fail(e),
@@ -943,7 +943,7 @@ impl Layout {
     /// Like [`checked`](Self::checked) for a part of any series, whatever this build selected: for host tools and
     /// the worked examples in [`crate::chips`]. A firmware uses [`checked`](Self::checked), which holds its part
     /// to its series.
-    pub const fn checked_for_any_series(part: Part, board: Board) -> Self {
+    pub const fn checked_for_any_series(part: Chip, board: Board) -> Self {
         match layout_for(None, &part, &board) {
             Ok(layout) => layout,
             Err(e) => fail(e),
@@ -965,7 +965,7 @@ impl Layout {
             _ => (
                 EraseRun {
                     start: 0,
-                    len: self.part.flash,
+                    len: self.chip.flash,
                     erase,
                 },
                 None,

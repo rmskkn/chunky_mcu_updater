@@ -8,7 +8,7 @@
 //! Offsets are from the start of the flash device (STM32: `0x0800_0000`).
 
 use crate::geometry::FlashGeometry;
-use crate::series::{Board, ImageSize, Layout, Line, Part, Profile};
+use crate::series::{Board, Chip, ImageSize, Layout, Line, Profile};
 
 const KB: u32 = 1024;
 
@@ -26,27 +26,27 @@ const fn board(profile: Profile, bootloader: u32, chunk: u32) -> Board {
 /// STM32F103CB (128 KB in 1 KB pages), embassy-boot swap: 20 KB bootloader, then STATE, FLOOR, 52 KB ACTIVE,
 /// 53 KB DFU.
 pub const STM32F103CB_LAYOUT: Layout =
-    Layout::checked_for_any_series(Part::single(Line::F1, 128 * KB), board(Profile::Swap, 20 * KB, KB));
+    Layout::checked_for_any_series(Chip::single(Line::F1, 128 * KB), board(Profile::Swap, 20 * KB, KB));
 /// Geometry of [`STM32F103CB_LAYOUT`].
 pub const STM32F103CB: FlashGeometry = STM32F103CB_LAYOUT.geometry();
 
 /// STM32F103CB with one image slot updated in place by a 16 KB golden image (BOOT-6): 90 KB for the application
 /// where the swap layout has 52 KB. Layout only, the backend is to come.
 pub const STM32F103CB_GOLDEN_LAYOUT: Layout = Layout::checked_for_any_series(
-    Part::single(Line::F1, 128 * KB),
+    Chip::single(Line::F1, 128 * KB),
     board(Profile::InPlaceGolden { golden: 16 * KB }, 20 * KB, KB),
 );
 
 /// STM32G071RB (128 KB in 2 KB pages, one bank), embassy-boot swap: 16 KB bootloader, 52 KB ACTIVE.
 pub const STM32G071RB_LAYOUT: Layout =
-    Layout::checked_for_any_series(Part::single(Line::G0, 128 * KB), board(Profile::Swap, 16 * KB, 2 * KB));
+    Layout::checked_for_any_series(Chip::single(Line::G0, 128 * KB), board(Profile::Swap, 16 * KB, 2 * KB));
 /// Geometry of [`STM32G071RB_LAYOUT`].
 pub const STM32G071RB: FlashGeometry = STM32G071RB_LAYOUT.geometry();
 
 /// STM32G0B1RE (512 KB in 2 KB pages) as one bank, embassy-boot swap: 24 KB bootloader, 4 KB STATE, FLOOR,
 /// 240 KB ACTIVE, 242 KB DFU.
 pub const STM32G0B1RE_LAYOUT: Layout = Layout::checked_for_any_series(
-    Part::single(Line::G0B1, 512 * KB),
+    Chip::single(Line::G0B1, 512 * KB),
     board(Profile::Swap, 24 * KB, 2 * KB),
 );
 /// Geometry of [`STM32G0B1RE_LAYOUT`].
@@ -55,7 +55,7 @@ pub const STM32G0B1RE: FlashGeometry = STM32G0B1RE_LAYOUT.geometry();
 /// STM32G0B1RE in dual-bank mode, hardware bank swap (nSWAP_BANK): per 256 KB bank a 24 KB bootloader, a
 /// 230 KB image, and STATE (first bank) or FLOOR (second) in the last page.
 pub const STM32G0B1RE_BANK_LAYOUT: Layout = Layout::checked_for_any_series(
-    Part::dual(Line::G0B1, 512 * KB),
+    Chip::dual(Line::G0B1, 512 * KB),
     board(Profile::BankSwap, 24 * KB, 2 * KB),
 );
 /// Geometry of [`STM32G0B1RE_BANK_LAYOUT`].
@@ -64,7 +64,7 @@ pub const STM32G0B1RE_BANK: FlashGeometry = STM32G0B1RE_BANK_LAYOUT.geometry();
 /// STM32G0B1RE, embassy-boot swap with a factory restore slot (BOOT-7): three image slots of 160 KB. The
 /// factory slot is layout only, restoring from it is to come.
 pub const STM32G0B1RE_FACTORY_LAYOUT: Layout = Layout::checked_for_any_series(
-    Part::single(Line::G0B1, 512 * KB),
+    Chip::single(Line::G0B1, 512 * KB),
     Board {
         factory: true,
         ..board(Profile::Swap, 24 * KB, 2 * KB)
@@ -78,7 +78,7 @@ pub const STM32G0B1RE_FACTORY_LAYOUT: Layout = Layout::checked_for_any_series(
 /// bank 2. Offsets are as mapped with SWAP_BANK clear; with it set the banks trade addresses
 /// ([`FlashGeometry::swapped`]). STATE holds 511 updates before it is erased, FLOOR counts to 4096.
 pub const STM32H743ZI_LAYOUT: Layout = Layout::checked_for_any_series(
-    Part::dual(Line::H74x, 2048 * KB),
+    Chip::dual(Line::H74x, 2048 * KB),
     board(Profile::BankSwap, 128 * KB, 2 * KB),
 );
 /// Geometry of [`STM32H743ZI_LAYOUT`].
@@ -87,7 +87,7 @@ pub const STM32H743ZI: FlashGeometry = STM32H743ZI_LAYOUT.geometry();
 /// STM32H7A3ZI (two banks of 128 sectors of 8 KB), hardware bank swap: per bank a 64 KB bootloader, a 952 KB
 /// image, and STATE or FLOOR in the last sector.
 pub const STM32H7A3ZI_LAYOUT: Layout = Layout::checked_for_any_series(
-    Part::dual(Line::H7Ax, 2048 * KB),
+    Chip::dual(Line::H7Ax, 2048 * KB),
     board(Profile::BankSwap, 64 * KB, 2 * KB),
 );
 /// Geometry of [`STM32H7A3ZI_LAYOUT`].
@@ -96,7 +96,7 @@ pub const STM32H7A3ZI: FlashGeometry = STM32H7A3ZI_LAYOUT.geometry();
 /// RP2354 (RP2350 with 2 MB of QSPI NOR in the package, 4 KB sectors), boot ROM A/B: 64 KB before the slots,
 /// two slots of 988 KB. The boot ROM backend (BOOT-3) fixes the final layout.
 pub const RP2354_LAYOUT: Layout = Layout::checked_for_any_series(
-    Part::single(Line::Rp235x, 2048 * KB),
+    Chip::single(Line::Rp235x, 2048 * KB),
     board(Profile::RpBootrom, 64 * KB, 4 * KB),
 );
 /// Geometry of [`RP2354_LAYOUT`].

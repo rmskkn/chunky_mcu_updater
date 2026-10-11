@@ -11,7 +11,7 @@ const fn run(len: u32, erase: u32) -> BankRun {
 }
 
 // An STM32F4 as its HAL lists it: four sectors of 16 KB, one of 64 KB, seven of 128 KB.
-const PART: Part = Part::checked_from_regions(
+const PART: Chip = Chip::checked_from_regions(
     Line::F1,
     &[run(64 * 1024, 16 * 1024), run(64 * 1024, 64 * 1024), run(896 * 1024, 128 * 1024)],
 );

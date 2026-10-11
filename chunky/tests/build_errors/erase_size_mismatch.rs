@@ -2,7 +2,7 @@
 use chunky::series::*;
 
 const LAYOUT: Layout = Layout::checked(
-    Part::single(Line::F1, 512 * 1024).with_erase(1024),
+    Chip::single(Line::F1, 512 * 1024).with_erase(1024),
     Board {
         profile: Profile::Swap,
         bootloader: 16 * 1024,

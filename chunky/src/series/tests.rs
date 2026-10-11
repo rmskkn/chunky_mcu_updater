@@ -77,7 +77,7 @@ fn worked_examples() {
     assert_eq!(single.state, region(24 * KB, 4 * KB));
     assert_eq!(single.active, region(30 * KB, 240 * KB));
     assert_eq!(single.dfu, Some(region(270 * KB, 242 * KB)));
-    let dual = Layout::checked(Part::dual(Line::G0B1, 512 * KB), board(Profile::Swap, 24 * KB, 2 * KB));
+    let dual = Layout::checked(Chip::dual(Line::G0B1, 512 * KB), board(Profile::Swap, 24 * KB, 2 * KB));
     assert_eq!(dual.geometry(), single.geometry());
 
     let bank = chips::STM32G0B1RE_BANK_LAYOUT;
@@ -224,7 +224,7 @@ fn rules_agree_with_real_parts() {
             erase: 4,
             write: 4,
         });
-        let part = Part::from_regions(line, &regions).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let part = Chip::from_regions(line, &regions).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(part.flash, bank1 + bank2, "{name}");
         let rules = rules(&part).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(rules.erase, erase, "{name}");
@@ -268,7 +268,7 @@ fn each_region(layout: &Layout) -> Vec<(&'static str, Region)> {
 }
 
 /// Checks a layout against what its part and board asked for, without the code that computed it.
-fn check(layout: &Layout, part: &Part, board: &Board, what: &str) {
+fn check(layout: &Layout, part: &Chip, board: &Board, what: &str) {
     let erase = layout.erase;
     let (first, second) = layout.runs();
     let runs: Vec<EraseRun> = [Some(first), second].into_iter().flatten().collect();
@@ -409,7 +409,7 @@ fn layout_matrix() {
             matches!(facts.rule, WriteRule::OnceOrZero | WriteRule::BitsToZero)
         );
         for flash in sizes {
-            for part in [Part::single(line, flash), Part::dual(line, flash)] {
+            for part in [Chip::single(line, flash), Chip::dual(line, flash)] {
                 let Ok(rules) = rules(&part) else {
                     let error = layout_for(None, &part, &board(Profile::Swap, 128 * KB, 2 * KB));
                     assert!(
@@ -538,112 +538,112 @@ fn layout_matrix() {
 #[test]
 fn every_inconsistency_has_a_named_refusal() {
     let g0 = board(Profile::Swap, 16 * KB, 2 * KB);
-    let cases: [(&str, Part, Board, LayoutError); 22] = [
+    let cases: [(&str, Chip, Board, LayoutError); 22] = [
         (
             "bank swap on a line with one bank",
-            Part::single(Line::G0, 128 * KB),
+            Chip::single(Line::G0, 128 * KB),
             board(Profile::BankSwap, 16 * KB, 2 * KB),
             LayoutError::BankSwapUnavailable,
         ),
         (
             "bank swap on a G0B1 left in single-bank mode",
-            Part::single(Line::G0B1, 512 * KB),
+            Chip::single(Line::G0B1, 512 * KB),
             board(Profile::BankSwap, 16 * KB, 2 * KB),
             LayoutError::BankSwapOnSingleBank,
         ),
         (
             "dual bank on a single-bank G0",
-            Part::dual(Line::G0, 128 * KB),
+            Chip::dual(Line::G0, 128 * KB),
             g0,
             LayoutError::BankMode,
         ),
         (
             "dual bank on a 128 KB G0B1",
-            Part::dual(Line::G0B1, 128 * KB),
+            Chip::dual(Line::G0B1, 128 * KB),
             g0,
             LayoutError::BankMode,
         ),
         (
             "an H743 is never single-bank",
-            Part::single(Line::H74x, 2 * MB),
+            Chip::single(Line::H74x, 2 * MB),
             board(Profile::Swap, 128 * KB, 2 * KB),
             LayoutError::BankMode,
         ),
         (
             "an H750 is never dual-bank",
-            Part::dual(Line::H74x, 128 * KB),
+            Chip::dual(Line::H74x, 128 * KB),
             board(Profile::Swap, 128 * KB, 2 * KB),
             LayoutError::BankMode,
         ),
         (
             "no H7A3 has 256 KB",
-            Part::dual(Line::H7Ax, 256 * KB),
+            Chip::dual(Line::H7Ax, 256 * KB),
             board(Profile::BankSwap, 64 * KB, 2 * KB),
             LayoutError::FlashSize,
         ),
         (
             "no G0 has 1 MB",
-            Part::single(Line::G0B1, MB),
+            Chip::single(Line::G0B1, MB),
             g0,
             LayoutError::FlashSize,
         ),
         (
             "flash that is not whole pages",
-            Part::single(Line::G0, 127 * KB),
+            Chip::single(Line::G0, 127 * KB),
             g0,
             LayoutError::FlashSize,
         ),
         (
             "1 KB pages stated for a high-density F1",
-            Part::single(Line::F1, 512 * KB).with_erase(KB),
+            Chip::single(Line::F1, 512 * KB).with_erase(KB),
             board(Profile::Swap, 16 * KB, KB),
             LayoutError::EraseSizeMismatch,
         ),
         (
             "128 KB sectors stated for an H7A3",
-            Part::dual(Line::H7Ax, 2 * MB).with_erase(128 * KB),
+            Chip::dual(Line::H7Ax, 2 * MB).with_erase(128 * KB),
             board(Profile::BankSwap, 128 * KB, 2 * KB),
             LayoutError::EraseSizeMismatch,
         ),
         (
             "2 KB pages stated for a G474 in single-bank mode",
-            Part::single(Line::G4Cat3, 512 * KB).with_erase(2 * KB),
+            Chip::single(Line::G4Cat3, 512 * KB).with_erase(2 * KB),
             g0,
             LayoutError::EraseSizeMismatch,
         ),
         (
             "a write size of a half-word and a half",
-            Part::single(Line::F1, 128 * KB).with_write(3),
+            Chip::single(Line::F1, 128 * KB).with_write(3),
             board(Profile::Swap, 16 * KB, KB),
             LayoutError::WriteSize,
         ),
         (
             "the RP boot ROM on an STM32",
-            Part::single(Line::G0, 128 * KB),
+            Chip::single(Line::G0, 128 * KB),
             board(Profile::RpBootrom, 16 * KB, 2 * KB),
             LayoutError::RpBootromOffRp,
         ),
         (
             "embassy-boot swap across the hole of a 1 MB H743",
-            Part::dual(Line::H74x, MB),
+            Chip::dual(Line::H74x, MB),
             board(Profile::Swap, 128 * KB, 2 * KB),
             LayoutError::SplitFlash,
         ),
         (
             "no bootloader",
-            Part::single(Line::G0, 128 * KB),
+            Chip::single(Line::G0, 128 * KB),
             board(Profile::Swap, 0, 2 * KB),
             LayoutError::EmptyRegion,
         ),
         (
             "a bootloader of 5 KB in 2 KB pages",
-            Part::single(Line::G0, 128 * KB),
+            Chip::single(Line::G0, 128 * KB),
             board(Profile::Swap, 5 * KB, 2 * KB),
             LayoutError::NotEraseUnits,
         ),
         (
             "a 60 KB image on an F103CB with A/B swap",
-            Part::single(Line::F1, 128 * KB),
+            Chip::single(Line::F1, 128 * KB),
             Board {
                 image: ImageSize::Exact(60 * KB),
                 ..board(Profile::Swap, 20 * KB, KB)
@@ -652,7 +652,7 @@ fn every_inconsistency_has_a_named_refusal() {
         ),
         (
             "a factory image next to the 52 KB A/B slots of an F103CB",
-            Part::single(Line::F1, 128 * KB),
+            Chip::single(Line::F1, 128 * KB),
             Board {
                 image: ImageSize::Exact(52 * KB),
                 factory: true,
@@ -662,7 +662,7 @@ fn every_inconsistency_has_a_named_refusal() {
         ),
         (
             "a factory image per bank of an H743ZI with six image sectors",
-            Part::dual(Line::H74x, 2 * MB),
+            Chip::dual(Line::H74x, 2 * MB),
             Board {
                 image: ImageSize::Exact(6 * 128 * KB),
                 factory: true,
@@ -672,13 +672,13 @@ fn every_inconsistency_has_a_named_refusal() {
         ),
         (
             "a chunk that does not divide the page",
-            Part::single(Line::G0, 128 * KB),
+            Chip::single(Line::G0, 128 * KB),
             board(Profile::Swap, 16 * KB, 768),
             LayoutError::Geometry(GeometryError::ChunkNotDividingErase),
         ),
         (
             "1 KB chunks on 16 MB: more than a 16-bit index",
-            Part::single(Line::Rp235x, 16 * MB),
+            Chip::single(Line::Rp235x, 16 * MB),
             board(Profile::InPlaceGolden { golden: 64 * KB }, 64 * KB, 64),
             LayoutError::Geometry(GeometryError::ChunkTooSmall),
         ),
@@ -690,16 +690,35 @@ fn every_inconsistency_has_a_named_refusal() {
     assert_eq!(
         layout_for(
             None,
-            &Part::single(Line::Rp235x, 16 * MB),
+            &Chip::single(Line::Rp235x, 16 * MB),
             &board(Profile::InPlaceGolden { golden: 64 * KB }, 64 * KB, 128)
         ),
         Err(LayoutError::Geometry(GeometryError::TooManyChunks))
     );
 }
 
+/// The biggest flash there is, laid out in a `const`: the search for the image size stays cheap to evaluate.
+#[test]
+fn sixteen_megabytes_in_a_const() {
+    const LAYOUT: Layout = Layout::checked_for_any_series(
+        Chip::single(Line::Rp235x, 16 * MB),
+        Board {
+            profile: Profile::Swap,
+            bootloader: 64 * KB,
+            config: 64 * KB,
+            chunk: 4 * KB,
+            image: ImageSize::Max,
+            factory: true,
+        },
+    );
+    assert_eq!(LAYOUT.active.len, 5412 * KB);
+    assert_eq!(LAYOUT.state.len, 8 * KB);
+    assert_eq!(LAYOUT.spare, 4 * KB);
+}
+
 #[test]
 fn a_selected_series_refuses_the_others() {
-    let part = Part::single(Line::G0, 128 * KB);
+    let part = Chip::single(Line::G0, 128 * KB);
     let board = board(Profile::Swap, 16 * KB, 2 * KB);
     assert!(layout_for(Some(Series::Stm32G0), &part, &board).is_ok());
     assert_eq!(
@@ -727,20 +746,20 @@ fn hal_regions_with_uneven_sectors_are_refused() {
         run(1, 64 * KB, 64 * KB),
         run(1, 896 * KB, 128 * KB),
     ];
-    assert_eq!(Part::from_regions(Line::F1, &f4), Err(LayoutError::UnevenSectors));
+    assert_eq!(Chip::from_regions(Line::F1, &f4), Err(LayoutError::UnevenSectors));
     // Banks of different sizes, and nothing but OTP.
     let lopsided = [run(1, 256 * KB, 2 * KB), run(2, 128 * KB, 2 * KB)];
-    assert_eq!(Part::from_regions(Line::G0B1, &lopsided), Err(LayoutError::FlashSize));
+    assert_eq!(Chip::from_regions(Line::G0B1, &lopsided), Err(LayoutError::FlashSize));
     assert_eq!(
-        Part::from_regions(Line::G0B1, &[run(0, 1024, 4)]),
+        Chip::from_regions(Line::G0B1, &[run(0, 1024, 4)]),
         Err(LayoutError::FlashSize)
     );
     let mut mixed = [run(1, 256 * KB, 2 * KB), run(2, 256 * KB, 2 * KB)];
     mixed[1].write = 8;
-    assert_eq!(Part::from_regions(Line::G0B1, &mixed), Err(LayoutError::WriteSize));
+    assert_eq!(Chip::from_regions(Line::G0B1, &mixed), Err(LayoutError::WriteSize));
 }
 
-/// The shape of `embassy_stm32::flash` (0.6.0) for an STM32G0B1RE: what [`embassy_stm32_part!`] reads.
+/// The shape of `embassy_stm32::flash` (0.6.0) for an STM32G0B1RE: what [`embassy_stm32_chip!`] reads.
 mod embassy_stm32 {
     pub mod flash {
         #![allow(dead_code)]
@@ -776,9 +795,9 @@ mod embassy_stm32 {
 
 #[test]
 fn part_from_embassy_stm32_metadata() {
-    const PART: Part = crate::embassy_stm32_part!(Line::G0B1, embassy_stm32::flash);
-    const DEFAULT_PATH: Part = crate::embassy_stm32_part!(Line::G0B1);
-    assert_eq!(PART, Part::dual(Line::G0B1, 512 * KB).with_erase(2048).with_write(8));
+    const PART: Chip = crate::embassy_stm32_chip!(Line::G0B1, embassy_stm32::flash);
+    const DEFAULT_PATH: Chip = crate::embassy_stm32_chip!(Line::G0B1);
+    assert_eq!(PART, Chip::dual(Line::G0B1, 512 * KB).with_erase(2048).with_write(8));
     assert_eq!(DEFAULT_PATH, PART);
     // Nothing typed twice, and the same layout as the worked example.
     const LAYOUT: Layout = Layout::checked(

@@ -8,11 +8,30 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 - ✅ **GEO-1 flash-geometry-asserts** — `FlashGeometry` (chunk, erase, write, STATE/FLOOR/ACTIVE/DFU) checked in a
   `const`: sizes divide each other, a chunk holds the descriptor, the write unit fits the family, partitions are
   aligned and disjoint, DFU and STATE are big enough for the backend, erase size is uniform across each partition
-  (`checked_on` with the chip's erase runs). Presets for STM32F103CB, G0B1RE, H743ZI, RP2350; a firmware build
-  without a `chip-*` feature is a compile error; the geometry id travels in manifest, plan and descriptor
-  (`GEOMETRY_MISMATCH`). Bank layouts: ACTIVE and DFU are the same span of two banks, no partition crosses a
+  (`checked_on` with the chip's erase runs). The geometry id travels in manifest, plan and descriptor
+  (`GEOMETRY_MISMATCH`). Where the numbers come from is GEO-2; `chip-custom` is the way in for a hand-made one. Bank layouts: ACTIVE and DFU are the same span of two banks, no partition crosses a
   bank, STATE holds the log; written with the swap bit clear, `swapped()` gives the addresses with it set. The
-  H743ZI preset is final (BOOT-2); the RP2350 preset gets its final layout with BOOT-3.
+  H743ZI preset is final (BOOT-2); the RP2354 preset gets its final layout with BOOT-3.
+- ✅ **GEO-2 flash-series-layout** — `chunky::series`: a `series-*` feature (stm32f1, g0, g4, l4, h7, rp235x)
+  picks the series of a firmware build; a build without one (or `chip-custom`) is a compile error. Per line
+  (sub-family) the crate knows the write unit and rule, the ECC fault, how a bank is picked, and the erase size
+  by density and bank mode (F1 1 KB up to 128 KB and 2 KB above, connectivity line 2 KB; G47x 2 KB dual and
+  4 KB single; L4+ 4 KB dual and 8 KB single; H74x/H75x 128 KB, H7A3/H7B3/H7B0 8 KB with 128-bit words; banks
+  1 MB apart on H7 and 256 KB apart on G47x). The application gives the `Chip` (line, flash size, bank mode) and
+  its `Board` (profile, bootloader and config size, chunk, image size `Max` or `Exact`, factory slot);
+  `Layout::checked` computes the partition table in a `const` and every inconsistency is a build error with its
+  reason (bank swap on a single-bank part or a line without it, a part that does not exist in that size or
+  bank mode, erase size mismatch, uneven sectors, an image or factory slot that does not fit, sizes off the
+  erase unit, the RP boot ROM off RP, a swap across two banks that are apart). Profiles: embassy-boot swap, bank
+  swap, RP boot ROM, and as layout slots in place with a golden image (BOOT-6) and a factory slot (BOOT-7).
+  `embassy_stm32_chip!` reads flash size, erase size, write size and bank layout from embassy-stm32's
+  `FLASH_REGIONS`, without a dependency on the HAL. The old presets are worked examples computed this way
+  (F103CB, F103CB with golden, G071RB, G0B1RE one bank / bank swap / with factory, H743ZI, H7A3ZI, RP2354).
+  Tests: the layout matrix (every line, sizes, bank modes, profiles, factory, config), 40 real parts against
+  embassy-stm32's metadata, compile-fail cases with their messages (`chunky/tests/build_errors`), an update and
+  a revert of the worked examples on the simulator. Open: `chunky layout` in the CLI for parts that are not a
+  preset; the macro is checked by hand against embassy-stm32 0.6.0 (nine chips), a firmware crate in the
+  repository will hold it (HW-1); the factory, golden and config regions are not in the geometry id.
 
 ## MAN — device manifest
 
@@ -94,6 +113,14 @@ Design: [SECURITY.md](SECURITY.md).
   either bank, with a used-up log, on G4-like flash, and on the real STM32H743ZI preset. Simulator only: the
   hardware side is HW-2.
 - 📋 **BOOT-3 rp-bootrom-backend** — RP2350/RP2354 boot ROM A/B with try-before-you-buy.
+- 💡 **BOOT-6 in-place-golden** — tiny-flash profile (DESIGN §18): one image slot, updated in place by a small
+  golden recovery image at its own address that owns the transport, so the bootloader stays transport-free;
+  in-slot COPY off in that profile. The layout slot exists (GEO-2, `Profile::InPlaceGolden`, 90 KB for the
+  application on an F103CB against 52 KB with A/B); it has no `FlashGeometry` until the backend does.
+- 💡 **BOOT-7 factory-restore** — a signed image linked for ACTIVE in a slot of its own, copied in by the
+  bootloader as the last resort, and a COPY source for deltas. The layout slot exists (GEO-2, `Board::factory`,
+  with every profile; per bank with bank swap) and fails the build where it does not fit; nothing reads or
+  protects it yet.
 - 💡 **BOOT-4 rot-fallback** — ACTIVE that rots after it was confirmed falls back to the previous image instead of
   recovery. Cheapest on the bank backend, where the previous image is one bit away.
 
@@ -142,5 +169,10 @@ Design: [SECURITY.md](SECURITY.md).
 - Bank backend: a power cut during the trial boot spends the trial (as on the swap backend); the server offers
   the release again, and it is still in the other bank, so that costs no transfer. When the log is started over
   right after a revert (once in 511 updates on H743ZI), that revert reads as "confirmed".
+- The series rules (GEO-2) come from the reference manuals and from embassy-stm32's chip metadata, not from
+  hardware. Not in that metadata, so from the manuals alone: the 128-bit flash word of H7A3/H7B3/H7B0 (the HAL
+  writes 32 bytes there, and so does the layout by default), the ECC fault per series (NMI on G0/G4/L4, bus fault
+  on H7), BFB2 as the way G4 and L4 pick a bank, and dual-bank mode on a 512 KB G0B1 being a choice (embassy
+  lists it as dual only). HW-1 and HW-2 confirm them.
 - A planner that trusts blank chunks (the default where a chunk is smaller than an erase unit) programs into
   flash whose erase may have been cut short. The image hash catches wrong data at once, not marginal cells later.

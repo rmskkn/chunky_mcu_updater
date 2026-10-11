@@ -5,6 +5,37 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `chunky::series`: flash layouts per MCU series. A `series-*` feature (`series-stm32f1`, `-stm32g0`,
+  `-stm32g4`, `-stm32l4`, `-stm32h7`, `series-rp235x`) carries the rules of the series; the application gives
+  its `Chip` (line, flash size, bank mode) and `Board` (profile, bootloader, config, chunk, image size, factory
+  slot), and `Layout::checked` computes the partition table in a `const`. Every inconsistency is a build error
+  with its reason: bank swap on a single-bank part, a part that does not exist in that size or bank mode, erase
+  size mismatch, uneven sectors, an image or factory slot that does not fit. (GEO-2)
+- Layout slots for the profiles to come: in place with a golden image (`Profile::InPlaceGolden`, BOOT-6) and a
+  factory restore slot (`Board::factory`, BOOT-7). Their backends do not exist yet. (GEO-2)
+- `embassy_stm32_chip!`: the part from embassy-stm32's generated flash metadata (flash size, erase size, write
+  size, bank layout), without `chunky` depending on the HAL. (GEO-2)
+- Worked examples in `chunky::chips`: STM32G071RB, STM32G0B1RE with bank swap and with a factory slot,
+  STM32F103CB with a golden image, STM32H7A3ZI; `chips::LAYOUTS` lists them with every region. `chunky chips`
+  and `--chip` know `stm32g071rb`, `stm32g0b1re-bank` and `stm32h7a3zi`. (GEO-2)
+
+### Changed
+
+- The `chip-stm32f103cb`, `chip-stm32g0b1re`, `chip-stm32h743zi` and `chip-rp2350` features are replaced by the
+  `series-*` features, and `chips::SELECTED` by the application's own `Layout`. `chip-custom` stays. (GEO-2)
+- The presets are computed from the series rules. STM32F103CB and STM32H743ZI keep their numbers and geometry
+  ids. STM32G0B1RE (ACTIVE 240 KB at 30 KB instead of 238 KB at 32 KB) and the RP preset (two slots of 988 KB,
+  now named `rp2354`, before `rp2350-2mb`) get new numbers and with them new geometry ids. No wire format
+  changed. (GEO-2)
+- `Family::Stm32H7` accepts a write unit of 16 bytes (the 128-bit flash word of H7A3/H7B3/H7B0) next to 32.
+  (GEO-1)
+
+### Removed
+
+- `chips::*_FLASH` erase runs: `Layout::runs` gives them. (GEO-2)
+
 ## [0.5.0] - 2026-10-11
 
 ### Added

@@ -6,7 +6,7 @@ changed**, and that can always get the device back to the firmware it was runnin
 Fork of Roman Skakun's [chunky_mcu_updater](https://github.com/rmskkn/chunky_mcu_updater). His design is in
 [DESIGN.md](DESIGN.md), unchanged. This fork builds it in Rust on top of
 [embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot) and on hardware bank swap, generic
-across STM32F1, G0, H7 and RP2350.
+across STM32F1, G0, G4, L4, H7 and RP235x.
 
 > **Status: first prototype, host only.** The delta layer, the embassy-boot swap backend, the bank swap backend
 > and the planner run in a flash simulator and pass power-cut sweeps on every family model. No hardware and no
@@ -101,19 +101,63 @@ chunky completions fish > ~/.config/fish/completions/chunky.fish   # also bash, 
 created with mode 600, never overwritten, and refused when group or others can read it; the CLI never prints it.
 Colour is off when the output is not a terminal or `NO_COLOR` is set.
 
-## Supported chips
+## Flash layout: series, part, profile
 
-A firmware build picks one `chip-*` feature or brings its own const-checked `FlashGeometry` (`chip-custom`);
-anything else is a compile error.
+A firmware build picks the `series-*` feature of its MCU (or brings its own const-checked `FlashGeometry` with
+`chip-custom`); anything else is a compile error. The series carries what is fixed, the application says what
+varies, and a `const fn` computes the partition table:
 
-| Chip | Chunk / erase / write | Backend | State |
-|---|---|---|---|
-| STM32F103CB | 1 KB / 1 KB / 16 bit | embassy-boot swap | simulated |
-| STM32G0B1RE | 2 KB / 2 KB / 64 bit + ECC | embassy-boot swap | simulated; first hardware (HW-1) |
-| STM32H743ZI | 2 KB / 128 KB / 256 bit + ECC | hardware bank swap | simulated; hardware is HW-2 |
-| RP2350 / RP2354 | 4 KB / 4 KB / byte | boot ROM A/B | geometry and flash model; backend is BOOT-3 |
+```rust
+use chunky::series::*;
+
+// A Nucleo G0B1RE in dual-bank mode, hardware bank swap.
+const LAYOUT: Layout = Layout::checked(
+    Chip::dual(Line::G0B1, 512 * 1024),          // or chunky::embassy_stm32_chip!(Line::G0B1)
+    Board {
+        profile: Profile::BankSwap,
+        bootloader: 24 * 1024,
+        config: 0,
+        chunk: 2048,
+        image: ImageSize::Max,
+        factory: false,
+    },
+);
+const GEOMETRY: chunky::FlashGeometry = LAYOUT.geometry();
+```
+
+Anything that cannot work stops the build with its reason: `chunky layout: bank swap on a single-bank part`,
+`erase size mismatch`, `the factory image does not fit`, `the flash has sectors of several sizes (uneven
+sectors)`, a part that does not exist in that size or bank mode. With embassy-stm32, `embassy_stm32_chip!`
+takes flash size, erase size, write size and bank layout from the HAL's generated metadata, so only the line
+is typed.
+
+| Feature | Lines | Write unit and rule | Erase unit | Banks |
+|---|---|---|---|---|
+| `series-stm32f1` | `F1`, `F1Connectivity` | half-word, once or to zero | 1 KB up to 128 KB, 2 KB above; connectivity line 2 KB | one (XL: two in a row, no swap) |
+| `series-stm32g0` | `G0`, `G0B1` | 64 bit + ECC, once or to zero | 2 KB | G0B1/G0C1 from 256 KB: one or two, nSWAP_BANK |
+| `series-stm32g4` | `G4Cat2`, `G4Cat3`, `G4Cat4` | 64 bit + ECC, once or to zero | 2 KB; G47x/G48x single-bank 4 KB | G47x/G48x: one or two (256 KB apart), BFB2 |
+| `series-stm32l4` | `L4`, `L4Dual`, `L4Plus` | 64 bit + ECC, once or to zero | 2 KB; L4+ 4 KB dual, 8 KB single | L47x to L4Ax and L4+: one or two, BFB2 |
+| `series-stm32h7` | `H72x`, `H74x`, `H7Ax` | 256 bit + ECC once; H7A3/B3/B0 128 bit | 128 KB; H7A3/B3/B0 8 KB | H74x/H75x, H7A3/B3: two (1 MB apart), SWAP_BANK |
+| `series-rp235x` | `Rp235x` | byte, bits to zero | 4 KB | one |
+
+Profiles: `Swap` (embassy-boot A/B), `BankSwap` (dual-bank parts), `RpBootrom` (boot ROM A/B, backend is
+BOOT-3), and as layout slots for what is planned `InPlaceGolden` (BOOT-6) and `factory: true` (BOOT-7).
+
+Worked examples (`chunky::chips`, `chunky chips`):
+
+| Part | Chunk / erase / write | Profile | Image | State |
+|---|---|---|---|---|
+| STM32F103CB | 1 KB / 1 KB / 16 bit | embassy-boot swap | 52 KB | simulated |
+| STM32F103CB, golden | 1 KB / 1 KB / 16 bit | in place, 16 KB golden image | 90 KB | layout only (BOOT-6) |
+| STM32G071RB | 2 KB / 2 KB / 64 bit + ECC | embassy-boot swap | 52 KB | simulated |
+| STM32G0B1RE | 2 KB / 2 KB / 64 bit + ECC | embassy-boot swap | 240 KB | simulated; first hardware (HW-1) |
+| STM32G0B1RE, dual bank | 2 KB / 2 KB / 64 bit + ECC | hardware bank swap | 230 KB | simulated |
+| STM32G0B1RE, factory | 2 KB / 2 KB / 64 bit + ECC | embassy-boot swap + factory slot | 160 KB | layout only (BOOT-7) |
+| STM32H743ZI | 2 KB / 128 KB / 256 bit + ECC | hardware bank swap | 768 KB | simulated; hardware is HW-2 |
+| STM32H7A3ZI | 2 KB / 8 KB / 128 bit + ECC | hardware bank swap | 952 KB | simulated |
+| RP2354 | 4 KB / 4 KB / byte | boot ROM A/B | 988 KB | layout and flash model; backend is BOOT-3 |
 
 ## Not planned
 
-In-place single-partition updates, binary diffing inside a chunk, multi-generation rollback, and updates of the
-bootloader itself.
+Binary diffing inside a chunk, multi-generation rollback, and updates of the bootloader itself. In-place
+updates of a single partition are an idea again, with a golden recovery image next to it (BOOT-6).

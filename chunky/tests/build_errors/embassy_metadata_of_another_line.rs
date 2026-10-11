@@ -33,7 +33,7 @@ mod embassy_stm32 {
 }
 
 const LAYOUT: Layout = Layout::checked(
-    chunky::embassy_stm32_part!(Line::G0),
+    chunky::embassy_stm32_chip!(Line::G0),
     Board {
         profile: Profile::Swap,
         bootloader: 16 * 1024,

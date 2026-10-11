@@ -49,7 +49,9 @@ Cargo workspace, edition 2024. Pure-Rust crates only (no `-sys`, no `cc`/`bindge
 adding a dependency.
 
 - `chunky/` — the core, `no_std`, no `unsafe`. `geometry.rs` (chunk, erase and write sizes and the partition
-  table, const-checked), `chips.rs` (presets; a firmware build without a chip feature fails), `descriptor.rs`
+  table, const-checked), `series.rs` (the flash rules per MCU series behind the `series-*` features, and the
+  const fn that lays out a part for a profile; a firmware build without a series feature fails), `chips.rs`
+  (worked examples of it, the presets of the host tools), `descriptor.rs`
   (the signed 128-byte image descriptor, `Trust`), `floor.rs` (the version floor counter), `manifest.rs`,
   `plan.rs` (wire formats), `apply.rs` (the engine that runs an untrusted plan), `ecc.rs` (`EccError`,
   `try_read`, `Masked`), `part.rs` (`Part`, `ReadOnly`), `backend.rs` (`BootBackend`).
