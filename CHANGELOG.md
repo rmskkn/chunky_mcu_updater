@@ -5,6 +5,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `chunky` command line (crate `chunky_cli`): `keygen`, `pubkey`, `image build|info`, `manifest`, `plan`,
+  `store add|ls`, `chips`, `completions`; `--version` shows git SHA and build time. (CLI-1)
+- `chunky_server::keys` (release key file, mode 600, refused when others can read it),
+  `Manifest::of_running_image`, `DirStore::list`. No wire format changed. (CLI-1)
+
 ## [0.4.0] - 2026-10-11
 
 ### Added
@@ -40,10 +47,6 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `chunky` command line (crate `chunky_cli`): `keygen`, `pubkey`, `image build|info`, `manifest`, `plan`,
-  `store add|ls`, `chips`, `completions`; `--version` shows git SHA and build time. (CLI-1)
-- `chunky_server::keys` (release key file, mode 600, refused when others can read it),
-  `Manifest::of_running_image`, `DirStore::list`. No wire format changed. (CLI-1)
 - Cargo workspace with the first prototype, host-first: `chunky` (no_std core), `chunky_swap` (embassy-boot
   backend), `chunky_server` (image builder, blob store, planner), `chunky_sim` (flash simulator and a simulated
   device). (DEV-1)
