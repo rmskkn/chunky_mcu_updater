@@ -2,8 +2,10 @@
 # Runtime harness: one server, one client command, no setup step.
 #
 #   scripts/lab.sh server         run the server; '&' to stay in one terminal
-#   scripts/lab.sh release [RUNS] publish a new release, RUNS patched runs (default 4)
-#   scripts/lab.sh update         one whole update attempt
+#   scripts/lab.sh release FILE   publish your own firmware binary
+#   scripts/lab.sh release [RUNS] or synthesise one: RUNS patched runs (default 4)
+#   scripts/lab.sh update         ask the server for it: build and send the
+#                                 manifest, take the delta, apply, verify
 #   scripts/lab.sh status         where the device stands
 #   scripts/lab.sh manifest|map   inspect the flash
 #   scripts/lab.sh reset          forget the device, so it ships fresh again
@@ -31,8 +33,17 @@ server)
     ;;
 release)
     bootstrap
-    "$CB_FLASH" mutate "$BASE" "$IMAGE" "${1:-4}" "${2:-$RANDOM}"
-    echo "published $IMAGE; the server picks it up on the next update"
+    if [ -f "${1:-}" ]; then
+        # A real firmware binary: publish it as it is.
+        cp "$1" "$IMAGE"
+        echo "published $1 ($(stat -c %s "$1") B) as the release"
+    else
+        # No file given, so synthesise one: the shipped firmware with RUNS
+        # patched runs, which is what a release touching a few functions
+        # looks like.
+        "$CB_FLASH" mutate "$BASE" "$IMAGE" "${1:-4}" "${2:-$RANDOM}"
+    fi
+    echo "the server re-reads $IMAGE on every request, so no restart is needed"
     ;;
 update)
     bootstrap

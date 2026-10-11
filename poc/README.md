@@ -22,16 +22,29 @@ describes real
 firmware.
 
 ```sh
-scripts/lab.sh server &        # or in its own terminal, without the &
-scripts/lab.sh release 4       # publish a release with 4 patched runs
-scripts/lab.sh update          # one request: manifest, delta, apply, confirm
+scripts/lab.sh server &             # or in its own terminal, without the &
+scripts/lab.sh release firmware.bin # publish your own binary as the release
+scripts/lab.sh update               # ask for it: manifest, delta, apply, verify
 scripts/lab.sh status
 kill %1
 ```
 
-The server stays up across requests and prints one stats row per request, so
-`release` then `update` again adds another row. `scripts/lab.sh reset` forgets
-the device so it ships fresh again.
+Two halves to that, and they are independent.
+
+**Specifying the release** is writing the file the server was started with. It
+re-reads that file on every request, so publishing a new one needs no restart
+and no signal: `release firmware.bin` copies your binary over it, and `release
+12` synthesises one instead by patching 12 runs of the shipped firmware, which
+is what a release touching a few functions looks like. Without the harness it is
+just `cp firmware.bin run/release.bin`, or point the server somewhere else with
+`cb-server --image /path/to/firmware.bin`.
+
+**Triggering the update** is running the client. Nothing pushes: the device
+asks, by hashing its partition and sending the manifest, and the server answers
+with the sectors that differ. If the partition already holds that firmware the
+answer is `no update offered` — the comparison is on content, so re-running
+`update` is free and idempotent. `scripts/lab.sh reset` forgets the device so it
+ships fresh again.
 
 ## Architecture
 
