@@ -42,9 +42,9 @@ int  image_verify_hashed(const uint8_t *slot, const uint8_t root_key[32],
 
 const image_desc_t *image_desc(const uint8_t *slot);
 
-/* Writes a raw firmware binary into a slot as a signed image and makes it the
- * active slot: what a factory programmer or a debugger would leave behind. */
-int  image_install(flash_t *f, int slot, const uint8_t *bin, size_t binlen,
+/* Writes a raw firmware binary into the application partition as a signed
+ * image: what a factory programmer or a debugger would leave behind. */
+int  image_install(flash_t *f, const uint8_t *bin, size_t binlen,
                    uint32_t version, const uint8_t root_key[32]);
 
 #endif

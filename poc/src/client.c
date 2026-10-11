@@ -81,50 +81,31 @@ static void open_device(flash_t *f)
 
     uint8_t root_key[32];
     poc_root_key(root_key);
-    if (image_install(f, 0, bin, binlen, 1, root_key) < 0)
+    if (image_install(f, bin, binlen, 1, root_key) < 0)
         die("%s is %zu B, over the %d B slot payload", opt_initial, binlen, IMG_MAX_PAYLOAD);
     free(bin);
-    printf("device: created %s with %s in slot 0 as version 1\n", opt_flash, opt_initial);
+    printf("device: created %s with %s as version 1\n", opt_flash, opt_initial);
 
     f->n_erase = f->n_prog = 0;
     f->prog_bytes = 0;
 }
 
-static const char *state_name(int s)
+static const char *state_name(int st)
 {
-    static const char *n[] = { "NONE", "STAGING", "READY", "APPLYING",
-                               "TRIAL", "COMMITTED" };
-    return (s >= 0 && s <= 5) ? n[s] : "?";
+    static const char *n[] = { "NONE", "STAGING", "APPLYING", "COMMITTED", "BAD" };
+    return (st >= 0 && st <= 4) ? n[st] : "?";
 }
 
-static uint32_t slot_version(flash_t *f, int slot)
+static uint32_t app_version(flash_t *f)
 {
-    const image_desc_t *d = image_desc(flash_at(f, SLOT_BASE(slot)));
+    const image_desc_t *d = image_desc(flash_at(f, APP_BASE));
     return d->magic == IMG_MAGIC ? d->version : 0;
 }
 
-static void write_sector(flash_t *f, int slot, int index, const uint8_t *data)
+static void write_sector(flash_t *f, int index, const uint8_t *data)
 {
-    int page = (slot == 0 ? SLOT0_PAGE : SLOT1_PAGE) + index;
-    flash_erase_page(f, page);
-    flash_program(f, (size_t)page * PAGE_SIZE, data, PAGE_SIZE);
-}
-
-static void do_unroll(flash_t *f, meta_t *m, const char *why)
-{
-    printf("boot: unroll (%s)\n", why);
-    if (m->pending_slot < SLOT_COUNT) {
-        /* Erase sector 0 of the pending slot: the descriptor disappears, so
-         * the slot is unmistakably invalid. O(1), nothing to undo. */
-        flash_erase_page(f, (m->pending_slot == 0 ? SLOT0_PAGE : SLOT1_PAGE));
-    }
-    m->pending_slot = 0xFF;
-    m->plan_state   = PLAN_NONE;
-    m->try_count    = 0;
-    m->last_result  = RES_UNROLLED;
-    meta_store(f, m);
-    printf("boot: active slot %u version %u unchanged\n",
-           m->active_slot, slot_version(f, m->active_slot));
+    flash_erase_page(f, APP_PAGE + index);
+    flash_program(f, (size_t)(APP_PAGE + index) * PAGE_SIZE, data, PAGE_SIZE);
 }
 
 /* ---------------------------------------------------------------- session */
@@ -162,15 +143,12 @@ static int cmd_session(void)
     memset(&h, 0, sizeof h);
     memcpy(h.device_id, id->device_id, 16);
     h.sector_size     = PAGE_SIZE;
-    h.slot_count      = SLOT_COUNT;
-    h.sectors_slot    = SECTORS_SLOT;
-    h.active_slot     = m.active_slot;
+    h.sectors         = SECTORS_SLOT;
     h.last_result     = (uint8_t)m.last_result;
-    h.running_version = slot_version(&f, m.active_slot);
+    h.running_version = app_version(&f);
     {
-        const uint8_t *slot = flash_at(&f, SLOT_BASE(m.active_slot));
-        const image_desc_t *d = image_desc(slot);
-        if (d->magic == IMG_MAGIC) image_hash(slot, h.running_sha256);
+        const uint8_t *app = flash_at(&f, APP_BASE);
+        if (image_desc(app)->magic == IMG_MAGIC) image_hash(app, h.running_sha256);
     }
     frame_send(&l, MSG_HELLO, &h, sizeof h);
 
@@ -179,7 +157,7 @@ static int cmd_session(void)
     memcpy(&ch, pay, sizeof ch);
 
     double t0 = now_ms();
-    manifest_build(&f, m.active_slot, &man);
+    manifest_build(&f, &man);
     t_manifest = now_ms() - t0;
     md5_bytes += (size_t)MANIFEST_ENTRIES * PAGE_SIZE;   /* both slots hashed */
 
@@ -217,13 +195,11 @@ static int cmd_session(void)
 
     msg_plan_begin_t pb;
     memcpy(&pb, pay, sizeof pb);
-    printf("device: plan v%u into slot %u, %u steps\n", pb.version, pb.dst_slot, pb.step_count);
+    printf("device: plan v%u, %u steps\n", pb.version, pb.step_count);
 
     meta_t np;
     meta_init(&np);
     np.generation   = m.generation;
-    np.active_slot  = m.active_slot;
-    np.pending_slot = pb.dst_slot;
     np.plan_state   = PLAN_STAGING;
     np.target_version = pb.version;
     np.step_count   = pb.step_count;
@@ -248,36 +224,36 @@ static int cmd_session(void)
             /* Recorded only. The bootloader does flash-to-flash copies
              * (DESIGN.md section 7 step 2). */
             np.op[c.dst]        = OP_COPY;
-            np.src_slot[c.dst]  = c.src_slot;
             np.src_index[c.dst] = c.src_index;
             memcpy(np.target_md5[c.dst], c.md5, MD5_LEN);
             pending_copies++;
             msg_step_ack_t a = { c.dst, 0 };
             frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
         } else if (t == MSG_STEP_WRITE) {
+            sector_idx_t dst;
             uint16_t off, len;
-            uint8_t dst = pay[0];
-            memcpy(&off, pay + 1, 2);
-            memcpy(&len, pay + 3, 2);
+            memcpy(&dst, pay + 0, 2);
+            memcpy(&off, pay + 2, 2);
+            memcpy(&len, pay + 4, 2);
             if (dst >= SECTORS_SLOT || (size_t)off + len > PAGE_SIZE)
                 die("bad write fragment");
-            memcpy(sect + off, pay + 5, len);
+            memcpy(sect + off, pay + WRITE_HDR, len);
         } else if (t == MSG_STEP_WRITE_END) {
             msg_step_write_end_t we;
             memcpy(&we, pay, sizeof we);
             uint8_t got[MD5_LEN];
             md5(sect, PAGE_SIZE, got);
             if (memcmp(got, we.md5, MD5_LEN)) {
-                uint8_t nak[2] = { we.dst, NAK_MD5_MISMATCH };
-                frame_send(&l, MSG_STEP_NAK, nak, 2);
+                msg_step_ack_t nak = { we.dst, NAK_MD5_MISMATCH };
+                frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
                 printf("device: sector %u md5 mismatch\n", we.dst);
                 continue;
             }
-            write_sector(&f, pb.dst_slot, we.dst, sect);
-            flash_sector_md5(&f, pb.dst_slot, we.dst, got);
+            write_sector(&f, we.dst, sect);
+            flash_sector_md5(&f, we.dst, got);
             if (memcmp(got, we.md5, MD5_LEN)) {
-                uint8_t nak[2] = { we.dst, NAK_FLASH_FAIL };
-                frame_send(&l, MSG_STEP_NAK, nak, 2);
+                msg_step_ack_t nak = { we.dst, NAK_FLASH_FAIL };
+                frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
                 continue;
             }
             md5_bytes += 2 * PAGE_SIZE;   /* hash of the buffer and of the page */
@@ -333,6 +309,9 @@ done:
 
 /* ------------------------------------------------------------- bootloader */
 
+/* Applies whatever the session staged, then decides whether the partition is
+ * bootable. With one partition there is nothing to fall back to: a failure is
+ * reported and the next request is the recovery path. */
 static int cmd_boot(void)
 {
     flash_t f;
@@ -343,140 +322,94 @@ static int cmd_boot(void)
     poc_root_key(root_key);
     open_device(&f);
     double t_start = now_ms(), t_apply = 0, t_verify = 0;
-    if (meta_load(&f, &m) < 0) printf("boot: no valid meta bank, assuming slot 0\n");
+    meta_load(&f, &m);
 
-    if (m.plan_state == PLAN_STAGING) {
-        if (journal_get(&f, JRN_ARM_INDEX) != 0x0000) {
-            do_unroll(&f, &m, "plan was never committed");
-            goto boot_active;
-        }
-        printf("boot: applying plan v%u into slot %u\n", m.target_version, m.pending_slot);
+    if (m.plan_state == PLAN_STAGING && journal_get(&f, JRN_ARM_INDEX) != 0x0000) {
+        printf("boot: plan was never committed, discarding it\n");
+        m.plan_state  = PLAN_NONE;
+        m.last_result = RES_VERIFY_FAILED;
+        meta_store(&f, &m);
+    } else if (m.plan_state == PLAN_STAGING) {
+        printf("boot: applying plan v%u\n", m.target_version);
         double t0 = now_ms();
-
         for (int i = 0; i < SECTORS_SLOT; i++) {
-            if (m.op[i] == OP_NONE) continue;
-            if (journal_get(&f, i) == JRN_DONE) continue;
+            if (m.op[i] == OP_NONE || journal_get(&f, i) == JRN_DONE) continue;
 
             uint8_t got[MD5_LEN];
             if (m.op[i] == OP_COPY) {
-                const uint8_t *src = flash_at(&f, SLOT_BASE(m.src_slot[i]) +
-                                              (size_t)m.src_index[i] * PAGE_SIZE);
-                md5(src, PAGE_SIZE, got);
-                if (memcmp(got, m.target_md5[i], MD5_LEN)) {
-                    do_unroll(&f, &m, "copy source hash changed");
-                    goto boot_active;
-                }
+                /* Flash to flash inside the partition, through RAM. */
                 uint8_t tmp[PAGE_SIZE];
-                memcpy(tmp, src, PAGE_SIZE);
-                write_sector(&f, m.pending_slot, i, tmp);
+                memcpy(tmp, flash_at(&f, APP_BASE +
+                       (size_t)m.src_index[i] * PAGE_SIZE), PAGE_SIZE);
+                md5(tmp, PAGE_SIZE, got);
+                if (memcmp(got, m.target_md5[i], MD5_LEN)) {
+                    printf("boot: copy source for sector %d no longer matches\n", i);
+                    m.plan_state = PLAN_BAD;
+                    break;
+                }
+                write_sector(&f, i, tmp);
             }
-            flash_sector_md5(&f, m.pending_slot, i, got);
+            flash_sector_md5(&f, i, got);
             if (memcmp(got, m.target_md5[i], MD5_LEN)) {
-                do_unroll(&f, &m, "staged sector hash mismatch");
-                goto boot_active;
+                printf("boot: sector %d does not match the plan\n", i);
+                m.plan_state = PLAN_BAD;
+                break;
             }
             journal_set(&f, i, JRN_DONE);
             md5_bytes += 2 * PAGE_SIZE;
         }
         t_apply = now_ms() - t0;
 
-        t0 = now_ms();
-        uint8_t h[SHA256_LEN];
-        const uint8_t *slot = flash_at(&f, SLOT_BASE(m.pending_slot));
-        image_hash(slot, h);
-        sha_bytes += SLOT_SIZE - DESC_LEN;
-        ecdsa_ms += ECDSA_VERIFY_MS;
-        /* One hash, two checks: against the plan, then against the descriptor. */
-        if (memcmp(h, m.target_sha256, SHA256_LEN)) {
+        if (m.plan_state != PLAN_BAD) {
+            t0 = now_ms();
+            uint8_t hsh[SHA256_LEN];
+            const uint8_t *app = flash_at(&f, APP_BASE);
+            image_hash(app, hsh);
+            sha_bytes += SLOT_SIZE - DESC_LEN;
+            ecdsa_ms += ECDSA_VERIFY_MS;
+            if (memcmp(hsh, m.target_sha256, SHA256_LEN) ||
+                image_verify_hashed(app, root_key, hsh, &why) < 0) {
+                printf("boot: the staged image does not verify (%s)\n",
+                       why ? why : "image_sha256 mismatch");
+                m.plan_state = PLAN_BAD;
+            } else {
+                m.plan_state  = PLAN_COMMITTED;
+                m.last_result = RES_OK;
+            }
             t_verify = now_ms() - t0;
-            do_unroll(&f, &m, "image_sha256 mismatch");
-            goto boot_active;
         }
-        if (image_verify_hashed(slot, root_key, h, &why) < 0) {
-            t_verify = now_ms() - t0;
-            do_unroll(&f, &m, why);
-            goto boot_active;
-        }
-        t_verify = now_ms() - t0;
-        printf("boot: slot %u verified, image_sha256 and release signature good\n",
-               m.pending_slot);
-
-        /* No meta_store here: the TRIAL block below stores once, after
-         * taking the first attempt token. Each store costs a 4-page bank
-         * erase, which is ~108 ms on the part. */
-        m.plan_state = PLAN_TRIAL;
-        m.try_count  = MAX_TRIES;
-    }
-
-    if (m.plan_state == PLAN_TRIAL) {
-        if (m.try_count == 0) {
-            printf("boot: trial boots exhausted for version %u\n", m.target_version);
-            uint8_t act = m.active_slot;
-            do_unroll(&f, &m, "revert: new image never confirmed");
-            m.last_result = RES_TRIAL_FAILED;
-            m.active_slot = act;
-            meta_store(&f, &m);
-            goto boot_active;
-        }
-        m.try_count--;
         meta_store(&f, &m);
-        printf("boot: TRIAL slot %u version %u, %u attempts left\n",
-               m.pending_slot, slot_version(&f, m.pending_slot), m.try_count);
-        printf("boot: jumping to slot %u (run `confirm` if the self-test passes)\n",
-               m.pending_slot);
-        if (t_apply > 0)
-            printf("time: apply      host %8.2f ms   F103 %8.1f - %.1f ms  (copies)\n",
-                   t_apply, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
-                   f103_flash_ms(f.n_erase, f.prog_bytes, 1));
-        if (t_verify > 0)
-            printf("time: verify     host %8.2f ms   F103 %8.1f ms  "
-                   "(image_sha256 + signature)\n", t_verify,
-                   (double)(SLOT_SIZE - DESC_LEN) * F103_SHA256_CYC_B / (F103_MHZ * 1000.0)
-                   + ECDSA_VERIFY_MS);
-        time_report("boot", now_ms() - t_start, &f);
-        flash_close(&f);
-        return 0;
     }
 
-boot_active:
     {
-        const uint8_t *slot = flash_at(&f, SLOT_BASE(m.active_slot));
-        uint8_t h[SHA256_LEN];
-        image_hash(slot, h);
-        if (image_verify(slot, root_key, &why) < 0) {
-            printf("boot: active slot %u is not bootable (%s)\n", m.active_slot, why);
-            flash_close(&f);
-            return 1;
+        const uint8_t *app = flash_at(&f, APP_BASE);
+        uint8_t hsh[SHA256_LEN];
+        image_hash(app, hsh);
+        sha_bytes += SLOT_SIZE - DESC_LEN;
+        if (image_verify_hashed(app, root_key, hsh, &why) < 0) {
+            /* No second partition, so this is as far as the device gets: it
+             * keeps asking for a release until one verifies. */
+            printf("boot: no bootable image (%s); requesting an update\n", why);
+            if (m.plan_state != PLAN_BAD) {
+                m.plan_state  = PLAN_BAD;
+                m.last_result = RES_VERIFY_FAILED;
+                meta_store(&f, &m);
+            }
+        } else {
+            printf("boot: booting version %u\n", app_version(&f));
         }
-        printf("boot: booting slot %u version %u\n",
-               m.active_slot, slot_version(&f, m.active_slot));
-        sha_bytes += SLOT_SIZE - DESC_LEN;   /* image_sha256 on every boot */
     }
+
+    if (t_apply > 0)
+        printf("time: apply      host %8.2f ms   F103 %8.1f - %.1f ms  (copies)\n",
+               t_apply, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
+               f103_flash_ms(f.n_erase, f.prog_bytes, 1));
+    if (t_verify > 0)
+        printf("time: verify     host %8.2f ms   F103 %8.1f ms  "
+               "(image_sha256 + signature)\n", t_verify,
+               (double)(SLOT_SIZE - DESC_LEN) * F103_SHA256_CYC_B / (F103_MHZ * 1000.0)
+               + ECDSA_VERIFY_MS);
     time_report("boot", now_ms() - t_start, &f);
-    flash_close(&f);
-    return 0;
-}
-
-static int cmd_confirm(void)
-{
-    flash_t f;
-    meta_t m;
-
-    open_device(&f);
-    meta_load(&f, &m);
-    if (m.plan_state != PLAN_TRIAL) {
-        printf("confirm: nothing on trial (state %s)\n", state_name(m.plan_state));
-        flash_close(&f);
-        return 1;
-    }
-    m.active_slot  = m.pending_slot;
-    m.pending_slot = 0xFF;
-    m.plan_state   = PLAN_COMMITTED;
-    m.try_count    = 0;
-    m.last_result  = RES_OK;
-    meta_store(&f, &m);
-    printf("confirm: slot %u version %u is now active\n",
-           m.active_slot, slot_version(&f, m.active_slot));
     flash_close(&f);
     return 0;
 }
@@ -486,49 +419,33 @@ static int cmd_status(void)
     flash_t f;
     meta_t m;
     manifest_t man;
-    uint8_t d[SHA256_LEN];
+    uint8_t d[SHA256_LEN], rk[32];
     char hex[80];
+    const char *why;
 
     open_device(&f);
     identity_t *id = identity_get(&f);
     meta_load(&f, &m);
+    poc_root_key(rk);
 
     hexdump_line(id->device_id, 8, hex);
-    printf("device_id      %s...\n", hex);
-    printf("meta gen %u  state %s  active %u  pending %u  tries %u  last_result %u\n",
-           m.generation, state_name(m.plan_state), m.active_slot, m.pending_slot,
-           m.try_count, m.last_result);
-    for (int s = 0; s < SLOT_COUNT; s++) {
-        const uint8_t *slot = flash_at(&f, SLOT_BASE(s));
-        const image_desc_t *dd = image_desc(slot);
-        const char *why;
-        uint8_t rk[32];
-        poc_root_key(rk);
-        int ok = image_verify(slot, rk, &why);
-        printf("slot %d  %s  version %u  %s\n", s,
-               dd->magic == IMG_MAGIC ? "image  " : "no image",
-               dd->magic == IMG_MAGIC ? dd->version : 0,
-               ok == 0 ? "verified" : why);
-    }
-    manifest_build(&f, m.active_slot, &man);
+    printf("device_id       %s...\n", hex);
+    printf("meta gen %u  state %s  last_result %u\n",
+           m.generation, state_name(m.plan_state), m.last_result);
+
+    const uint8_t *app = flash_at(&f, APP_BASE);
+    int ok = image_verify(app, rk, &why);
+    printf("application     %s  version %u  %s\n",
+           image_desc(app)->magic == IMG_MAGIC ? "image   " : "no image",
+           app_version(&f), ok == 0 ? "verified" : why);
+
+    manifest_build(&f, &man);
     manifest_digest(&man, d);
     hexdump_line(d, 8, hex);
-    printf("manifest digest %s...  body %zu B\n", hex, MANIFEST_BODY_LEN);
+    printf("manifest digest %s...  %d sectors, body %zu B\n",
+           hex, SECTORS_SLOT, MANIFEST_BODY_LEN);
     flash_close(&f);
     return 0;
-}
-
-/* Reads the live plan state, so the driver below knows when a trial has
- * resolved one way or the other. */
-static int plan_state_now(void)
-{
-    flash_t f;
-    meta_t m;
-    open_device(&f);
-    meta_load(&f, &m);
-    int st = m.plan_state;
-    flash_close(&f);
-    return st;
 }
 
 static int usage(void)
@@ -559,20 +476,10 @@ int main(int argc, char **argv)
 
     if (opt_status) return cmd_status();
 
-    /* 1. Ask for an update by reporting what is in flash. */
-    if (cmd_session() != 0) {
-        cmd_boot();
-        return 0;
-    }
-
-    /* 2. Reboot into the bootloader: apply, verify, start the trial. */
-    cmd_boot();
-
-    /* 3. Either pass the self-test, or let the trial boots run out and watch
-     *    the device revert on its own. */
-    if (plan_state_now() == PLAN_TRIAL)
-        cmd_confirm();
-
+    /* Ask for an update by reporting what is in flash, then reboot into the
+     * bootloader to apply and verify it. One partition, so the write is in
+     * place and there is no trial boot to pass. */
+    cmd_session();
     cmd_boot();
     return cmd_status();
 }

@@ -35,9 +35,10 @@ static void cache_path(char *out, size_t len, const uint8_t id[16])
 /* What one written sector and one copy step cost on the wire, from the frame
  * and message sizes rather than from a measurement, so the full-image baseline
  * is exact for any run. */
-#define SECTOR_WIRE  ((PAGE_SIZE / WRITE_CHUNK) * (FRAME_OVERHEAD + 5 + WRITE_CHUNK) \
-                      + (FRAME_OVERHEAD + 1 + MD5_LEN)   /* STEP_WRITE_END */ \
-                      + (FRAME_OVERHEAD + 2))            /* STEP_ACK */
+#define SECTOR_WIRE  ((PAGE_SIZE / WRITE_CHUNK) \
+                        * (FRAME_OVERHEAD + WRITE_HDR + WRITE_CHUNK) \
+                      + (FRAME_OVERHEAD + (int)sizeof(msg_step_write_end_t)) \
+                      + (FRAME_OVERHEAD + (int)sizeof(msg_step_ack_t)))
 #define COPY_WIRE    ((FRAME_OVERHEAD + (int)sizeof(msg_step_copy_t)) \
                       + (FRAME_OVERHEAD + 2))
 
@@ -45,7 +46,8 @@ static void cache_path(char *out, size_t len, const uint8_t id[16])
  * touches most of the slot stays one readable line. */
 static void sector_list(const plan_t *p, int op, char *out, size_t cap)
 {
-    int idx[SECTORS_SLOT], n = 0;
+    static int idx[SECTORS_SLOT];
+    int n = 0;
     size_t used = 0;
 
     for (int k = 0; k < p->count; k++)
@@ -124,15 +126,14 @@ static void session(int fd)
 
     if (frame_expect(&l, MSG_HELLO, pay, &n) < 0) return;
     memcpy(&hello, pay, sizeof hello);
-    if (hello.sector_size != PAGE_SIZE || hello.slot_count != SLOT_COUNT ||
-        hello.sectors_slot != SECTORS_SLOT) {
+    if (hello.sector_size != PAGE_SIZE || hello.sectors != SECTORS_SLOT) {
         uint8_t r = REJ_GEOMETRY_MISMATCH;
         frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
         printf("server: geometry mismatch, session refused\n");
         return;
     }
-    printf("server: HELLO active_slot=%u running_version=%u last_result=%u\n",
-           hello.active_slot, hello.running_version, hello.last_result);
+    printf("server: HELLO running_version=%u last_result=%u\n",
+           hello.running_version, hello.last_result);
 
     rnd_bytes(ch.nonce, NONCE_LEN);
     frame_send(&l, MSG_CHALLENGE, &ch, sizeof ch);
@@ -227,9 +228,8 @@ static void session(int fd)
         return;
     }
 
-    int dst_slot = hello.active_slot ? 0 : 1;
     double t_plan = now_ms();
-    plan_build(&dev, target, dst_slot, &plan);
+    plan_build(&dev, target, &plan);
     t_plan = now_ms() - t_plan;
     printf("server: plan built in %.2f ms\n", t_plan);
 
@@ -237,19 +237,18 @@ static void session(int fd)
     msg_plan_begin_t pb;
     memset(&pb, 0, sizeof pb);
     pb.version    = (uint32_t)ver;
-    pb.dst_slot   = (uint8_t)dst_slot;
     pb.step_count = (uint16_t)plan.count;
     memcpy(pb.image_sha256, d->sha256, SHA256_LEN);
     memcpy(pb.image_mac, d->mac, SHA256_LEN);
     frame_send(&l, MSG_PLAN_BEGIN, &pb, sizeof pb);
-    printf("server: plan v%d into slot %d, %d steps (%d skipped)\n",
-           ver, dst_slot, plan.count, plan.n_skip);
+    printf("server: plan v%d, %d steps (%d skipped)\n",
+           ver, plan.count, plan.n_skip);
 
     for (int k = 0; k < plan.count; k++) {
         step_t *s = &plan.step[k];
         if (s->op == OP_COPY) {
             msg_step_copy_t c;
-            c.dst = s->dst; c.src_slot = s->src_slot; c.src_index = s->src_index;
+            c.dst = s->dst; c.src_index = s->src_index;
             memcpy(c.md5, s->md5, MD5_LEN);
             frame_send(&l, MSG_STEP_COPY, &c, sizeof c);
         } else {
@@ -258,14 +257,14 @@ static void session(int fd)
             uint8_t md[MD5_LEN];
             memcpy(md, s->md5, MD5_LEN);
             for (size_t off = 0; off < PAGE_SIZE; off += WRITE_CHUNK) {
-                uint8_t buf[5 + WRITE_CHUNK];
+                uint8_t buf[WRITE_HDR + WRITE_CHUNK];
                 uint16_t len = WRITE_CHUNK;
                 uint16_t o16 = (uint16_t)off;
-                buf[0] = s->dst;
-                memcpy(buf + 1, &o16, 2);
-                memcpy(buf + 3, &len, 2);
-                memcpy(buf + 5, sect + off, len);
-                frame_send(&l, MSG_STEP_WRITE, buf, 5 + len);
+                memcpy(buf + 0, &s->dst, 2);
+                memcpy(buf + 2, &o16, 2);
+                memcpy(buf + 4, &len, 2);
+                memcpy(buf + WRITE_HDR, sect + off, len);
+                frame_send(&l, MSG_STEP_WRITE, buf, WRITE_HDR + len);
             }
             msg_step_write_end_t we;
             we.dst = s->dst;
@@ -274,7 +273,11 @@ static void session(int fd)
         }
         int t = frame_recv(&l, pay, &n);
         if (t < 0) { printf("server: device went away after %d steps\n", k); goto out; }
-        if (t == MSG_STEP_NAK) printf("server: NAK on sector %u reason %u\n", pay[0], pay[1]);
+        if (t == MSG_STEP_NAK) {
+            msg_step_ack_t nak;
+            memcpy(&nak, pay, sizeof nak);
+            printf("server: NAK on sector %u reason %u\n", nak.dst, nak.code);
+        }
     }
 
     frame_send(&l, MSG_PLAN_END, NULL, 0);
@@ -286,7 +289,7 @@ static void session(int fd)
 out:
     {
         char label[32];
-        snprintf(label, sizeof label, "v%u into slot %d", ver, dst_slot);
+        snprintf(label, sizeof label, "v%u", ver);
         report(label, &l, &plan);
     }
     free(target);

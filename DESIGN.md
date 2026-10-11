@@ -35,6 +35,10 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 
 ## 2. Memory map (STM32F103CB, 1 KB pages)
 
+> Sections 2 to 8 describe the A/B layout. The host PoC implements the
+> single-partition variant instead; Section 18 has the differences and the
+> trade.
+
 | Region       | Pages   | Address range             | Size  | Purpose |
 |--------------|---------|---------------------------|-------|---------|
 | Bootloader   | 0–14    | `0x08000000`–`0x08003BFF` | 15 KB | Apply engine, MD5, SHA-256, ECDSA sign/verify, flash driver, root public key |
@@ -1159,3 +1163,71 @@ where it should: on the smallest updates.
 The digest is signed and carries the nonce for the same reason the manifest
 does: it is a statement about device state, and the server must not plan against
 an unauthenticated or replayed one.
+
+---
+
+## 18. Single-partition variant
+
+Everything above assumes A/B: two application partitions, the inactive one
+rewritten and the active one untouched, which is what makes unroll O(1) and
+revert possible at all. The host PoC in `poc/` implements a **different
+layout**, chosen deliberately: one application partition, updated in place.
+
+| | A/B (Sections 2-8) | Single partition (`poc/`) |
+|---|---|---|
+| Application space | 2 x 52 KB | 104 KB |
+| Sectors in the manifest | 104, both slots | 104, the one partition |
+| Manifest body | 2088 B | 1876 B |
+| Rule 1, already correct | fires on every update | fires on every update |
+| Rule 2, local copy | finds sectors in the other slot | almost never fires |
+| Unroll | one page erase | not possible |
+| Trial boot and revert | yes, one generation back | not possible |
+| Resume after a power cut | yes | yes |
+| Who owns the transport | the application | **the bootloader** |
+
+Three consequences are worth stating plainly, because they are not obvious
+from "drop the second slot".
+
+**The running image cannot do the writing.** An in-place update overwrites the
+code that is executing, so the download and the programming have to move into
+the bootloader. That reverses the decision in Section 3, and it is the largest
+structural difference between the two layouts: the bootloader now needs a
+transport, which is exactly the surface Section 3 was keeping out of it.
+
+**A failed update is not a failed update, it is a device with no firmware.**
+There is no previous image to fall back to, so the recovery path is the update
+itself: the bootloader reports that it has no bootable image and asks for
+another release. The device is recoverable as long as the server is reachable,
+and bricked if it is not. Rollback is traded for 52 KB of application space and
+nothing else.
+
+**Resume survives, rollback does not.** The partition's own sector hashes are
+the progress record, so a power cut mid-update costs only the sectors not yet
+written: the next request re-manifests and the server re-diffs. That is the
+same property as Section 15.4, and it is what keeps in-place updating viable
+at all.
+
+**Rule 2 stops paying.** A copy needs its bytes to already exist in the flash
+the manifest covers. With one partition that means elsewhere in the same image,
+which for real firmware is almost never true -- measured on the PoC, both
+requests in its demo copy nothing. The content-addressed lookup of Section 5
+is cheap enough to keep, but it is A/B that makes it valuable, because the
+other slot holds a related release.
+
+Measured on the PoC, 104 KB partition, 45 772 B reference binary:
+
+```
+case                       skip copy write     wire of full   saved B   saved      flash ms
+-------------------------- ---- ---- ----- -------- ------- --------- ------- -------------
+v2                           99    0     5     7984    6.7%    111870   93.3%       151-302
+v3                           89    0    15    19284   16.1%    100570   83.9%       454-907
+```
+
+The ratios look better than Section 17's only because the image is twice as
+large while the change is the same size: a fixed-size change against a bigger
+image is a smaller fraction of it. The absolute numbers are what matter, and
+they are unchanged -- 5 changed sectors still cost about 8 KB and 151-302 ms.
+
+Choose A/B when a failed update must not strand the device. Choose one
+partition when the application needs the space and the link is reliable enough
+that "ask again" is an acceptable recovery path.

@@ -39,6 +39,10 @@ difference into a spare partition that the running firmware never depends on.
    separate staging area, because the inactive partition *is* the scratch
    space. That is what makes two 52 KB application slots fit in 128 KB of
    flash.
+
+   The host PoC implements a single-partition variant instead: one 104 KB
+   application, updated in place, which trades unroll and revert for the space.
+   `DESIGN.md` section 18 has the comparison.
 4. **The bootloader applies the plan and can unroll it.** Apply is journalled
    and resumable, and it never writes outside the inactive partition. So
    abandoning an update is one page erase, with nothing to undo.

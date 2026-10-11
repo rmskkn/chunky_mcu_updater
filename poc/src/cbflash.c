@@ -26,13 +26,14 @@ static int cmd_manifest(const char *path)
 
     if (flash_open(&f, path) < 0) die("cannot open %s", path);
     meta_load(&f, &m);
-    manifest_build(&f, m.active_slot, &man);
+    (void)m;
+    manifest_build(&f, &man);
     for (int k = 0; k < MANIFEST_ENTRIES; k++) {
         hexdump_line(man.e[k].md5, 6, hex);
-        printf("slot %u sector %2u  %s%s", man.e[k].slot, man.e[k].index, hex,
-               (k % 4 == 3) ? "\n" : "   ");
+        printf("sector %3u  %s%s", man.e[k].index, hex,
+               (k % 5 == 4) ? "\n" : "   ");
     }
-    if (MANIFEST_ENTRIES % 4) printf("\n");
+    if (MANIFEST_ENTRIES % 5) printf("\n");
     manifest_digest(&man, d);
     hexdump_line(d, 32, hex);
     printf("body %zu B  digest %s\n", MANIFEST_BODY_LEN, hex);
@@ -55,10 +56,8 @@ static int cmd_map(const char *path)
     printf("meta bank 1       %3d-%-3d    0x%05x     %5d\n",
            META1_PAGE, META1_PAGE + META_PAGES - 1, META1_PAGE * PAGE_SIZE,
            META_PAGES * PAGE_SIZE);
-    printf("slot 0            %3d-%-3d    0x%05x     %5d\n",
-           SLOT0_PAGE, SLOT0_PAGE + SLOT_PAGES - 1, SLOT0_PAGE * PAGE_SIZE, SLOT_SIZE);
-    printf("slot 1            %3d-%-3d    0x%05x     %5d\n",
-           SLOT1_PAGE, SLOT1_PAGE + SLOT_PAGES - 1, SLOT1_PAGE * PAGE_SIZE, SLOT_SIZE);
+    printf("application       %3d-%-3d    0x%05x     %5d\n",
+           APP_PAGE, APP_PAGE + APP_PAGES - 1, APP_PAGE * PAGE_SIZE, SLOT_SIZE);
     flash_close(&f);
     return 0;
 }
