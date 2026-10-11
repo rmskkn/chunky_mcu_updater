@@ -18,13 +18,8 @@ typedef struct {
     int    n_skip, n_copy, n_write;
 } plan_t;
 
-/* The three rules of DESIGN.md section 5, against the DESTINATION slot.
- * allow_copy=0 models per-slot builds where rule 2 rarely fires.
- * force_all=1 is the full-image baseline: every sector becomes a write.
- * force_write is a sector index that must be sent as a write even if rule 1 or
- * rule 2 would cover it, or -1; the tamper test needs it. */
+/* The three rules of DESIGN.md section 5, against the DESTINATION slot. */
 void plan_build(const manifest_t *dev, const uint8_t target[SLOT_SIZE],
-                int dst_slot, int allow_copy, int force_all, int force_write,
-                plan_t *p);
+                int dst_slot, plan_t *p);
 
 #endif

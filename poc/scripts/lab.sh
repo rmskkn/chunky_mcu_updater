@@ -1,60 +1,54 @@
 #!/usr/bin/env bash
-# Runtime harness: keeps one server up while you drive the device by hand.
+# Runtime harness: one server, one client command, no setup step.
 #
-#   scripts/lab.sh setup            fresh flash, slot 0 provisioned with v1
-#   scripts/lab.sh server           run the server; '&' to keep one terminal
-#   scripts/lab.sh release N [RUNS] publish version N, RUNS patched runs (default 4)
-#   scripts/lab.sh session          run one update session
-#   scripts/lab.sh boot|confirm|unroll|status
-#   scripts/lab.sh manifest|map     inspect the flash
+#   scripts/lab.sh server         run the server; '&' to stay in one terminal
+#   scripts/lab.sh release [RUNS] publish a new release, RUNS patched runs (default 4)
+#   scripts/lab.sh update         one whole update attempt
+#   scripts/lab.sh status         where the device stands
+#   scripts/lab.sh manifest|map   inspect the flash
+#   scripts/lab.sh reset          forget the device, so it ships fresh again
 #
-# Anything else is passed straight to cb-client.
+# The device is created on first use with the reference binary in slot 0, so
+# its first manifest describes real firmware. The server stays up across
+# requests and prints one stats row per request.
 source "$(dirname "$0")/common.sh"
 need_build
+
+# Everything needs the shipped firmware and something to serve.
+bootstrap() {
+    need_reference
+    mkdir -p "$CACHE"
+    [ -f "$BASE" ]  || cp "$KLIPPER_BIN" "$BASE"
+    [ -f "$IMAGE" ] || cp "$BASE" "$IMAGE"
+}
 
 cmd="${1:-help}"; shift || true
 
 case "$cmd" in
-setup)
-    need_reference
-    fresh_run_dir
-    cp "$KLIPPER_BIN" "$RUN/base.bin"
-    cp "$RUN/base.bin" "$IMAGES/v1.bin"
-    "$CB_FLASH" init "$FLASH"
-    "$CB_FLASH" provision "$FLASH" 0 "$IMAGES/v1.bin" 1
-    cat <<TXT
-
-ready. two terminals:
-  terminal 1:  $0 server
-  terminal 2:  $0 release 2 && $0 session && $0 boot && $0 confirm
-
-or one terminal, backgrounding the server in this shell:
-  $0 server &
-  $0 release 2 && $0 session && $0 boot && $0 confirm
-  kill %1
-
-the server stays up across sessions; publish a new release and run another
-session without restarting it. It exits with the shell that started it, so
-background it from your own shell, not from a script that then exits.
-TXT
-    ;;
 server)
-    [ -d "$IMAGES" ] || { echo "run '$0 setup' first" >&2; exit 1; }
-    exec "$CB_SERVER" --port "$PORT" --images "$IMAGES" --cache "$CACHE" "$@"
+    bootstrap
+    exec "$CB_SERVER" --port "$PORT" --image "$IMAGE" --cache "$CACHE" "$@"
     ;;
 release)
-    ver="${1:?usage: $0 release N [RUNS]}"; runs="${2:-4}"
-    [ -f "$RUN/base.bin" ] || { echo "run '$0 setup' first" >&2; exit 1; }
-    "$CB_FLASH" mutate "$RUN/base.bin" "$IMAGES/v$ver.bin" "$runs" "$ver"
-    echo "published v$ver ($runs patched runs); the server picks it up on the next session"
+    bootstrap
+    "$CB_FLASH" mutate "$BASE" "$IMAGE" "${1:-4}" "${2:-$RANDOM}"
+    echo "published $IMAGE; the server picks it up on the next update"
+    ;;
+update)
+    bootstrap
+    exec "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --port "$PORT" "$@"
+    ;;
+status)
+    exec "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --status
     ;;
 manifest|map)
-    "$CB_FLASH" "$cmd" "$FLASH"
+    exec "$CB_FLASH" "$cmd" "$FLASH"
     ;;
-help|-h|--help)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+reset)
+    rm -f "$FLASH"; rm -rf "$CACHE"
+    echo "device forgotten; the next update creates it with $BASE in slot 0"
     ;;
 *)
-    exec "$CB_CLIENT" "$cmd" --flash "$FLASH" --port "$PORT" "$@"
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

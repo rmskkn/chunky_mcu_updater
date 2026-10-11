@@ -15,4 +15,8 @@ void     rnd_bytes(uint8_t *out, size_t len);
 /* Monotonic wall clock in milliseconds, for the phase timers. */
 double   now_ms(void);
 
+/* True when CB_MACHINE is set, which turns on the parseable STATS/SAVE/TIME
+ * lines the scripts read. Off by default so a run is readable. */
+int      machine_output(void);
+
 #endif

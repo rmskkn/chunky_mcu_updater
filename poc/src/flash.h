@@ -78,12 +78,9 @@ enum { RES_NONE = 0, RES_OK, RES_UNROLLED, RES_TRIAL_FAILED, RES_FLASH_FAIL };
 typedef struct {
     uint8_t *map;
     int      fd;
-    int      fail_after;   /* -1 = never; else _exit after N programs */
-    long     programs;     /* erases + programs, what fail_after counts */
-    long     n_erase;
+    long     n_erase;      /* page erases, for the device time model */
     long     n_prog;
     size_t   prog_bytes;
-    double   io_ms;        /* host time spent in erase and program */
     const char *path;
 } flash_t;
 
@@ -125,7 +122,7 @@ static inline double f103_sector_ms(int worst)
 }
 
 int  flash_create(const char *path);
-int  flash_open(flash_t *f, const char *path, int fail_after);
+int  flash_open(flash_t *f, const char *path);
 void flash_close(flash_t *f);
 
 void flash_erase_page(flash_t *f, int page);

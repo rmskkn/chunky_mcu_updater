@@ -1,4 +1,5 @@
 #include "image.h"
+#include <stdlib.h>
 #include <string.h>
 
 void image_hash(const uint8_t *slot, uint8_t out[SHA256_LEN])
@@ -67,4 +68,30 @@ int image_verify(const uint8_t *slot, const uint8_t root_key[32], const char **w
     uint8_t h[SHA256_LEN];
     image_hash(slot, h);
     return image_verify_hashed(slot, root_key, h, why);
+}
+
+int image_install(flash_t *f, int slot, const uint8_t *bin, size_t binlen,
+                  uint32_t version, const uint8_t root_key[32])
+{
+    uint8_t *img = malloc(SLOT_SIZE);
+    meta_t m;
+
+    if (image_build(bin, binlen, version, root_key, img) < 0) { free(img); return -1; }
+
+    int base = (slot == 0) ? SLOT0_PAGE : SLOT1_PAGE;
+    for (int i = 0; i < SLOT_PAGES; i++) {
+        flash_erase_page(f, base + i);
+        flash_program(f, (size_t)(base + i) * PAGE_SIZE,
+                      img + (size_t)i * PAGE_SIZE, PAGE_SIZE);
+    }
+    free(img);
+
+    meta_load(f, &m);
+    if (m.magic != META_MAGIC) meta_init(&m);
+    m.active_slot  = (uint8_t)slot;
+    m.pending_slot = 0xFF;
+    m.plan_state   = PLAN_COMMITTED;
+    m.last_result  = RES_NONE;
+    meta_store(f, &m);
+    return 0;
 }

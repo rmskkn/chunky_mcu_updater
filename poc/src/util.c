@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -70,6 +71,13 @@ void die(const char *fmt, ...)
     fputc('\n', stderr);
     va_end(ap);
     exit(1);
+}
+
+int machine_output(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = getenv("CB_MACHINE") != NULL;
+    return cached;
 }
 
 double now_ms(void)
