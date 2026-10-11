@@ -13,15 +13,15 @@ lint:
     cargo fmt --check
     just check-fw
 
-# The no_std crates build for Cortex-M0+ and M4F, signed and unsigned; and fail without a choice
+# The no_std crates build for Cortex-M0+ and M4F, signed and unsigned, with a series-* feature or chip-custom
 check-fw:
-    cargo check -q -p chunky_swap --target thumbv6m-none-eabi --features ed25519,chunky/chip-custom
+    cargo check -q -p chunky_swap --target thumbv6m-none-eabi --features ed25519,chunky/series-stm32g0
     cargo check -q -p chunky_swap --target thumbv6m-none-eabi --features unsigned,chunky/chip-custom
-    cargo check -q -p chunky_swap --target thumbv7em-none-eabihf --features ed25519,chunky/chip-custom
+    cargo check -q -p chunky_swap --target thumbv7em-none-eabihf --features ed25519,chunky/series-stm32g4
     cargo check -q -p chunky_swap --target thumbv7em-none-eabihf --features unsigned,chunky/chip-custom
     cargo check -q -p chunky_bank --target thumbv6m-none-eabi --features ed25519,chunky/chip-custom
-    cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features ed25519,chunky/chip-stm32h743zi
-    cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features unsigned,chunky/chip-stm32h743zi
+    cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features ed25519,chunky/series-stm32h7
+    cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features unsigned,chunky/series-stm32h7
 
 # Build everything in release mode and install the `chunky` binary (cargo bin dir)
 install:

@@ -17,6 +17,9 @@ compile_error!(
 #[cfg(all(target_os = "none", feature = "ed25519", feature = "unsigned"))]
 compile_error!("chunky: a firmware build trusts one scheme: enable `ed25519` or `unsigned`, not both");
 
+#[cfg(test)]
+extern crate std;
+
 pub mod apply;
 pub mod backend;
 pub mod chips;
@@ -28,6 +31,7 @@ pub mod hash;
 pub mod manifest;
 pub mod part;
 pub mod plan;
+pub mod series;
 
 pub use apply::{Applier, ApplyError};
 pub use backend::{BootBackend, BootState};

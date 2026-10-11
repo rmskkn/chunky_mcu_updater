@@ -11,11 +11,14 @@ repository.workspace = true
 ed25519 = ["dep:ed25519-dalek"]
 # Explicit opt-out for small flash: no verifier, integrity by SHA-256 only. See SECURITY.md before using it.
 unsigned = []
-# Exactly one chip on a firmware target (target_os = "none"), or the build fails: see src/chips.rs.
-chip-stm32f103cb = []
-chip-stm32g0b1re = []
-chip-stm32h743zi = []
-chip-rp2350 = []
+# The MCU series of a firmware target (target_os = "none"): exactly one, or `chip-custom`, or the build fails.
+# It carries the flash rules of the series; the part and the profile are given in code: see src/series.rs.
+series-stm32f1 = []
+series-stm32g0 = []
+series-stm32g4 = []
+series-stm32l4 = []
+series-stm32h7 = []
+series-rp235x = []
 # Your own FlashGeometry, const-checked with `checked_on`.
 chip-custom = []
 

@@ -1,5 +1,8 @@
 //! Flash geometry: the three sizes (chunk, erase, write) and where the partitions sit.
 //!
+//! [`crate::series`] computes one from the MCU series, the part and the profile the application chose; this
+//! module is the result and its rules.
+//!
 //! A geometry is a `const`, checked at build time: `const GEO: FlashGeometry = FlashGeometry { .. }.checked();`
 //! fails the build with a named reason when the layout cannot work, instead of failing in the field.
 //!
@@ -48,7 +51,7 @@ pub enum Family {
     Stm32F1 = 1,
     /// STM32G0/G4/L4: 64-bit program unit with ECC, written once.
     Stm32G0 = 2,
-    /// STM32H7: 256-bit flash word with ECC, written once.
+    /// STM32H7: 256-bit flash word with ECC, written once (H7A3/H7B3/H7B0: 128-bit).
     Stm32H7 = 3,
     /// RP2350/RP2354: QSPI NOR, any 1 to 0 per byte.
     Rp2350 = 4,
@@ -203,31 +206,44 @@ impl FlashGeometry {
         }
     }
 
-    /// Checks every rule a layout must meet.
-    pub const fn validate(&self) -> Result<(), GeometryError> {
-        if self.chunk == 0 || self.erase == 0 || self.write == 0 {
+    /// Checks the three sizes against each other, the descriptor and the family.
+    pub(crate) const fn validate_sizes(
+        family: Family,
+        chunk: u32,
+        erase: u32,
+        write: u32,
+    ) -> Result<(), GeometryError> {
+        if chunk == 0 || erase == 0 || write == 0 {
             return Err(GeometryError::ZeroSize);
         }
-        if !self.chunk.is_multiple_of(self.write) {
+        if !chunk.is_multiple_of(write) {
             return Err(GeometryError::WriteNotDividingChunk);
         }
-        if !self.erase.is_multiple_of(self.chunk) {
+        if !erase.is_multiple_of(chunk) {
             return Err(GeometryError::ChunkNotDividingErase);
         }
-        if self.chunk < DESCRIPTOR_LEN as u32 {
+        if chunk < DESCRIPTOR_LEN as u32 {
             return Err(GeometryError::ChunkTooSmall);
         }
-        if !(DESCRIPTOR_LEN as u32).is_multiple_of(self.write) {
+        if !(DESCRIPTOR_LEN as u32).is_multiple_of(write) {
             return Err(GeometryError::WriteNotDividingDescriptor);
         }
-        let family_ok = match self.family {
-            Family::Stm32F1 => self.write == 2 || self.write == 4,
-            Family::Stm32G0 => self.write == 8,
-            Family::Stm32H7 => self.write == 32,
-            Family::Rp2350 => self.write == 1,
+        let family_ok = match family {
+            Family::Stm32F1 => write == 2 || write == 4,
+            Family::Stm32G0 => write == 8,
+            Family::Stm32H7 => write == 16 || write == 32,
+            Family::Rp2350 => write == 1,
         };
         if !family_ok {
             return Err(GeometryError::FamilyWriteSize);
+        }
+        Ok(())
+    }
+
+    /// Checks every rule a layout must meet.
+    pub const fn validate(&self) -> Result<(), GeometryError> {
+        if let Err(e) = Self::validate_sizes(self.family, self.chunk, self.erase, self.write) {
+            return Err(e);
         }
         let parts = [self.state, self.floor, self.active, self.dfu];
         let mut i = 0;
@@ -385,7 +401,7 @@ impl FlashGeometry {
     }
 }
 
-const fn fail(error: GeometryError) -> ! {
+pub(crate) const fn fail(error: GeometryError) -> ! {
     match error {
         GeometryError::ZeroSize => panic!("chunky geometry: chunk, erase and write sizes must not be zero"),
         GeometryError::WriteNotDividingChunk => panic!("chunky geometry: the write unit must divide the chunk"),
