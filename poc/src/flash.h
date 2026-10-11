@@ -82,12 +82,21 @@ typedef struct {
     uint32_t last_result;
 } meta_t;
 
-/* The plan and its hashes live in one meta bank, so ~20 B per sector has to
- * fit there. A 1 MB part at a 1 KB page would need 10 KB and does not. */
-_Static_assert(sizeof(meta_t) <= META_PAGES * PAGE_SIZE,
-               "meta_t does not fit a meta bank: fewer, larger sectors, or a "
-               "bigger bank");
-_Static_assert(SECTORS_SLOT * 2 <= PAGE_SIZE,
+/* Bank layout: meta_t first, then the progress journal in a page of its own.
+ * The journal is advanced by clearing bits and must never be erased while a
+ * plan is live, so it cannot share a page with anything. */
+#define META_PAGES_HDR  3                       /* pages meta_t may use */
+#define JOURNAL_OFF     (META_PAGES_HDR * PAGE_SIZE)
+
+/* meta_t carries ~20 B per sector, so it grows with the partition. These two
+ * are the boundaries it has to respect: a 1 MB part at a 1 KB page would need
+ * 10 KB of plan and fits neither. */
+_Static_assert(sizeof(meta_t) <= JOURNAL_OFF,
+               "meta_t runs into the journal page: use fewer, larger sectors, "
+               "or give the bank more pages");
+_Static_assert(META_PAGES_HDR < META_PAGES,
+               "no page left in the bank for the journal");
+_Static_assert((SECTORS_SLOT + 3) * 2 <= PAGE_SIZE,
                "the progress journal does not fit its page");
 
 /* last_result codes reported back in HELLO */

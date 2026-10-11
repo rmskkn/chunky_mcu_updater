@@ -10,7 +10,7 @@
 /* Bank 0 holds meta at page META0_PAGE and its journal at META0_PAGE+2. */
 #define BANK_PAGE(b)    ((b) == 0 ? META0_PAGE : META1_PAGE)
 #define BANK_META(b)    ((size_t)BANK_PAGE(b) * PAGE_SIZE)
-#define BANK_JOURNAL(b) ((size_t)(BANK_PAGE(b) + 2) * PAGE_SIZE)
+#define BANK_JOURNAL(b) (BANK_META(b) + JOURNAL_OFF)
 
 static int live_bank;   /* bank meta_load() picked, or the one meta_store() wrote */
 
@@ -165,5 +165,5 @@ void journal_set(flash_t *f, int index, uint16_t state)
 
 void journal_clear(flash_t *f)
 {
-    flash_erase_page(f, BANK_PAGE(live_bank) + 2);
+    flash_erase_page(f, BANK_PAGE(live_bank) + META_PAGES_HDR);
 }
