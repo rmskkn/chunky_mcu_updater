@@ -10,6 +10,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `bench/`: the hardware power-cut bench for embassy-boot's STATE erase on a B129A (STM32G0B1CE): wiring, run
   order and measurement procedure in `bench/README.md`; `bench_layout`, the flash and RAM layout and the config
   and report records the test firmware and the harness share. (HW-3, HW-4)
+- `bench/fw`: the B129A bench firmware, its own thumbv6m workspace: bootloaders `stock` and `guarded` (embassy-boot
+  0.7.0, STATE plain or behind `chunky_swap::Guarded`), application images A and B (run, measure, provision), the
+  PA6 trigger on the raw erase. `just bench-fw` writes `boot-stock`, `boot-guarded`, `app-a`, `app-b` (`.bin`,
+  apps padded to 32 KB, and `.elf`) to `bench/fw/out`; `just lint` builds and lints it. (HW-3)
+- The G0 ECC NMI reader for the bench: the NMI handler clears FLASH_ECCR.ECCD and counts the fault, the flash read
+  that hit it returns an `EccError`. (ECC-2)
 
 ## [0.6.0] - 2026-10-11
 

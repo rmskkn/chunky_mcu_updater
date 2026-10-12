@@ -53,8 +53,11 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 
 - ✅ **ECC-1 try-read-masked** — `EccError` on the flash error, `try_read`, and `Masked` (faulting units read as
   zero) for everything that reads flash a power cut may have torn.
-- 📋 **ECC-2 ecc-fault-handlers** — the real thing on hardware: G0 NMI and H7 BusFault handlers behind
-  `EccError`, and a power-cut test on a Nucleo. The G0 half comes with the power-cut bench (HW-3), on B129A.
+- 🚧 **ECC-2 ecc-fault-handlers** — the real thing on hardware: G0 NMI and H7 BusFault handlers behind
+  `EccError`, and a power-cut test on a Nucleo. G0 half written for the power-cut bench (HW-3, B129A):
+  `bench_fw_common::ecc` (the NMI checks and clears FLASH_ECCR/ECCR2.ECCD, counts the fault and its address in the
+  report; a read that ran into it returns an error with `is_ecc`), not yet run on hardware. Then H7 BusFault, and
+  the reader as a library crate a real bootloader can use.
 
 ## SEC — security
 
@@ -149,6 +152,8 @@ Design: [SECURITY.md](SECURITY.md).
   A and B (filler so every page differs), PA6 high right before each STATE erase after `pre_trigger_us`, modes run
   / measure / provision from a config record in flash, a report record in RAM. Layout and records:
   `bench/bench_layout`; wiring, run order and the measurement procedure: `bench/README.md`. P2625#11oct-1213.
+  Built (`just bench-fw`: four images and ELFs in `bench/fw/out`, sizes in `bench/README.md`); bring-up on the
+  bench is next (M0-M3 of the procedure).
 - 🚧 **HW-4 power-cut-bench-harness** — `chunky-bench` in `bench/host`: fpga-glitch (Xyloni glitcher, push-pull
   power cut on Donguru Q101) and probe-rs (Donguru CMSIS-DAP), restores the snapshot, cuts after a swept delay
   from the PA6 trigger, reads back ACTIVE/DFU/STATE, report, IPSR and ECCR, classifies old/new/mixed/lost/brick
