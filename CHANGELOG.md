@@ -7,6 +7,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Bench firmware: status LED on PB14 (bootloader on, image A slow blink, image B fast blink, measure mode on
+  during the erase); `bench/README.md` wiring for the glitcher pins H6/H8/G8 and the M2K channels. (HW-3)
+
 - `bench/`: the hardware power-cut bench for embassy-boot's STATE erase on a B129A (STM32G0B1CE): wiring, run
   order and measurement procedure in `bench/README.md`; `bench_layout`, the flash and RAM layout and the config
   and report records the test firmware and the harness share. (HW-3, HW-4)

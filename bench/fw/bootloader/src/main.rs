@@ -40,6 +40,8 @@ fn main() -> ! {
     let p = embassy_stm32::init(Default::default());
     // PA6 low before anything else: the glitcher triggers on its rising edge.
     let mut pin = Output::new(p.PA6, Level::Low, Speed::VeryHigh);
+    // Status LED (PB14, high = on): lit while the bootloader runs.
+    let mut led = Output::new(p.PB14, Level::High, Speed::Low);
     timer::start();
     report::write(&Report {
         variant: VARIANT as u8,
@@ -74,8 +76,10 @@ fn main() -> ! {
         // Stay here (thread mode) with the report saying why; a reset would hide the failure.
         bench_fw_common::hang();
     }
-    // Keep PA6 driven low into the application (dropping the driver would float it).
+    led.set_low();
+    // Keep PA6 and the LED driven low into the application (dropping the drivers would float them).
     core::mem::forget(pin);
+    core::mem::forget(led);
     // SAFETY: ACTIVE holds an application linked there (or whatever the cut left; the harness classifies that).
     unsafe {
         let cp = cortex_m::Peripherals::steal();
