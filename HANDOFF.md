@@ -12,6 +12,12 @@
   - Later: #12oct-1433 SIM tear model from hw, #12oct-1433b bench extras (BOR, per-run M2K, 2-page STATE),
     #12oct-1433c BOOT-5 results to REPORT.md + upstream
 
+## Child status
+- glt-trig-pull (gpd-omarchy): ready, GLT-9 done (TRIG_PULL build option, default NONE; 1482 LEs, 81.1 MHz), not
+  landed, not loaded. The bitstream is on gpd-omarchy; Efinity (and its programmer) is x86 only, so the Xyloni
+  is loaded from gpd-omarchy or with another loader here: ask the user which.
+- bench-fw, bench-host: working.
+
 ## Next (this session, with the user at the bench)
 1. Merge bench-fw and bench-host branches into this branch when ready (they branched from d043ae2).
 2. M0 static check (no firmware): back-power through F7 pull-up; load GLT-9 bitstream when built.
