@@ -21,10 +21,13 @@
   armed glitcher), so M3 takes bootloader start from the 3V3 rise; prepare_boot error = hang in thread mode with
   boot_state=Error; Provision's bkpt needs the probe attached; ecc_last_addr = base + ADDR_ECC*8, check once on
   hardware.
-- bench-host: working.
+- bench-host: ready, merged here (conflicts in README/FEATURES/CHANGELOG/justfile resolved, both kept).
+  `just lint`, `just test`, `just bench-test` green on the merged branch; `chunky-bench --dry-run sweep` writes a
+  CSV. Hardware untested. Commands: status, cycle, snapshot, measure, run, sweep (bench/README.md).
 
 ## Next (this session, with the user at the bench)
-1. Merge bench-fw and bench-host branches into this branch when ready (they branched from d043ae2).
+1. (done) bench-fw and bench-host merged. Waiting for the user's go: Xyloni on USB with the GLT-9 bitstream,
+   100k F7 pull-down, M0 done. First hardware commands: `chunky-bench status`, then `just bench-measure`.
 2. M0 static check (no firmware): back-power through F7 pull-up; load GLT-9 bitstream when built.
 3. Tell the user, then flash measure mode; M1-M3 with M2K/Scopy; write results/measure-<date>/NOTES.md.
 4. First sweeps: stock vs guarded, revert and mark_booted; CSV in bench/results.
