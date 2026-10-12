@@ -84,3 +84,19 @@ Next: d = 5.0-6.0 ms in 10-20 us steps with repeats, both paths, then the same o
 
 Harness nit from `stock-1`, fixed: a delay of 0 failed (`--delay is at least 40 ns (3 c)`); it is now raised to
 the glitcher's minimum. The late upper edge (erase hit up to d = 31 ms, 3 ms past the prediction) is still open.
+
+## `stock-2-coarse` and `stock-3-fine` (stock, both paths, 12 Oct 2026 evening)
+
+- `stock-2-coarse`: d 5.0-6.0 ms, 100 us steps, 1 repeat, 22 runs, 0 bad. STATE untouched -> fully erased between
+  5.7 and 5.8 ms (mark_booted) and between 5.9 and 6.0 ms (revert). No partly erased page.
+- `stock-3-fine`: d 5.60-6.10 ms, 10 us steps, 2 repeats, 204 runs in 2 h 38 min, 0 bad, no ECC flag, no
+  unreadable word, no PROGERR. **It missed the transition**: in all 204 runs the cut came before the erase had
+  any effect (mark_booted: the next boot runs the revert tail and B confirms again; revert: reverted again). The
+  edge that sat at 5.7-6.0 ms an hour earlier had moved above 6.1 ms: the G0 went dark at least 0.1-0.4 ms
+  sooner after the cut than during the coarse sweep (warm board, supply, or the time between runs; not
+  measured). So the edge drifts by more than its own width over an hour, and a fixed fine window is the wrong
+  tool.
+
+What this means: 294 stock runs so far, none bad, but only about a dozen of them were within 100 us of the edge
+and none is known to have landed inside it. To hit it: locate and sample in one go (refine on what STATE and
+the report say, not on the outcome, which is `new`/`old` on both sides of the edge), and repeat that often.
