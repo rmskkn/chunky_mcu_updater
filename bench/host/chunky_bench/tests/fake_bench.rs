@@ -214,3 +214,13 @@ fn failing_runs_stop_the_sweep_and_run_again_on_resume() {
     let sum = run_sweep(&s, dir.path(), &mut power, &mut dut, &fw, &mut |_| {}).unwrap();
     assert_eq!((sum.ran, sum.skipped), (2 * 31 - 2, 2));
 }
+
+#[test]
+fn provisioning_takes_the_s0_the_runs_start_from() {
+    let (fw, b) = bench();
+    let (mut power, mut dut) = (b.power(), b.dut());
+    let s0 = chunky_bench::run::provision(&mut power, &mut dut, &fw, ms(300), ms(2000)).unwrap();
+    assert_eq!(s0.state, fw.s0_state);
+    assert_eq!(s0.active, fw.s0_active);
+    assert_eq!(s0.dfu, fw.s0_dfu);
+}

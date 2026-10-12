@@ -413,7 +413,7 @@ impl Sim {
             ..Report::EMPTY
         };
         self.write_report(&report);
-        if config.mode != Mode::Run {
+        if config.mode == Mode::Measure {
             return Step::Settled;
         }
         let pre = Duration::from_micros(u64::from(config.pre_trigger_us));
@@ -462,7 +462,28 @@ impl Sim {
         report.app_image = image;
         report.app_stage = AppStage::Running as u8;
         self.finish(&mut report);
-        if image == IMAGE_A {
+        if config.mode == Mode::Provision && image == IMAGE_A {
+            // A stages B with the official API, then stops (a breakpoint).
+            let mut al = [0u8; W];
+            let state = self.part(STATE, true, pre);
+            let r = if guarded {
+                BlockingFirmwareState::new(Guarded(state), &mut al)
+                    .mark_updated()
+                    .map_err(|_| ())
+            } else {
+                BlockingFirmwareState::new(state, &mut al)
+                    .mark_updated()
+                    .map_err(|_| ())
+            };
+            report.app_stage = if r.is_ok() {
+                AppStage::Confirmed
+            } else {
+                AppStage::Error
+            } as u8;
+            self.finish(&mut report);
+            return Step::Settled;
+        }
+        if image == IMAGE_A || config.mode != Mode::Run {
             return Step::Settled;
         }
         if !config.confirm {

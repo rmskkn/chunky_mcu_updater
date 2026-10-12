@@ -102,3 +102,18 @@ impl Dut for ProbeDut {
         Ok(core.read_core_reg::<u32>(psr)?)
     }
 }
+
+/// Debug probes plugged in now: (`VID:PID[:serial]` selector, probe name).
+pub fn list() -> Vec<(String, String)> {
+    Lister::new()
+        .list_all()
+        .into_iter()
+        .map(|p| {
+            let mut sel = format!("{:04x}:{:04x}", p.vendor_id, p.product_id);
+            if let Some(s) = &p.serial_number {
+                sel = format!("{sel}:{s}");
+            }
+            (sel, p.identifier)
+        })
+        .collect()
+}

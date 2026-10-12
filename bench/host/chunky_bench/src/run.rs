@@ -242,3 +242,98 @@ pub fn run_once(power: &mut dyn Power, dut: &mut dyn Dut, fw: &Firmware, p: &Run
         outcome,
     })
 }
+
+/// Snapshot S0, as read from the DUT after provisioning.
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub state: Vec<u8>,
+    pub active: Vec<u8>,
+    pub dfu: Vec<u8>,
+}
+
+/// Provisioning (bench/README.md): stock bootloader, A in ACTIVE, B in DFU, STATE erased, config in
+/// `Mode::Provision`; A calls `mark_updated` and stops; the harness reads STATE, ACTIVE and DFU back. Fails unless
+/// STATE holds the SWAP magic and ACTIVE and DFU hold A and B.
+pub fn provision(
+    power: &mut dyn Power,
+    dut: &mut dyn Dut,
+    fw: &Firmware,
+    off: Duration,
+    settle: Duration,
+) -> Result<Snapshot> {
+    use crate::fw::Target;
+    use bench_layout::{ACTIVE, BOOTLOADER, CONFIG, DFU, STATE};
+    let config = Config {
+        mode: Mode::Provision,
+        ..Config::DEFAULT
+    };
+    let mut cfg = vec![0xFF; CONFIG.len as usize];
+    cfg[..Config::BYTES].copy_from_slice(&config.encode());
+    let mut dfu = fw.app_b.clone();
+    dfu.resize(DFU.len as usize, 0xFF);
+    let targets = [
+        Target {
+            region: BOOTLOADER,
+            data: fw.boot_stock.clone(),
+        },
+        Target {
+            region: STATE,
+            data: vec![0xFF; STATE.len as usize],
+        },
+        Target {
+            region: CONFIG,
+            data: cfg,
+        },
+        Target {
+            region: ACTIVE,
+            data: fw.app_a.clone(),
+        },
+        Target { region: DFU, data: dfu },
+    ];
+    power.disarm()?;
+    dut.attach().context("attaching for provisioning")?;
+    let r = restore(dut, &targets);
+    dut.detach();
+    r.context("writing the provisioning image")?;
+    power.power_cycle(off)?;
+    power.sleep(settle);
+    dut.attach().context("attaching after provisioning")?;
+    let rb = read_back(dut);
+    dut.detach();
+    let rb = rb?;
+    let st = crate::state::decode(&rb.state.data, &rb.state.unreadable);
+    if st.magic != crate::state::Magic::Swap || st.written != 0 || !st.progress_valid {
+        anyhow::bail!(
+            "STATE after provisioning is '{st}', not a staged update (swap p0 w0): did A run in provision mode?"
+        );
+    }
+    if rb.active.data != fw.app_a || rb.dfu.data[..fw.app_b.len()] != fw.app_b[..] {
+        anyhow::bail!("ACTIVE or DFU do not hold A and B after provisioning");
+    }
+    Ok(Snapshot {
+        state: rb.state.data,
+        active: rb.active.data,
+        dfu: rb.dfu.data,
+    })
+}
+
+/// Measure mode (bench/README.md M1-M3): the bootloader of `variant` and a `Mode::Measure` config; images stay.
+/// Returns the pages written. Power-cycle afterwards to start it.
+pub fn measure_setup(
+    dut: &mut dyn Dut,
+    fw: &Firmware,
+    variant: Variant,
+    pre_trigger_us: u32,
+    period_ms: u32,
+) -> Result<usize> {
+    let config = Config {
+        mode: Mode::Measure,
+        pre_trigger_us,
+        period_ms,
+        ..Config::DEFAULT
+    };
+    dut.attach().context("attaching for measure mode")?;
+    let r = restore(dut, &fw.boot_and_config(variant, &config));
+    dut.detach();
+    r
+}

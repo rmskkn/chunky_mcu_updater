@@ -102,7 +102,7 @@ fn join<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> Strin
     items.into_iter().map(f).collect::<Vec<_>>().join("|")
 }
 
-fn boot_state(v: u8) -> String {
+pub fn boot_state(v: u8) -> String {
     let s = [
         BootState::None,
         BootState::Boot,
@@ -116,7 +116,7 @@ fn boot_state(v: u8) -> String {
     s.map_or_else(|| format!("{v:#x}"), |s| format!("{s:?}").to_lowercase())
 }
 
-fn app_stage(v: u8) -> String {
+pub fn app_stage(v: u8) -> String {
     let s = [
         AppStage::NotStarted,
         AppStage::Running,

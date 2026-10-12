@@ -97,3 +97,14 @@ impl Power for Glitcher {
         self.board.disarm()
     }
 }
+
+/// Serial ports of Xyloni boards: (path, description), the glitcher's FPGA UART marked.
+pub fn ports() -> Vec<(String, String)> {
+    glitch::ports()
+        .into_iter()
+        .map(|p| {
+            let what = if p.uart { "FPGA UART" } else { "other channel" };
+            (p.path, format!("{}, {what}", p.product))
+        })
+        .collect()
+}

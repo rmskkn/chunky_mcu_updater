@@ -12,6 +12,7 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --check
     just check-fw
+    just bench-lint
 
 # The no_std crates build for Cortex-M0+ and M4F, signed and unsigned, with a series-* feature or chip-custom
 check-fw:
@@ -32,3 +33,23 @@ install:
 deploy:
     git pull --ff-only
     just install
+
+# The power-cut bench harness (bench/host, own workspace; the glitch git dependency is fetched by git over ssh)
+bench-cargo := "CARGO_NET_GIT_FETCH_WITH_CLI=true cargo"
+
+# Tests of the bench harness: run loop, sweep and CSV on the simulated bench (no hardware)
+bench-test:
+    {{bench-cargo}} test --manifest-path bench/host/Cargo.toml
+
+# clippy (warnings are errors) and formatting of the bench harness
+bench-lint:
+    {{bench-cargo}} clippy --manifest-path bench/host/Cargo.toml --all-targets -- -D warnings
+    {{bench-cargo}} fmt --all --manifest-path bench/host/Cargo.toml --check
+
+# Measure mode on the bench (bench/README.md M1-M3), e.g. `just bench-measure --pre-trigger-us 30000 --cut 0`
+bench-measure *ARGS:
+    {{bench-cargo}} run -q --release --manifest-path bench/host/Cargo.toml -- measure {{ARGS}}
+
+# A sweep into bench/results/NAME, e.g. `just bench-sweep --name s1 --from 3ms --to 30ms --pre-trigger-us 12000` (--dry-run: simulated)
+bench-sweep *ARGS:
+    {{bench-cargo}} run -q --release --manifest-path bench/host/Cargo.toml -- sweep {{ARGS}}
