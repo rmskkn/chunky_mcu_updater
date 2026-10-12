@@ -149,10 +149,13 @@ Design: [SECURITY.md](SECURITY.md).
   A and B (filler so every page differs), PA6 high right before each STATE erase after `pre_trigger_us`, modes run
   / measure / provision from a config record in flash, a report record in RAM. Layout and records:
   `bench/bench_layout`; wiring, run order and the measurement procedure: `bench/README.md`. P2625#11oct-1213.
-- 🚧 **HW-4 power-cut-bench-harness** — `chunky-bench` in `bench/host`: fpga-glitch (Xyloni glitcher, push-pull
-  power cut on Donguru Q101) and probe-rs (Donguru CMSIS-DAP), restores the snapshot, cuts after a swept delay
-  from the PA6 trigger, reads back ACTIVE/DFU/STATE, report, IPSR and ECCR, classifies old/new/mixed/lost/brick
-  with embassy_torn's classifier, one CSV row per run; stock vs guarded on the revert and mark_booted paths.
+- 🚧 **HW-4 power-cut-bench-harness** — `chunky-bench` in `bench/host` (own workspace; library `chunky_bench`,
+  thin CLI): the glitcher (`glitch` git dep, push-pull power cut on Donguru Q101) and probe-rs (Donguru CMSIS-DAP
+  v2, no hidapi), restores S0 page-wise, cuts after a swept delay from the PA6 trigger, reads back
+  ACTIVE/DFU/STATE, report, IPSR, ECCR and SR, classifies old/new/mixed/lost/brick with `embassy_torn::classify`;
+  `snapshot`, `measure`, `run`, resumable `sweep` (coarse, then fine around outcome changes) into a CSV with raw
+  dumps. Tested end to end on a simulated bench (real embassy-boot 0.7.0 on a G0 flash model, timed ECC tears).
+  Left: bring-up on the bench (with HW-3), decoding ECCR's address field.
 
 ## PY — Python
 

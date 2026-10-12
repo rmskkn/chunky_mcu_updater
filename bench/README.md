@@ -77,8 +77,9 @@ so both builds are cut against the same erase: PA6 goes high, `pre_trigger_us` b
    FLASH_ECCR and SR, ACTIVE, DFU and STATE.
 7. Optionally `boots_after` more plain power cycles, reading back after each (the report's shortest failure
    does its damage on the boot after the cut).
-8. Classify (embassy_torn's classifier on pages): `old`, `new`, `mixed`, `lost`, `brick` (core stuck in NMI or
-   HardFault, or no report). One CSV row per run.
+8. Classify (`embassy_torn::classify`, the same page classifier the model's tests use): `old`, `new`, `mixed`,
+   `lost`, `brick` (core stuck in NMI or HardFault, or no report). The run's final class: the first brick or
+   mixture of any boot, else `lost` if a boot saw an image gone, else what the last boot ran. One CSV row per run.
 
 ## Measurement procedure (before any sweep)
 
@@ -112,6 +113,63 @@ From these: `pre_trigger_us >= t_dead(max) + 2 ms`; sweep `d` from `pre_trigger_
 `pre_trigger_us + t_erase(max) - t_dead(min) + 1 ms`, 100 us coarse, then 10 us around every change of outcome.
 Write the numbers into `bench/results/measure-<date>/NOTES.md`; the harness reads none of it, the sweep command
 takes them as arguments.
+
+## The harness: `chunky-bench` (HW-4)
+
+`bench/host` is its own cargo workspace (probe-rs and the glitcher stay out of the main one): the library
+`chunky_bench` (`Power`: the glitcher, `Dut`: probe-rs, the run loop, sweeps, CSV, a simulated bench) and the
+thin CLI `chunky-bench`. Run it from the repository root, so its defaults (`--fw bench/fw/out`,
+`--results bench/results`) fit; `--help` on every command says the rest.
+
+```sh
+just bench-test                       # harness tests, on the simulated bench (no hardware)
+just bench-lint                       # clippy + fmt (also part of `just lint`)
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --path bench/host/chunky_bench_cli --locked  # glitch is a git dep over ssh
+echo 'source <(COMPLETE=bash chunky-bench)' >> ~/.bashrc    # completion: probes, glitcher ports, sweep names (zsh, fish alike)
+```
+
+Every command takes `--probe` (default `c0de:cafe`), `--chip` (`STM32G0B1CEUx`), `--speed-khz` (1000),
+`--glitcher` (default: the first Xyloni), `--fw`, `--results`, and `--dry-run`: the simulated bench and stand-in
+firmware instead of the hardware (results then go to `bench/host/target/dry-run`).
+
+| Command | What |
+| --- | --- |
+| `status` | attach, halt, read back once and classify; no power action |
+| `cycle --off 300ms` | one plain power cycle |
+| `snapshot` | provisioning: stock bootloader, A in ACTIVE, B in DFU, STATE erased, `Mode::Provision`; A runs `mark_updated`; saves S0 to `<fw>/s0/{state,active,dfu}.bin` (checks: SWAP magic, no progress, A and B in place) |
+| `measure` | M1-M3: writes the bootloader and a `Mode::Measure` config (`--pre-trigger-us`, `--period-ms`), power-cycles; without `--cut` reads the firmware's `erase_us` after `--wait`, with `--cut D` fires `--captures` cuts D after PA6, `--off` long (`just bench-measure ...`) |
+| `run --variant V --path P --delay D --pre-trigger-us N` | one run, every boot printed |
+| `sweep --name S --from D0 --to D1 --pre-trigger-us N` | a sweep (`just bench-sweep ...`) |
+
+Firmware directory (`bench/fw/out`, built by HW-3): `boot-stock.bin`, `boot-guarded.bin`, `app-a.bin`,
+`app-b.bin` (padded to 32 KB with `bench_layout::pad_image` when shorter), and `s0/` from `snapshot`. A run
+restores the bootloader of its variant, the config and S0, writing only the pages that differ, and verifies them.
+
+Run parameters (`run`, `sweep`): `--pre-trigger-us` (required, from the measurement), `--off` (300ms),
+`--boot-delay-ms` (100: the window in which the harness arms the glitcher), `--reset-after-ms` (100),
+`--settle` (5s: from arming to the read-back; swap, cut, power back and reboot must fit), `--boots-after` (1).
+
+**Sweep.** `--variants stock,guarded` × `--paths revert,mark-booted` × delays `--from..=--to` by `--step` (100us)
+× `--repeats` (1). After the coarse grid, wherever two neighbouring delays of a variant and path have different
+sets of outcomes, the points between them run at `--fine` (10us; 0 turns it off). Everything goes to
+`bench/results/<name>/runs.csv`, one row per run, flushed as it goes; the CSV is the sweep's only state, so the
+same command resumes it (points with a row are skipped, `error` rows run again). `--max-errors` (3) failed runs
+in a row stop it. Raw read-backs per run (`--dumps all|bad|none`) in `dumps/<variant>-<path>-d<ns>-r<repeat>/`:
+`boot<N>-{report,state,active,dfu}.bin`, unreadable double words as 0xEE. A progress bar with ETA, then a table
+of outcomes per variant and path.
+
+CSV columns: `time`, `sweep`, `variant`, `path`, `d_ns`, `repeat`, `pre_trigger_us`, `off_us`, `settle_ms`,
+`boots_after`, `fired` (the glitcher's cut fired), `final` (old/new/mixed/lost/brick/error), `outcome` (with the
+page map of a mixture, e.g. `mixed[A0 B1 ..]`, or `brick:nmi`). Per boot, `|`-separated (the boot after the cut
+first): `boots`, `flash` (the flash class even when bricked), `ipsr`, `eccr` (as found, before the harness read
+flash), `eccr_read` (after its reads: ECC errors the debugger hit), `sr`, `progerr`, `state_magic`
+(boot/swap/revert/dfu/erased/zero/ecc/raw), `state_progress` (embassy-boot's index, `!` when the validity word is
+written), `state_written`, `unreadable`. The report of the boot after the cut: `r_variant`, `r_boot_state`,
+`r_app_image`, `r_app_stage`, `r_ecc_faults`, `r_ecc_last_addr`, `r_erase_us`, `r_state_erases`. Then
+`restored` (pages written), `dump`, `error`.
+
+ECCR and SR are recorded raw (and ECCR's ECCD/ECCC cleared after each read-back); the ECC address field is not
+decoded yet.
 
 ## Gotchas
 

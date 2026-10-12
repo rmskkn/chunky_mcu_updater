@@ -10,6 +10,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `bench/`: the hardware power-cut bench for embassy-boot's STATE erase on a B129A (STM32G0B1CE): wiring, run
   order and measurement procedure in `bench/README.md`; `bench_layout`, the flash and RAM layout and the config
   and report records the test firmware and the harness share. (HW-3, HW-4)
+- `chunky-bench` (`bench/host`, own workspace): the power-cut bench harness. Library `chunky_bench` with the
+  glitcher as power switch and probe-rs as SWD access behind traits, page-wise restore of snapshot S0, read-back
+  of report, IPSR, FLASH_ECCR/SR and STATE/ACTIVE/DFU, classification, resumable sweeps (coarse grid, then a fine
+  one around outcome changes) into a CSV with raw dumps, and a simulated bench for tests and `--dry-run`.
+  Commands `status`, `cycle`, `snapshot`, `measure`, `run`, `sweep`; recipes `bench-test`, `bench-lint` (part of
+  `lint`), `bench-measure`, `bench-sweep`. (HW-4)
+- `embassy_torn::classify`: the old/new/mixed/lost classification as pure functions on pages, shared by the
+  model's tests and the bench. (HW-4)
 
 ## [0.6.0] - 2026-10-11
 
