@@ -16,7 +16,12 @@
 - glt-trig-pull (gpd-omarchy): ready, GLT-9 done (TRIG_PULL build option, default NONE; 1482 LEs, 81.1 MHz), not
   landed, not loaded. The bitstream is on gpd-omarchy; Efinity (and its programmer) is x86 only, so the Xyloni
   is loaded from gpd-omarchy or with another loader here: ask the user which.
-- bench-fw, bench-host: working.
+- bench-fw: ready, merged here (614f160); `just bench-fw` builds boot-stock 5.2 KB, boot-guarded 5.7 KB, apps
+  ~5 KB padded to 32 KB into bench/fw/out. Not run on hardware. Its notes: no PA6 pulse at boot (would fire the
+  armed glitcher), so M3 takes bootloader start from the 3V3 rise; prepare_boot error = hang in thread mode with
+  boot_state=Error; Provision's bkpt needs the probe attached; ecc_last_addr = base + ADDR_ECC*8, check once on
+  hardware.
+- bench-host: working.
 
 ## Next (this session, with the user at the bench)
 1. Merge bench-fw and bench-host branches into this branch when ready (they branched from d043ae2).
