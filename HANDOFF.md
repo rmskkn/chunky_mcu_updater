@@ -1,0 +1,32 @@
+# Handoff: power-cut-bench (P2625#11oct-1213)
+
+## Done
+- Plan; contract crate `bench/bench_layout` (layout, Config in flash, Report in RAM, filler; tests) and
+  `bench/README.md` (wiring, layout, paths, run order, M2K measurement procedure M0-M3, gotchas). Commit d043ae2.
+- Ids: HW-3 (fw), HW-4 (harness), GLT-9 (fpga_tools trigger pull); ECC-2's G0 half rides on HW-3.
+- Tasks and sessions:
+  - P2625#12oct-1432 HW-3 bench fw: session bench-fw (opus, omarchy-m1, from d043ae2)
+  - P2625#12oct-1432b HW-4 harness: session bench-host (opus, omarchy-m1, from d043ae2); told to use a git dep
+    on fpga_tools rev 4e55b51 for the glitch lib
+  - P2625#12oct-1432c GLT-9 trig pull: session glt-trig-pull (sonnet, gpd-omarchy, Efinity is there)
+  - Later: #12oct-1433 SIM tear model from hw, #12oct-1433b bench extras (BOR, per-run M2K, 2-page STATE),
+    #12oct-1433c BOOT-5 results to REPORT.md + upstream
+
+## Next (this session, with the user at the bench)
+1. Merge bench-fw and bench-host branches into this branch when ready (they branched from d043ae2).
+2. M0 static check (no firmware): back-power through F7 pull-up; load GLT-9 bitstream when built.
+3. Tell the user, then flash measure mode; M1-M3 with M2K/Scopy; write results/measure-<date>/NOTES.md.
+4. First sweeps: stock vs guarded, revert and mark_booted; CSV in bench/results.
+
+## Decisions
+- One-page STATE, everything in bank 1; images 32 KB with per-page filler; signing off (unsigned) on the bench.
+- Trigger inside the STATE wrapper on the raw erase, with `pre_trigger_us` before it, so the cut can land before
+  the erase despite hold-up (estimate 10-20 ms at ~10 mA vs ~22 ms erase).
+- `boot_delay_ms` in the bootloader so arming the glitcher after the power cycle never races the boot.
+- Stock = embassy-boot as users get it (default NMI handler: an ECC tear hangs = "brick"); guarded = Guarded +
+  G0 ECC NMI reader.
+
+## Gotchas
+- Glitcher F7 has WEAK_PULLUP: back-powers the DUT via PA6 when off (GLT-9 + 100k pull-down).
+- Xyloni was not on USB at planning time (no FT4232H in lsusb); Donguru c0de:cafe and a J-Link are.
+- Efinity is on gpd-omarchy only (x86); this PC is aarch64.
