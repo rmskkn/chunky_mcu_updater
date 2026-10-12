@@ -84,13 +84,15 @@ impl SweepSpec {
         out
     }
 
-    /// Fine points between neighbouring delays (of the same variant and path) whose sets of outcomes differ.
+    /// Fine points between neighbouring delays (of the same variant and path) that differ in their sets of
+    /// outcomes or in what the boot after the cut found ([`Done::seen`]): the edges of the erase show there even
+    /// when both sides end on a whole image.
     pub fn refine(&self, done: &[Done]) -> Vec<Point> {
         let fine = self.fine.as_nanos() as u64;
         if fine == 0 {
             return vec![];
         }
-        let mut by: BTreeMap<(Variant, Path), BTreeMap<u64, BTreeSet<&str>>> = BTreeMap::new();
+        let mut by: BTreeMap<(Variant, Path), BTreeMap<u64, BTreeSet<String>>> = BTreeMap::new();
         for d in done.iter().filter(|d| d.fin != "error") {
             let p = &d.point;
             if self.variants.contains(&p.variant) && self.paths.contains(&p.path) {
@@ -98,7 +100,7 @@ impl SweepSpec {
                     .or_default()
                     .entry(p.d_ns)
                     .or_default()
-                    .insert(&d.fin);
+                    .insert(format!("{} {}", d.fin, d.seen));
             }
         }
         let mut out = vec![];

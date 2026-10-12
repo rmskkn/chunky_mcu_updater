@@ -76,6 +76,9 @@ pub struct Done {
     pub point: Point,
     /// `old`, `new`, `mixed`, `lost`, `brick` or `error`.
     pub fin: String,
+    /// What the boot after the cut found, beyond the outcome: STATE's magic, what `prepare_boot` returned and
+    /// the STATE erases of that boot. It differs across the edge of the erase where the outcome does not.
+    pub seen: String,
 }
 
 /// Seconds since the epoch as `YYYY-MM-DDTHH:MM:SSZ`.
@@ -257,6 +260,7 @@ pub fn read_done(path: &FsPath) -> Result<Vec<Done>> {
     else {
         anyhow::bail!("{} is not a chunky-bench CSV (columns missing)", path.display());
     };
+    let seen = [col("state_magic"), col("r_boot_state"), col("r_state_erases")];
     let mut out = vec![];
     for rec in r.records() {
         let Ok(rec) = rec else { continue };
@@ -273,6 +277,11 @@ pub fn read_done(path: &FsPath) -> Result<Vec<Done>> {
             out.push(Done {
                 point,
                 fin: get(f).to_string(),
+                seen: seen
+                    .iter()
+                    .map(|c| c.map_or("", |i| get(i).split('|').next().unwrap_or("")))
+                    .collect::<Vec<_>>()
+                    .join("/"),
             });
         }
     }
