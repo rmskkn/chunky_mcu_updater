@@ -1,0 +1,15 @@
+[package]
+name = "bench_fw_image"
+description = "Power-cut bench: turns the bench firmware ELFs into the raw images the harness flashes (apps padded with the filler)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "bench-fw-image"
+path = "src/main.rs"
+
+[dependencies]
+bench_layout.workspace = true
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }

@@ -113,6 +113,39 @@ From these: `pre_trigger_us >= t_dead(max) + 2 ms`; sweep `d` from `pre_trigger_
 Write the numbers into `bench/results/measure-<date>/NOTES.md`; the harness reads none of it, the sweep command
 takes them as arguments.
 
+## Firmware (`bench/fw`, HW-3)
+
+Its own cargo workspace (thumbv6m-none-eabi, embassy-stm32 0.6 `stm32g0b1ce`, embassy-boot 0.7.0, chunky_swap
+`unsigned`: signing is not what is measured). `just bench-fw` builds all four and writes to `bench/fw/out`:
+
+| File | What | Size |
+| --- | --- | --- |
+| `boot-stock.bin` / `.elf` | bootloader, STATE plain, default fault handlers | 5.2 KB of 24 KB |
+| `boot-guarded.bin` / `.elf` | bootloader, STATE behind `Guarded`, ECC NMI reader | 5.7 KB of 24 KB |
+| `app-a.bin` / `.elf` | application, image A, padded to 32 KB with the filler | 5.0 KB used |
+| `app-b.bin` / `.elf` | application, image B, padded likewise | 5.2 KB used |
+
+The `.bin` files start at their region (BOOTLOADER, ACTIVE); `bench-fw-image` (`bench/fw_image`) cuts them from
+the ELF and pads the apps. Crates: `bench_fw_common` (flash regions through the ECC reader, `TriggerFlash`, the
+report, TIM2 as a 1 MHz counter), `bench_bootloader` (features `stock` | `guarded`), `bench_app` (features
+`image-a` | `image-b`). memory.x comes from `bench_layout` in each `build.rs`, RAM ending before REPORT.
+
+- **Bootloader**: PA6 push-pull low, the report reset (variant), the config read, `boot_delay_ms`, then
+  `prepare_boot` and its result into `boot_state`, then VTOR and jump to ACTIVE. On a `prepare_boot` error it
+  stays in thread mode with `boot_state = Error` (no reset, so the failure stays visible).
+- **Application**: `app_image`, `app_stage = Running`. Run: B confirms (`Confirmed` or `Error`) or waits
+  `reset_after_ms`, sets `Resetting` and resets; A runs. Measure: one SCRATCH erase behind the trigger every
+  `period_ms`, `erase_us` each time. Provision: `mark_updated`, then `bkpt` (with no probe attached that is a
+  HardFault). STATE goes through the wrapper of the bootloader that ran (the report's `variant`): `Guarded` after
+  `guarded`, plain after `stock`; after `stock` an ECC NMI hangs in the app's handler like the default one.
+- **Trigger**: PA6 goes high only for STATE (and SCRATCH) erases, nowhere else: there is no marker pulse at
+  boot, as it would fire the armed glitcher. For M3, take the bootloader's start from the 3V3 rise.
+- **ECC reader** (guarded, and the app after guarded): the NMI checks FLASH_ECCR and ECCR2, clears ECCD, adds one
+  to `ecc_faults` and puts the address into `ecc_last_addr` (`0x0800_0000 + ADDR_ECC * 8`: ADDR_ECC read as a
+  double-word offset, check this at bring-up against a known torn word). An NMI without ECCD hangs. The read that
+  ran into it returns `Ecc`, which `Guarded` masks as zeros (STATE) and which fails `prepare_boot` for ACTIVE and
+  DFU reads.
+
 ## Gotchas
 
 - G0 flash has ECC (always on). A torn erase or program can leave double-word ECC errors: the CPU gets an NMI on

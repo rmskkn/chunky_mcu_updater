@@ -64,6 +64,9 @@ adding a dependency.
 - `chunky_sim/` — `flash.rs` (NOR flash with per-family write rules, torn writes and erases, ECC faults),
   `device.rs` (a whole device on either backend, `Device<M, B>`), `tests/` (power-cut sweeps, security cases,
   planner properties; `tests/common` is the update loop they share).
+- `bench/` — the hardware power-cut bench (HW-3, HW-4, `bench/README.md`): `bench_layout` (the contract) and
+  `fw_image` are workspace members; `bench/fw` is the B129A firmware in its own thumbv6m workspace
+  (`just bench-fw`, linted by `just lint`).
 
 A tool that drives a device is a library first: nothing the CLI can do is missing from `chunky_server`.
 

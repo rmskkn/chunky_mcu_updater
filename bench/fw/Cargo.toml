@@ -1,0 +1,35 @@
+# The B129A power-cut bench firmware (HW-3): its own workspace, thumbv6m. `just bench-fw` at the repo root
+# builds it. See ../README.md.
+[workspace]
+resolver = "3"
+members = ["common", "bootloader", "app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+bench_fw_common = { path = "common" }
+bench_layout = { path = "../bench_layout" }
+# Signing is not what is measured: the unsigned build, with the G0 flash rules.
+chunky = { path = "../../chunky", features = ["unsigned", "series-stm32g0"] }
+chunky_swap = { path = "../../chunky_swap", features = ["unsigned"] }
+embassy-boot = "0.7.0"
+embassy-stm32 = { version = "0.6.0", default-features = false, features = ["rt", "stm32g0b1ce", "unstable-pac"] }
+embedded-storage = "0.3.1"
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = 2
+panic = "abort"
+incremental = false
+
+[profile.dev]
+opt-level = "z"
+debug = 2
+panic = "abort"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["chunky", "chunky_swap", "chunky_bank", "chunky_server", "chunky_sim", "embassy_torn", "chunky_cli", "bench/bench_layout"]
+members = ["chunky", "chunky_swap", "chunky_bank", "chunky_server", "chunky_sim", "embassy_torn", "chunky_cli", "bench/bench_layout", "bench/fw_image"]
 
 [workspace.package]
 version = "0.6.0"
