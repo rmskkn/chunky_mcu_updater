@@ -25,12 +25,23 @@
   `just lint`, `just test`, `just bench-test` green on the merged branch; `chunky-bench --dry-run sweep` writes a
   CSV. Hardware untested. Commands: status, cycle, snapshot, measure, run, sweep (bench/README.md).
 
+## Bench state, 12 Oct 2026 evening
+- GO received. Glitcher GLT-10 flashed: trigger H6 (J1-18, weak pull-down), power out H8 (J1-15), marker G8
+  (J1-14). M2K: A1 3V3, A2 5V0, DIO0 PA6, DIO1 power out, DIO2 marker. Tools: ~/git/fpga_tools/host/target/release/
+  fpga-glitch, ~/git/m2k_cli/target/release/m2k, bench/host/target/release/chunky-bench (built).
+- Manual cut by the parent (default BOR): 3V3 > 3.0 V for ~20 ms, 2.79 V @30 ms, 2.32 @50, 2.11 @60, < 0.3 V
+  @75 ms; 5V0 1.5 V @100 ms. The G0 runs 60-70 ms past the cut: pre_trigger_us must be ~80 ms or more, `off`
+  well over 100 ms (5V0 is slow; 2 s cut recovered cleanly).
+- LED on PB14 added (6f28f97), README wiring updated. Binaries rebuilt in bench/fw/out.
+- BLOCKED: Donguru dropped off USB when H8 switched the DUT on (suspected Q102 inrush browning out its hub).
+  Parent said hold the hardware; it resets Donguru via J-Link and tests a cut/restore cycle. If power-restore
+  drops the probe every time, the bench needs an inrush fix before any sweep.
+
 ## Next (this session, with the user at the bench)
-1. (done) bench-fw and bench-host merged. Waiting for the user's go: Xyloni on USB with the GLT-9 bitstream,
-   100k F7 pull-down, M0 done. First hardware commands: `chunky-bench status`, then `just bench-measure`.
-2. M0 static check (no firmware): back-power through F7 pull-up; load GLT-9 bitstream when built.
-3. Tell the user, then flash measure mode; M1-M3 with M2K/Scopy; write results/measure-<date>/NOTES.md.
-4. First sweeps: stock vs guarded, revert and mark_booted; CSV in bench/results.
+1. When the parent says the Donguru is back: `chunky-bench status`, then M1 (`just bench-measure`), M2
+   (`--pre-trigger-us 90000 --cut 0`, M2K capture), M3; numbers to `bench/results/measure-2026-10-12/NOTES.md`
+   and `tpm work say parent`. Default BOR, no option-byte changes.
+2. `chunky-bench snapshot`, then first sweeps: stock vs guarded, revert and mark_booted.
 
 ## Decisions
 - One-page STATE, everything in bank 1; images 32 KB with per-page filler; signing off (unsigned) on the bench.
