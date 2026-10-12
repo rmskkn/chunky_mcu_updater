@@ -43,12 +43,21 @@
 - Sweep stock-1 done (bench/results/stock-1): 68 runs, 0 bad. Erase hit for d 6..31 ms at pre_trigger 50 ms;
   STATE always reads fully erased when hit; transition untouched -> erased between d 5 and 6 ms.
 
-## Next (needs the user's go for more cut runs)
-1. Fine sweep d 5.0-6.0 ms, 10-20 us steps, repeats 3+, stock, both paths; then guarded.
-2. M2K capture at d = 30 ms (why the magic write after the erase is missing for d 29-31 ms).
-3. Harness: d = 0 is refused by the glitcher (clamp to its minimum); runs take 40-75 s (Donguru SWD reads
-   ~12 KB/s; word reads did not help): read back STATE first and ACTIVE/DFU only when needed, or hash on target.
-4. fpga_tools main moved to 7972301 (GLT-9/10 landed): bump the glitch git rev in bench/host when convenient.
+- stock-2-coarse (22 runs) and stock-3-fine (204 runs): none bad; the fine window 5.60-6.10 ms missed the edge,
+  which had drifted above 6.1 ms within the hour. 294 stock power-cut runs in all, none known inside the edge.
+- Software since: `--cut reset --width` (NRST pulse, open-drain), d clamped to the glitcher minimum, sweep
+  refinement keyed on STATE magic / boot state / STATE erases of the boot after the cut. Release binary rebuilt
+  (bench/host/target/release/chunky-bench). All dry-run only.
+
+## Next
+1. WAIT: the parent prepares the bench for NRST (glitcher open-drain, Donguru with plug-vbus-on, H8 -> B129 J1-6
+   through 100R). No hardware runs until it says so. No more power-cut attempts for now.
+2. Then: `chunky-bench --cut reset status`; one control run per path (d well past the erase), then
+   `--cut reset sweep` stock, pre_trigger 1000 us, d 1 ms..23.5 ms step 250 us, fine 10-20 us (refinement now
+   finds the edges by itself), settle 9 s; then guarded. Report bad rows at once.
+3. Open: late upper edge of the power-cut window (d 29-31 ms); runs take ~57 s (Donguru SWD ~12 KB/s);
+   glitch git rev still 4e55b51 (fpga_tools main is 7972301, GLT-9/10).
+4. Before `tpm work ready`: `git rm HANDOFF.md`, `just lint`, `just test`.
 
 ## Decisions
 - One-page STATE, everything in bank 1; images 32 KB with per-page filler; signing off (unsigned) on the bench.
