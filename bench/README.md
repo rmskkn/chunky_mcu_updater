@@ -208,6 +208,38 @@ written), `state_written`, `unreadable`. The report of the boot after the cut: `
 ECCR and SR are recorded raw (and ECCR's ECCD/ECCC cleared after each read-back); the ECC address field is not
 decoded yet.
 
+## Reset instead of a power cut (`--cut reset`)
+
+The same run with NRST pulled low in the middle of the erase instead of the power going away: the erase stops
+within nanoseconds at full supply voltage, where a power cut lets it run on for ~45 ms on a falling 3V3.
+
+Wiring (instead of the power switch): glitcher H8 (Xyloni J1-15) moves from Donguru's Q101 gate to B129 J1 pin 6
+(PF2-NRST). The B129 is powered permanently through the USB-C plug by a Donguru build with
+`--features plug-vbus-on`; Q102 stays off and its wire idle. Trigger and marker stay.
+
+- **Set the glitcher to open-drain before the wire goes onto NRST.** The bitstream comes up push-pull and idle
+  high, which would drive NRST high against the G0's own reset driver. `chunky-bench --cut reset status` (or
+  `fpga-glitch reset ...`) sets open-drain; it holds until the FPGA is reconfigured or the Xyloni loses power,
+  so after a Xyloni power-up take the wire off, set open-drain, put it back. A 100 Ω series resistor in the
+  wire makes a mistake harmless and costs nothing in timing.
+- NRST on the G0 is PF2. Option bytes `NRST_MODE` (FLASH_OPTR bits 28:27) are at the factory default 3: reset
+  input and output, with the internal pull-up; the G0 itself pulls the pin low for its own resets (the
+  application's SYSRESETREQ on the revert path too). The bench firmware never touches PF2 or the option bytes.
+- Every command takes `--cut reset --width 100us` (global flags). Every "power cycle" of the run order then is
+  one reset pulse: the start after the restore, the cut `d` after PA6, the `--boots-after` restarts. `--off` is
+  ignored. Before it detaches the harness clears the reset vector catch (DEMCR), so the pulse starts the core.
+- Debug stays enabled in the core (only a power-on reset clears it); the DUT is never power-cycled in this mode.
+- `--pre-trigger-us` can be small (e.g. 1000): the reset acts at once, so `d` runs from `pre` to
+  `pre + 22.1 ms`. Coarse first (250 us), then fine where the page changes.
+- The CSV has `cut` (`power`, `reset`) and `width_us` as its last two columns.
+
+```sh
+chunky-bench --cut reset status
+chunky-bench --cut reset run --variant stock --path revert --delay 10ms --pre-trigger-us 1000 --settle 9s
+chunky-bench --cut reset sweep --name reset-1 --variants stock --from 1ms --to 23500us --step 250us --fine 0us --pre-trigger-us 1000 --settle 9s
+chunky-bench --dry-run --cut reset sweep --name reset-dry --from 10ms --to 36ms --step 2ms --pre-trigger-us 12000
+```
+
 ## Gotchas
 
 - G0 flash has ECC (always on). A torn erase or program can leave double-word ECC errors: the CPU gets an NMI on

@@ -3,7 +3,7 @@
 
 use crate::dut::{Dut, Readback, read_back, restore};
 use crate::fw::{Firmware, Target, pages};
-use crate::power::Power;
+use crate::power::{Cut, Power};
 use anyhow::{Context, Result};
 use bench_layout::{ACTIVE, Config, Mode, STATE};
 use embassy_torn::classify::{Class, classify};
@@ -83,6 +83,8 @@ pub struct RunParams {
     pub path: Path,
     /// From PA6 rising to the cut.
     pub delay: Duration,
+    /// Power cut or NRST pulse (the bench must be wired for it, and the glitcher opened with it).
+    pub cut: Cut,
     /// PA6 goes high this long before the erase (config record).
     pub pre_trigger_us: u32,
     /// Power off time of the cut and of every plain power cycle.
@@ -206,11 +208,23 @@ pub struct RunRecord {
     pub outcome: Outcome,
 }
 
-/// One run: steps 1-8 of bench/README.md.
+/// Core debug register DEMCR: its vector catch bits halt the core after a reset.
+pub const DEMCR: u32 = 0xE000_EDFC;
+
+/// Before detaching on reset wiring: no reset vector catch left from flashing, so the NRST pulse that starts the
+/// DUT lets it run. A power cycle clears the debug logic by itself, so nothing is written then.
+pub fn release(dut: &mut dyn Dut, cut: Cut) -> Result<()> {
+    match cut {
+        Cut::Power => Ok(()),
+        Cut::Reset { .. } => dut.write_u32(DEMCR, 0).context("clearing DEMCR before the reset start"),
+    }
+}
+
+/// One run: steps 1-8 of bench/README.md. On reset wiring every "power cycle" below is one NRST pulse.
 pub fn run_once(power: &mut dyn Power, dut: &mut dyn Dut, fw: &Firmware, p: &RunParams) -> Result<RunRecord> {
     power.disarm()?;
     dut.attach().context("attaching for the restore")?;
-    let restored = restore(dut, &fw.targets(p.variant, &p.config()));
+    let restored = restore(dut, &fw.targets(p.variant, &p.config())).and_then(|n| release(dut, p.cut).map(|()| n));
     dut.detach();
     let restored = restored.context("restoring S0")?;
 
@@ -260,6 +274,7 @@ pub fn provision(
     fw: &Firmware,
     off: Duration,
     settle: Duration,
+    cut: Cut,
 ) -> Result<Snapshot> {
     use crate::fw::Target;
     use bench_layout::{ACTIVE, BOOTLOADER, CONFIG, DFU, STATE};
@@ -292,7 +307,7 @@ pub fn provision(
     ];
     power.disarm()?;
     dut.attach().context("attaching for provisioning")?;
-    let r = restore(dut, &targets);
+    let r = restore(dut, &targets).and_then(|n| release(dut, cut).map(|()| n));
     dut.detach();
     r.context("writing the provisioning image")?;
     power.power_cycle(off)?;
@@ -325,6 +340,7 @@ pub fn measure_setup(
     variant: Variant,
     pre_trigger_us: u32,
     period_ms: u32,
+    cut: Cut,
 ) -> Result<usize> {
     let config = Config {
         mode: Mode::Measure,
@@ -343,7 +359,7 @@ pub fn measure_setup(
         region: ACTIVE,
         data: fw.app_a.clone(),
     });
-    let r = restore(dut, &targets);
+    let r = restore(dut, &targets).and_then(|n| release(dut, cut).map(|()| n));
     dut.detach();
     r
 }

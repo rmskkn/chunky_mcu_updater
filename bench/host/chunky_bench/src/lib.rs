@@ -22,7 +22,7 @@ pub mod units;
 
 pub use dut::{Dut, Readback, read_back, restore};
 pub use fw::Firmware;
-pub use power::{Glitcher, Power};
+pub use power::{Cut, Glitcher, Power};
 pub use probe::{ProbeConfig, ProbeDut};
 pub use run::{Outcome, Path, RunParams, RunRecord, Variant, run_once};
 pub use sweep::{SweepSpec, run_sweep};

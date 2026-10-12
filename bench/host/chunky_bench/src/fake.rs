@@ -710,6 +710,8 @@ impl Dut for FakeDut {
                 c.sr &= !value;
                 Ok(())
             }
+            // Vector catch: the model's core always runs after a reset.
+            crate::run::DEMCR => Ok(()),
             _ => bail!("fake DUT: no register at {addr:#010x}"),
         }
     }

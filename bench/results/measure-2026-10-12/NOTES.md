@@ -81,3 +81,6 @@ No mixed, lost or brick outcome, no ECC flag (FLASH_ECCR 0), no unreadable doubl
 - "Erased" is what a read at full voltage says; marginal cells are not seen this way.
 
 Next: d = 5.0-6.0 ms in 10-20 us steps with repeats, both paths, then the same on the guarded bootloader.
+
+Harness nit from `stock-1`, fixed: a delay of 0 failed (`--delay is at least 40 ns (3 c)`); it is now raised to
+the glitcher's minimum. The late upper edge (erase hit up to d = 31 ms, 3 ms past the prediction) is still open.

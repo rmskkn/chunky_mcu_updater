@@ -13,7 +13,7 @@ use chunky_bench::record::{self, Dumps};
 use chunky_bench::run::{self, Boot, judge};
 use chunky_bench::sweep::{Event, SweepFiles};
 use chunky_bench::units::{parse_duration, show_duration};
-use chunky_bench::{Firmware, Glitcher, Path, Power, ProbeConfig, ProbeDut, RunParams, SweepSpec, Variant};
+use chunky_bench::{Cut, Firmware, Glitcher, Path, Power, ProbeConfig, ProbeDut, RunParams, SweepSpec, Variant};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::BTreeMap;
@@ -68,6 +68,29 @@ struct BenchArgs {
     /// No hardware: the simulated bench (real embassy-boot on a flash model) and stand-in firmware
     #[arg(long, global = true)]
     dry_run: bool,
+    /// How the bench is wired: glitcher output on the power switch (push-pull), or on NRST (open-drain pulse)
+    #[arg(long, global = true, value_enum, default_value = "power")]
+    cut: CutArg,
+    /// --cut reset: how long NRST is held low
+    #[arg(long, global = true, default_value = "100us", value_parser = dur)]
+    width: Duration,
+}
+
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum CutArg {
+    /// Power off through Donguru's Q101/Q102; every restart is a power cycle
+    Power,
+    /// NRST low for --width, power stays on; every restart is a reset pulse
+    Reset,
+}
+
+impl BenchArgs {
+    fn cut(&self) -> Cut {
+        match self.cut {
+            CutArg::Power => Cut::Power,
+            CutArg::Reset => Cut::Reset { width: self.width },
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -140,11 +163,12 @@ struct RunArgs {
 }
 
 impl RunArgs {
-    fn params(&self, variant: Variant, path: Path, delay: Duration) -> RunParams {
+    fn params(&self, variant: Variant, path: Path, delay: Duration, cut: Cut) -> RunParams {
         RunParams {
             variant,
             path,
             delay,
+            cut,
             pre_trigger_us: self.pre_trigger_us,
             off: self.off,
             boot_delay_ms: self.boot_delay_ms,
@@ -255,6 +279,11 @@ impl BenchArgs {
                 &fw,
                 SimParams {
                     jitter: Duration::from_micros(30),
+                    // A reset stops the core at once; a power cut only after the hold-up.
+                    t_dead: match self.cut() {
+                        Cut::Power => SimParams::default().t_dead,
+                        Cut::Reset { .. } => Duration::ZERO,
+                    },
                     ..SimParams::default()
                 },
             );
@@ -272,7 +301,7 @@ impl BenchArgs {
         }
         let fw = Firmware::load(&self.fw, with_s0)?;
         let power: Box<dyn Power> = if with_power {
-            Box::new(Glitcher::open(self.glitcher.as_deref()).context("opening the glitcher")?)
+            Box::new(Glitcher::open(self.glitcher.as_deref(), self.cut()).context("opening the glitcher")?)
         } else {
             Box::new(NoPower)
         };
@@ -368,7 +397,14 @@ fn main() -> Result<()> {
             dry_note(&b);
             if b.dry {
                 // Something to look at: a provisioned DUT.
-                run::provision(&mut *b.power, &mut *b.dut, &b.fw, Duration::ZERO, Duration::ZERO)?;
+                run::provision(
+                    &mut *b.power,
+                    &mut *b.dut,
+                    &b.fw,
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    cli.bench.cut(),
+                )?;
             }
             b.dut.attach()?;
             let rb = read_back(&mut *b.dut);
@@ -385,7 +421,7 @@ fn main() -> Result<()> {
         Command::Snapshot { off, settle } => {
             let mut b = cli.bench.open(true, false)?;
             dry_note(&b);
-            let s0 = run::provision(&mut *b.power, &mut *b.dut, &b.fw, off, settle)?;
+            let s0 = run::provision(&mut *b.power, &mut *b.dut, &b.fw, off, settle, cli.bench.cut())?;
             if b.dry {
                 println!(
                     "S0 taken on the simulated bench (not saved): STATE {}",
@@ -427,7 +463,7 @@ fn main() -> Result<()> {
         } => {
             let mut b = cli.bench.open(true, true)?;
             dry_note(&b);
-            let p = run.params(variant.into(), path.into(), delay);
+            let p = run.params(variant.into(), path.into(), delay, cli.bench.cut());
             let t = Instant::now();
             let rec = chunky_bench::run_once(&mut *b.power, &mut *b.dut, &b.fw, &p)?;
             println!(
@@ -472,7 +508,7 @@ fn main() -> Result<()> {
                 step,
                 fine,
                 repeats,
-                base: run.params(Variant::Stock, Path::Revert, Duration::ZERO),
+                base: run.params(Variant::Stock, Path::Revert, Duration::ZERO, cli.bench.cut()),
                 dumps: match dumps {
                     DumpsArg::All => Dumps::All,
                     DumpsArg::Bad => Dumps::Bad,
@@ -498,7 +534,7 @@ fn measure(
     wait: Duration,
 ) -> Result<()> {
     let mut b = args.open(true, false)?;
-    let n = run::measure_setup(&mut *b.dut, &b.fw, variant, pre_trigger_us, period_ms)?;
+    let n = run::measure_setup(&mut *b.dut, &b.fw, variant, pre_trigger_us, period_ms, args.cut())?;
     println!(
         "measure mode: {variant} bootloader, pre_trigger {pre_trigger_us} us, every {period_ms} ms ({n} pages written)"
     );

@@ -7,6 +7,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `chunky-bench --cut reset --width W`: the cut as an NRST pulse (glitcher output open-drain on PF2-NRST)
+  instead of a power cut; every restart of a run is then a reset pulse. CSV columns `cut` and `width_us`. A
+  delay below the glitcher's minimum (3 clock cycles) is raised to it instead of failing. (HW-4)
+
 - Bench firmware: status LED on PB14, solid on whenever the board has power; `bench/README.md` wiring for the glitcher pins H6/H8/G8 and the M2K channels. (HW-3)
 
 - `bench/`: the hardware power-cut bench for embassy-boot's STATE erase on a B129A (STM32G0B1CE): wiring, run

@@ -5,7 +5,7 @@ use chunky_bench::dut::{Dut, restore};
 use chunky_bench::fake::{FakeBench, SimParams};
 use chunky_bench::record::{self, Dumps, HEADER};
 use chunky_bench::sweep::{Event, SweepFiles};
-use chunky_bench::{Firmware, Path, RunParams, SweepSpec, Variant, run_once, run_sweep};
+use chunky_bench::{Cut, Firmware, Path, RunParams, SweepSpec, Variant, run_once, run_sweep};
 use std::time::Duration;
 
 fn ms(n: u64) -> Duration {
@@ -17,6 +17,7 @@ fn params(variant: Variant, path: Path, delay: Duration) -> RunParams {
         variant,
         path,
         delay,
+        cut: Cut::Power,
         pre_trigger_us: 12_000,
         off: ms(300),
         boot_delay_ms: 50,
@@ -219,8 +220,53 @@ fn failing_runs_stop_the_sweep_and_run_again_on_resume() {
 fn provisioning_takes_the_s0_the_runs_start_from() {
     let (fw, b) = bench();
     let (mut power, mut dut) = (b.power(), b.dut());
-    let s0 = chunky_bench::run::provision(&mut power, &mut dut, &fw, ms(300), ms(2000)).unwrap();
+    let s0 = chunky_bench::run::provision(&mut power, &mut dut, &fw, ms(300), ms(2000), Cut::Power).unwrap();
     assert_eq!(s0.state, fw.s0_state);
     assert_eq!(s0.active, fw.s0_active);
     assert_eq!(s0.dfu, fw.s0_dfu);
+}
+
+#[test]
+fn reset_cut_runs_and_is_recorded() {
+    // A reset stops the core at once (t_dead 0): with pre_trigger 12 ms the erase runs from 12 to 34 ms.
+    let fw = Firmware::synthetic();
+    let b = FakeBench::new(
+        &fw,
+        SimParams {
+            t_dead: Duration::ZERO,
+            ..SimParams::default()
+        },
+    );
+    let (mut power, mut dut) = (b.power(), b.dut());
+    let cut = Cut::Reset {
+        width: Duration::from_micros(100),
+    };
+    for (delay, want) in [(ms(1), "old"), (ms(40), "old")] {
+        let p = RunParams {
+            cut,
+            ..params(Variant::Guarded, Path::Revert, delay)
+        };
+        let r = run_once(&mut power, &mut dut, &fw, &p).unwrap();
+        assert!(r.fired);
+        assert_eq!(r.outcome.name(), want, "{delay:?}: {:?}", r.outcome);
+        let point = record::Point {
+            variant: p.variant,
+            path: p.path,
+            d_ns: delay.as_nanos() as u64,
+            repeat: 0,
+        };
+        let row = record::row("t", &point, &r, "");
+        assert_eq!(row.len(), HEADER.len());
+        assert_eq!(&row[HEADER.len() - 2..], ["reset", "100"]);
+        let err = record::error_row("t", &point, &p, &anyhow::anyhow!("x"));
+        assert_eq!(err.len(), HEADER.len());
+        assert_eq!(err[HEADER.iter().position(|h| *h == "error").unwrap()], "x");
+    }
+    // Inside the erase the guarded bootloader still ends on a whole image.
+    let p = RunParams {
+        cut,
+        ..params(Variant::Guarded, Path::Revert, ms(20))
+    };
+    let r = run_once(&mut power, &mut dut, &fw, &p).unwrap();
+    assert!(matches!(r.outcome.name(), "old" | "new"), "{:?}", r.outcome);
 }

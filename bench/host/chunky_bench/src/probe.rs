@@ -75,8 +75,8 @@ impl Dut for ProbeDut {
         if addr.is_multiple_of(4) && buf.len().is_multiple_of(4) {
             let mut words = vec![0u32; buf.len() / 4];
             core.read_32(u64::from(addr), &mut words)?;
-            for (b, w) in buf.chunks_exact_mut(4).zip(&words) {
-                b.copy_from_slice(&w.to_le_bytes());
+            for (b, w) in buf.as_chunks_mut::<4>().0.iter_mut().zip(&words) {
+                *b = w.to_le_bytes();
             }
         } else {
             core.read(u64::from(addr), buf)?;

@@ -47,6 +47,8 @@ pub const HEADER: &[&str] = &[
     "restored",
     "dump",
     "error",
+    "cut",
+    "width_us",
 ];
 
 /// What identifies a run in a sweep.
@@ -144,6 +146,11 @@ fn base(sweep: &str, point: &Point, p: &RunParams) -> Vec<String> {
     ]
 }
 
+/// `cut` (power or reset) and the reset pulse width; last, so older sweeps' columns keep their places.
+fn cut_columns(p: &RunParams) -> [String; 2] {
+    [p.cut.name().into(), p.cut.width().as_micros().to_string()]
+}
+
 /// The row of a finished run.
 pub fn row(sweep: &str, point: &Point, rec: &RunRecord, dump: &str) -> Vec<String> {
     let b = &rec.boots;
@@ -186,6 +193,7 @@ pub fn row(sweep: &str, point: &Point, rec: &RunRecord, dump: &str) -> Vec<Strin
         dump.into(),
         String::new(),
     ]);
+    v.extend(cut_columns(&rec.params));
     v
 }
 
@@ -195,8 +203,9 @@ pub fn error_row(sweep: &str, point: &Point, p: &RunParams, err: &anyhow::Error)
     let mut v = base(sweep, point, p);
     v.push(String::new());
     v.push("error".into());
-    v.resize(HEADER.len() - 1, String::new());
+    v.resize(HEADER.len() - 3, String::new());
     v.push(format!("{err:#}").replace(['\n', '\r'], " "));
+    v.extend(cut_columns(p));
     v
 }
 
