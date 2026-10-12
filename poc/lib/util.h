@@ -19,4 +19,11 @@ double   now_ms(void);
  * lines the scripts read. Off by default so a run is readable. */
 int      machine_output(void);
 
+/* Optional sink for an informational line a library function wants to
+ * report; NULL means "say nothing". Lets the protocol/device logic in
+ * client.c and update_server.c stay free of printf, so a caller other
+ * than the CLI binaries (a test, say) can capture or drop the narration. */
+typedef void (*log_fn)(void *ctx, const char *line);
+void     log_fmt(log_fn fn, void *ctx, const char *fmt, ...);
+
 #endif

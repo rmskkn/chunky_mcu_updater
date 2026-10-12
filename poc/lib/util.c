@@ -93,3 +93,14 @@ void rnd_bytes(uint8_t *out, size_t len)
     if (f) { size_t n = fread(out, 1, len, f); fclose(f); if (n == len) return; }
     for (size_t i = 0; i < len; i++) out[i] = (uint8_t)(rand() >> 7);
 }
+
+void log_fmt(log_fn fn, void *ctx, const char *fmt, ...)
+{
+    if (!fn) return;
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    fn(ctx, buf);
+}
