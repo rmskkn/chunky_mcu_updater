@@ -21,7 +21,7 @@ enum Verdict {
     /// Every boot after the cut ran a whole image and both images still exist in flash.
     Fine(Active),
     /// A boot returned with ACTIVE a mix of both images.
-    Mixed(Vec<u8>),
+    Mixed(Vec<PageOf>),
     /// ACTIVE ok at each boot but one of the images is gone from flash altogether.
     Lost,
     /// `prepare_boot` returned an error: the device cannot boot (and will not recover by rebooting).
@@ -341,8 +341,16 @@ macro_rules! suite {
             #[test]
             fn minimal_sequence_trace() {
                 for (scn, mask, expect) in [
-                    (Scn::Revert, 0b0000_0000_0000_1010u32, vec![0xA0, 0xA1, 0xB2]),
-                    (Scn::Confirm, 0b0000_0000_0000_0110u32, vec![0xA0, 0xA1, 0xB2]),
+                    (
+                        Scn::Revert,
+                        0b0000_0000_0000_1010u32,
+                        vec![PageOf::Old(0), PageOf::Old(1), PageOf::New(2)],
+                    ),
+                    (
+                        Scn::Confirm,
+                        0b0000_0000_0000_0110u32,
+                        vec![PageOf::Old(0), PageOf::Old(1), PageOf::New(2)],
+                    ),
                 ] {
                     let (v, f) = run(
                         scn,
