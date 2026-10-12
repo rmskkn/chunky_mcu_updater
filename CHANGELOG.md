@@ -16,6 +16,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   apps padded to 32 KB, and `.elf`) to `bench/fw/out`; `just lint` builds and lints it. (HW-3)
 - The G0 ECC NMI reader for the bench: the NMI handler clears FLASH_ECCR.ECCD and counts the fault, the flash read
   that hit it returns an `EccError`. (ECC-2)
+- `chunky-bench` (`bench/host`, own workspace): the power-cut bench harness. Library `chunky_bench` with the
+  glitcher as power switch and probe-rs as SWD access behind traits, page-wise restore of snapshot S0, read-back
+  of report, IPSR, FLASH_ECCR/SR and STATE/ACTIVE/DFU, classification, resumable sweeps (coarse grid, then a fine
+  one around outcome changes) into a CSV with raw dumps, and a simulated bench for tests and `--dry-run`.
+  Commands `status`, `cycle`, `snapshot`, `measure`, `run`, `sweep`; recipes `bench-test`, `bench-lint` (part of
+  `lint`), `bench-measure`, `bench-sweep`. (HW-4)
+- `embassy_torn::classify`: the old/new/mixed/lost classification as pure functions on pages, shared by the
+  model's tests and the bench. (HW-4)
 
 ## [0.6.0] - 2026-10-11
 

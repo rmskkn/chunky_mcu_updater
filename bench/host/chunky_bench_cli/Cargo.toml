@@ -1,0 +1,21 @@
+[package]
+name = "chunky_bench_cli"
+description = "chunky-bench: the power-cut bench from the command line (thin shell over chunky_bench)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "chunky-bench"
+path = "src/main.rs"
+
+[dependencies]
+chunky_bench.workspace = true
+bench_layout.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+anstream.workspace = true
+anstyle.workspace = true
+indicatif.workspace = true

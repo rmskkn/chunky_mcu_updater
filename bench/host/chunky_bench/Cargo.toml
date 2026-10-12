@@ -1,0 +1,21 @@
+[package]
+name = "chunky_bench"
+description = "Power-cut bench harness (HW-4): glitcher power cuts, probe-rs restore and read-back, classification, sweeps"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bench_layout.workspace = true
+embassy_torn.workspace = true
+anyhow.workspace = true
+csv.workspace = true
+probe-rs.workspace = true
+glitch.workspace = true
+# The fake bench runs the real embassy-boot against a G0-sized flash model.
+embassy-boot.workspace = true
+embedded-storage.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

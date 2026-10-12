@@ -12,6 +12,9 @@
 //! Not modelled: a torn *program* of more than one write unit (embassy-boot never relies on that), erase
 //! order across several pages (the state partition here is one page).
 
+pub mod classify;
+
+pub use classify::{Active, Class, PageOf};
 use embedded_storage::nor_flash::{ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -403,45 +406,23 @@ pub fn provision(flash: &Shared) {
     }
 }
 
-/// Which image ACTIVE holds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Active {
-    /// All pages of the old image.
-    Old,
-    /// All pages of the new image.
-    New,
-    /// Anything else: the page fill bytes, in order.
-    Mixed(Vec<u8>),
+/// The pages of the image whose page `p` is filled with `page(p)`.
+pub fn image_pages(page: fn(usize) -> u8) -> Vec<Vec<u8>> {
+    (0..N).map(|p| vec![page(p); ERASE]).collect()
 }
 
-/// Classifies ACTIVE.
+fn pages(f: &Flash, at: usize, n: usize) -> Vec<&[u8]> {
+    (0..n).map(|p| &f.mem[at + p * ERASE..][..ERASE]).collect()
+}
+
+/// Classifies ACTIVE ([`classify::active`] on the pages).
 pub fn active(flash: &Shared) -> Active {
     let f = flash.borrow();
-    let pages: Vec<u8> = (0..N)
-        .map(|p| {
-            let page = &f.mem[ACTIVE_AT + p * ERASE..][..ERASE];
-            if page.iter().all(|&b| b == page[0]) {
-                page[0]
-            } else {
-                0x00
-            }
-        })
-        .collect();
-    if pages.iter().enumerate().all(|(p, &b)| b == old_page(p)) {
-        Active::Old
-    } else if pages.iter().enumerate().all(|(p, &b)| b == new_page(p)) {
-        Active::New
-    } else {
-        Active::Mixed(pages)
-    }
+    classify::active(&pages(&f, ACTIVE_AT, N), &image_pages(old_page), &image_pages(new_page))
 }
 
 /// Whether every page of the image (given by its fill function) still exists somewhere in ACTIVE or DFU.
 pub fn image_survives(flash: &Shared, page: fn(usize) -> u8) -> bool {
     let f = flash.borrow();
-    let present = |fill: u8| {
-        (0..N).any(|p| f.mem[ACTIVE_AT + p * ERASE..][..ERASE].iter().all(|&b| b == fill))
-            || (0..=N).any(|p| f.mem[DFU_AT + p * ERASE..][..ERASE].iter().all(|&b| b == fill))
-    };
-    (0..N).all(|p| present(page(p)))
+    classify::survives(&image_pages(page), &pages(&f, ACTIVE_AT, N), &pages(&f, DFU_AT, N + 1))
 }
