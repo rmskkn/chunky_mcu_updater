@@ -1,0 +1,3 @@
+# The glitch dependency is a private git repo over ssh: let git (and its ssh agent) fetch it.
+[net]
+git-fetch-with-cli = true
