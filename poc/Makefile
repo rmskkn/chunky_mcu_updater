@@ -9,7 +9,7 @@ OBJ     := $(BUILD)/obj
 # Everything that is not a CLI entry point: manifest/plan/protocol/flash
 # primitives plus the device and sender session logic, built once into a
 # static library and linked into all three binaries.
-LIB_SRC := $(LIB)/util.c $(LIB)/sha256.c $(LIB)/flash.c \
+LIB_SRC := $(LIB)/util.c $(LIB)/sha256.c $(LIB)/platform_posix.c $(LIB)/flash.c \
            $(LIB)/image.c $(LIB)/manifest.c $(LIB)/frame.c $(LIB)/plan.c \
            $(LIB)/client.c $(LIB)/update_server.c
 LIB_OBJ := $(LIB_SRC:$(LIB)/%.c=$(OBJ)/%.o)
