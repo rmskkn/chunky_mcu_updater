@@ -20,32 +20,39 @@ Donguru, reset over SWD (no power cycle). M2K logic, DIO0, 1 MS/s, 4 s:
 
 `t_erase` = 22.07 ms, spread 14 us.
 
-## M2 cut to dark (one manual cut so far, M2K 10 kS/s, firmware idle)
+## M2 cut to dark (10R in the VBUS_SW wire, bench firmware in measure mode)
 
-| after the cut | 3V3 |
-| --- | --- |
-| 0-20 ms | > 3.0 V |
-| 30 ms | 2.79 V |
-| 50 ms | 2.32 V |
-| 60 ms | 2.11 V |
-| ~65 ms | regulator drops out |
-| 75 ms | < 0.3 V |
+`chunky-bench measure --pre-trigger-us 0 --period-ms 100 --cut 5ms --off 1s --captures 5`, M2K scope and logic
+free-running at 100 kS/s; the cut is taken from the +5V0 knee. Cuts 2-6 (1 s off before each):
 
-+5V0 falls slowly (1.5 V at 100 ms). A 2 s cut recovers cleanly (3.0 V at its end). The G0 runs 60-70 ms past
-the cut at the default brown-out level. To do with the measure firmware and the trigger: `t_dead` with its
-spread over several cuts, during an erase and idle.
+| 3V3 below | after the cut | spread |
+| --- | --- | --- |
+| 3.0 V | 15.0 ms | 14.9-15.1 |
+| 2.5 V | 26.8 ms | 26.4-26.9 |
+| 2.0 V | 42.4 ms | 42.2-42.5 |
+| 1.7 V | 43.5 ms | 43.4-43.7 |
+| 1.0 V | 46.7 ms | 46.5-46.8 |
+| 0.3 V | 52.7 ms | 52.5-52.9 |
+
+The regulator drops out at about 42 ms and 3V3 then falls at ~0.3 V/ms, so the G0 goes dark within about a
+millisecond of 43.5 ms: `t_dead` ~ 43.5 ms, spread ~0.3 ms. An erase that was running when the cut came (cut
+5 ms into it) finishes normally 17.08 ms later (22.08 ms in all): 3V3 is still above 2.9 V then.
++5V0 only falls to ~0.5 V in a 1 s cut, 3V3 reaches 0. The first cut, 300 ms after a power cycle, is ~1 ms
+slower (3.0 V at 16.2 ms, 0.3 V at 53.8 ms). An earlier manual cut without the bench firmware running and
+without the 10R was slower still (< 0.3 V at 75 ms).
 
 ## M3 power off and back
 
-Open. Known: power restore through Q102 dips Donguru's supply and its USB hub drops off the bus (inrush into
-the B129's >110 uF); cut runs wait for that fix.
+- Off time: 3V3 is below 0.3 V 53 ms after the cut and reaches 0; 300 ms and 1 s both give a clean start.
+- Restore: 3V3 above 3.0 V within ~1 ms; PA6's first edge (bootloader, application, first erase,
+  `boot_delay_ms = 0`) 1.9 ms after power returns, every time.
+- With the 10R series resistor Donguru stays on USB across cut and restore (before: its hub dropped off at
+  every restore).
 
-## What follows for the sweep (provisional)
+## What follows for the sweep
 
-- `pre_trigger_us` about 80000-90000 (>= `t_dead`(max) + 2 ms), to be fixed once M2 has the spread.
-- `off` at least 300 ms for 3V3; +5V0 is still at 1.5 V after 100 ms, so check that a short `off` gives a real
-  power-on reset (M3) or use 1-2 s.
-- Sweep `d` from `pre - t_dead(max) - 1 ms` to `pre + 22.1 ms - t_dead(min) + 1 ms`.
-- With 60-70 ms of slow decay the instant the erase stops is set by where the flash gives up on the falling
-  3V3, not by the glitcher's 13 ns steps: expect ms of jitter per delay, so repeats per point matter more than
-  a fine step. Brown-out level 4 would tighten it (later option).
+- The erase is hit when the G0 goes dark inside it: `d` + 43.5 ms in `[pre, pre + 22.1 ms]`. With
+  `pre_trigger_us = 50000`: `d` from about 6.5 ms to 28.6 ms; sweep 0-34 ms.
+- `off` 300 ms. Control runs at `d` = 200 ms (stock): mark_booted ends `new`, revert ends `old`.
+- A run takes 40-75 s: Donguru reads ~12 KB/s over SWD (read-backs and the compare before the restore), and
+  the revert path rewrites 34 pages.

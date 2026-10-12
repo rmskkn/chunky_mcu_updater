@@ -71,7 +71,16 @@ impl Dut for ProbeDut {
 
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<()> {
         let mut core = self.session()?.core(0)?;
-        core.read(u64::from(addr), buf)?;
+        // Word reads where they fit: byte access over SWD is several times slower.
+        if addr.is_multiple_of(4) && buf.len().is_multiple_of(4) {
+            let mut words = vec![0u32; buf.len() / 4];
+            core.read_32(u64::from(addr), &mut words)?;
+            for (b, w) in buf.chunks_exact_mut(4).zip(&words) {
+                b.copy_from_slice(&w.to_le_bytes());
+            }
+        } else {
+            core.read(u64::from(addr), buf)?;
+        }
         Ok(())
     }
 
