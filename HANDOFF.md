@@ -37,17 +37,18 @@
   22081. B129 now holds stock bootloader + image A + measure config (flashed by hand with probe-rs; config bytes
   in the job tmp, the harness's `measure` writes the same now, plus image A and a blank STATE). Notes:
   bench/results/measure-2026-10-12/NOTES.md. Reported to the parent.
-- HOLD on cuts: every power RESTORE through Q102 drops Donguru's USB hub (inrush into B129's caps). The user
-  decides the fix (series resistor in VBUS_SW and/or Donguru firmware re-inits the hub; session
-  donguru-hub-recover reflashes Donguru via the J-Link). Workaround: `probe-rs reset --probe 1366:0105 --chip
-  STM32G0B1CETx` re-enumerates Donguru. No cut, power cycle, snapshot or sweep before the user's go.
+- Inrush fixed by a 10R series resistor in the VBUS_SW wire (Donguru stays on USB; its FW-18 also recovers the
+  hub). M2: G0 dark ~43.5 ms after the cut (spread 0.3 ms); M3: 300 ms off is a clean POR, first PA6 edge 1.9 ms
+  after restore. S0 snapshot in bench/fw/out/s0 (untracked build output: take it again after any fw rebuild).
+- Sweep stock-1 done (bench/results/stock-1): 68 runs, 0 bad. Erase hit for d 6..31 ms at pre_trigger 50 ms;
+  STATE always reads fully erased when hit; transition untouched -> erased between d 5 and 6 ms.
 
-## Next (this session, after the user's go on cuts)
-1. M2: `just bench-measure --pre-trigger-us 90000 --cut 0 --off 2s` with an M2K capture per cut (m2k scope +
-   logic are free-running: capture long enough around the cut); t_dead and its spread, idle and during an erase.
-2. M3: off time for a clean POR (5V0 is at 1.5 V after 100 ms), 3V3 rise.
-3. `chunky-bench snapshot`, single `run`s of each variant and path, then sweeps (repeats over fine steps).
-4. The harness power-cycles in `measure`, `snapshot` and every run: all of them need the inrush fix.
+## Next (needs the user's go for more cut runs)
+1. Fine sweep d 5.0-6.0 ms, 10-20 us steps, repeats 3+, stock, both paths; then guarded.
+2. M2K capture at d = 30 ms (why the magic write after the erase is missing for d 29-31 ms).
+3. Harness: d = 0 is refused by the glitcher (clamp to its minimum); runs take 40-75 s (Donguru SWD reads
+   ~12 KB/s; word reads did not help): read back STATE first and ACTIVE/DFU only when needed, or hash on target.
+4. fpga_tools main moved to 7972301 (GLT-9/10 landed): bump the glitch git rev in bench/host when convenient.
 
 ## Decisions
 - One-page STATE, everything in bank 1; images 32 KB with per-page filler; signing off (unsigned) on the bench.

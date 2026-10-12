@@ -56,3 +56,28 @@ without the 10R was slower still (< 0.3 V at 75 ms).
 - `off` 300 ms. Control runs at `d` = 200 ms (stock): mark_booted ends `new`, revert ends `old`.
 - A run takes 40-75 s: Donguru reads ~12 KB/s over SWD (read-backs and the compare before the restore), and
   the revert path rewrites 34 pages.
+
+## First sweep: `stock-1` (stock bootloader, 12 Oct 2026)
+
+`chunky-bench sweep --name stock-1 --variants stock --paths mark-booted,revert --from 0ms --to 34ms --step 1ms
+--fine 0us --pre-trigger-us 50000 --off 300ms --settle 4s`: 70 runs, 52 min, `bench/results/stock-1/runs.csv`.
+The two runs at d = 0 are harness errors (the glitcher's delay is at least 3 clock cycles).
+
+| path | d 1-5 ms | d 6-31 ms | d 32-34 ms | bad |
+| --- | --- | --- | --- | --- |
+| mark_booted (34 runs) | new; cut before the erase: next boot runs the revert tail and B confirms again (2 STATE erases) | new; next boot finds no SWAP magic, B confirms again (1 erase) | new; `mark_booted` had finished | 0 |
+| revert (34 runs) | old; cut before the erase: next boot reverts again | old; STATE reads fully erased | old; REVERT magic written | 0 |
+
+No mixed, lost or brick outcome, no ECC flag (FLASH_ECCR 0), no unreadable double word, no PROGERR, in 68 runs.
+
+- The erase is hit for d = 6..31 ms, as predicted from M2 (6.5-28.6 ms) at the lower end. The upper end is
+  ~3 ms later than predicted: at d = 29-31 ms the magic written right after the erase is not there. Not
+  explained yet (the G0 stops earlier under the erase's load, or the program fails on the falling 3V3); an M2K
+  capture at d = 30 ms would show it.
+- In every run that hit the erase, STATE read back fully erased, at d = 6 ms already: at 1 ms steps no partly
+  erased page was seen. The page goes from untouched (d = 5 ms) to erased (d = 6 ms) within 1 ms, so the tears
+  the model in `embassy_torn/REPORT.md` needs (magic kept, progress words partly erased) can only be in that
+  1 ms, if they exist on this flash at all.
+- "Erased" is what a read at full voltage says; marginal cells are not seen this way.
+
+Next: d = 5.0-6.0 ms in 10-20 us steps with repeats, both paths, then the same on the guarded bootloader.
