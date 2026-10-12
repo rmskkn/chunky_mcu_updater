@@ -1,11 +1,6 @@
 #include "flash.h"
 #include "util.h"
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/mman.h>
 
 /* Bank 0 holds meta at page META0_PAGE and its journal at META0_PAGE+2. */
 #define BANK_PAGE(b)    ((b) == 0 ? META0_PAGE : META1_PAGE)
@@ -16,10 +11,17 @@ static int live_bank;   /* bank meta_load() picked, or the one meta_store() wrot
 
 int flash_create(const char *path)
 {
-    uint8_t *buf = malloc(FLASH_SIZE);
-    memset(buf, 0xFF, FLASH_SIZE);
-    /* a recognisable bootloader region so the map is visible in a hex dump */
-    memset(buf, 0xEE, BL_PAGES * PAGE_SIZE);
+    int rc = plat_flash_create(path, FLASH_SIZE, 0xFF);
+    if (rc) return rc;
+
+    flash_t f;
+    if (plat_flash_open(&f.io, path, FLASH_SIZE)) return -1;
+
+    /* a recognisable bootloader region so the image is visible in a hex
+     * dump; 0xFF -> 0xEE only clears bits, same as a real program would. */
+    uint8_t bl_marker[BL_PAGES * PAGE_SIZE];
+    memset(bl_marker, 0xEE, sizeof bl_marker);
+    plat_flash_write(&f.io, 0, bl_marker, sizeof bl_marker);
 
     identity_t id;
     memset(&id, 0xFF, sizeof id);
@@ -28,19 +30,15 @@ int flash_create(const char *path)
     /* fixed keys: the PoC server shares them, standing in for a provisioned
      * device key and the root public key held in the bootloader region. */
     for (int i = 0; i < 32; i++) { id.dev_key[i] = (uint8_t)(0xA0 + i); id.root_key[i] = (uint8_t)(0x50 + i); }
-    memcpy(buf + (size_t)ID_PAGE * PAGE_SIZE, &id, sizeof id);
+    plat_flash_write(&f.io, (size_t)ID_PAGE * PAGE_SIZE, &id, sizeof id);
 
-    int rc = write_file(path, buf, FLASH_SIZE);
-    free(buf);
-    return rc;
+    plat_flash_close(&f.io);
+    return 0;
 }
 
 int flash_open(flash_t *f, const char *path)
 {
-    f->fd = open(path, O_RDWR);
-    if (f->fd < 0) return -1;
-    f->map = mmap(NULL, FLASH_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, f->fd, 0);
-    if (f->map == MAP_FAILED) { close(f->fd); return -1; }
+    if (plat_flash_open(&f->io, path, FLASH_SIZE)) return -1;
     f->n_erase = f->n_prog = 0;
     f->prog_bytes = 0;
     f->path = path;
@@ -50,22 +48,12 @@ int flash_open(flash_t *f, const char *path)
 
 void flash_close(flash_t *f)
 {
-    msync(f->map, FLASH_SIZE, MS_SYNC);
-    munmap(f->map, FLASH_SIZE);
-    close(f->fd);
-}
-
-static void sync_range(flash_t *f, size_t off, size_t len)
-{
-    size_t start = off & ~(size_t)4095;
-    msync(f->map + start, len + (off - start), MS_SYNC);
+    plat_flash_close(&f->io);
 }
 
 void flash_erase_page(flash_t *f, int page)
 {
-    size_t off = (size_t)page * PAGE_SIZE;
-    memset(f->map + off, 0xFF, PAGE_SIZE);
-    sync_range(f, off, PAGE_SIZE);
+    plat_flash_erase(&f->io, (size_t)page * PAGE_SIZE, PAGE_SIZE);
     f->n_erase++;
 }
 
@@ -78,19 +66,18 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
     if (off + len > FLASH_SIZE)
         die("flash: program past end of flash");
 
+    const uint8_t *cur = plat_flash_read(&f->io, off);
     for (size_t i = 0; i < len; i++) {
-        uint8_t old = f->map[off + i];
-        if ((old & src[i]) != src[i])
+        if ((cur[i] & src[i]) != src[i])
             die("flash: program at 0x%zx would set bits (0x%02x -> 0x%02x); "
-                "erase the page first", off + i, old, src[i]);
+                "erase the page first", off + i, cur[i], src[i]);
     }
-    memcpy(f->map + off, src, len);
-    sync_range(f, off, len);
+    plat_flash_write(&f->io, off, src, len);
     f->n_prog++;
     f->prog_bytes += len;
 }
 
-const uint8_t *flash_at(flash_t *f, size_t off) { return f->map + off; }
+const uint8_t *flash_at(flash_t *f, size_t off) { return plat_flash_read(&f->io, off); }
 
 void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[PAGE_SIZE])
 {
@@ -105,12 +92,12 @@ void sector_hash(const void *page, uint8_t out[SECTOR_HASH_LEN])
 
 void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN])
 {
-    sector_hash(f->map + APP_BASE + (size_t)index * PAGE_SIZE, out);
+    sector_hash(flash_at(f, APP_BASE + (size_t)index * PAGE_SIZE), out);
 }
 
 identity_t *identity_get(flash_t *f)
 {
-    identity_t *id = (identity_t *)(f->map + (size_t)ID_PAGE * PAGE_SIZE);
+    identity_t *id = (identity_t *)flash_at(f, (size_t)ID_PAGE * PAGE_SIZE);
     if (id->magic != ID_MAGIC)
         die("device identity page is blank: provisioning fault");
     return id;
@@ -127,7 +114,7 @@ void meta_init(meta_t *m)
 static int bank_valid(flash_t *f, int bank, meta_t *out)
 {
     meta_t m;
-    memcpy(&m, f->map + BANK_META(bank), sizeof m);
+    memcpy(&m, flash_at(f, BANK_META(bank)), sizeof m);
     if (m.magic != META_MAGIC) return 0;
     uint32_t want = m.crc;
     m.crc = 0;
@@ -165,7 +152,7 @@ void meta_store(flash_t *f, meta_t *m)
 uint16_t journal_get(flash_t *f, int index)
 {
     uint16_t v;
-    memcpy(&v, f->map + BANK_JOURNAL(live_bank) + (size_t)index * 2, 2);
+    memcpy(&v, flash_at(f, BANK_JOURNAL(live_bank) + (size_t)index * 2), 2);
     return v;
 }
 

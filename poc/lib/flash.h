@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "sha256.h"
+#include "platform.h"
 
 /* Flash geometry, STM32F103CB as in DESIGN.md section 2 / 10.2 / 18.
  *
@@ -115,8 +116,7 @@ _Static_assert((SECTORS_SLOT + 3) * 2 <= PAGE_SIZE,
 enum { RES_NONE = 0, RES_OK, RES_VERIFY_FAILED, RES_FLASH_FAIL };
 
 typedef struct {
-    uint8_t *map;
-    int      fd;
+    plat_flash_t io;
     long     n_erase;      /* page erases, for the device time model */
     long     n_prog;
     size_t   prog_bytes;
