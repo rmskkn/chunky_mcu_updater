@@ -54,8 +54,8 @@ flash and is the only thing that writes it. Nothing else is shared.
 ```
   cb-server --image release.bin                     cb-client --flash flash.bin
   +-----------------------------------+             +-----------------------------------+
-  | release.bin   raw firmware        |             | manifest.c  md5 of all 104        |
-  |                                   |             |             sectors, 8 B each     |
+  | release.bin   raw firmware        |             | manifest.c  sha128 of all 102     |
+  |                                   |             |             sectors, 16 B each    |
   |                                   |             |             order implicit        |
   | image.c   wrap into an image:     |             | client.c    receive blobs, write  |
   |           descriptor at 0x200,    |             |             them straight into    |
@@ -111,10 +111,10 @@ the progress record, so the next request re-diffs and sends only the gap.
     |-- HELLO  id, geometry, version + image hash --------------->|
     |<-- CHALLENGE  16-byte nonce --------------------------------|
     |                                                             |
-    |   md5 every sector of the partition (104 x 1 KB)            |
+    |   sha128 every sector of the partition (102 x 1 KB)         |
     |-- MANIFEST_DIGEST  sha256 of the body, MAC over the nonce ->|
     |<-- MANIFEST_NEEDED  only on a cache miss -------------------|
-    |-- MANIFEST  836 B of body, fragmented --------------------->|
+    |-- MANIFEST  1636 B of body, fragmented -------------------->|
     |-- MANIFEST_END  digest + MAC ------------------------------>|
     |                              verify MAC, nonce, structure   |
     |                      build the target, diff it per sector   |
@@ -122,12 +122,12 @@ the progress record, so the next request re-diffs and sends only the gap.
     |                                                             |
     |   every step streamed with no per-step wait:                |
     |<-- STEP_WRITE  dst, offset, 256 B   (x4 per sector) --------|
-    |<-- STEP_WRITE_END  dst, md5 --------------------------------|
-    |<-- STEP_COPY  dst, src index, md5 --------------------------|
+    |<-- STEP_WRITE_END  dst, hash -------------------------------|
+    |<-- STEP_COPY  dst, src index, hash -------------------------|
     |   ... (one of the two, once per step, until the plan ends)  |
     |<-- PLAN_END ------------------------------------------------|
     |                                                             |
-    |   per STEP_WRITE_END: check md5 against the buffer, then    |
+    |   per STEP_WRITE_END: check hash against the buffer, then   |
     |   hand the sector to a flash-write worker and start filling |
     |   the other buffer with the next STEP_WRITE - so one        |
     |   sector's erase/program overlaps the next one's transfer;  |
@@ -140,7 +140,7 @@ the progress record, so the next request re-diffs and sends only the gap.
     |<-- COMMIT --------------------------------------------------|
     |                                                             |
     |   arm the plan: clear one journal half-word, reboot         |
-    |   bootloader: run the copies, re-check every md5,           |
+    |   bootloader: run the copies, re-check every hash,          |
     |               check image_sha256 and the signature          |
     |   verifies -> boot it; fails -> ask for another release     |
 ```
@@ -301,11 +301,11 @@ removed the field and the possibility of it disagreeing with reality.
 ## Manifest encoding, before and after
 
 The manifest started as one entry per sector carrying its own index and a full
-MD5. Both fields turned out to be payable.
+hash. Both fields turned out to be payable.
 
 | | Before | After |
 |---|---|---|
-| Entry | `{index:u16, md5:u8[16]}` | `hash:u8[8]` |
+| Entry | `{index:u16, hash:u8[16]}` | `hash:u8[8]` |
 | Entry size | 18 B | **8 B** |
 | Order | explicit, in the entry | implicit: sector `i` is `hashes[i]` |
 | Body, 104 sectors | 1876 B | **836 B** |

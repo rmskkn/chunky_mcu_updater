@@ -11,9 +11,9 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 
 ### Goals
 
-* The device reports a manifest of *every* flash sector it holds (`sector, md5`).
+* The device reports a manifest of *every* flash sector it holds (`sector, hash`).
 * The server computes the difference against the target image and sends only the
-  sectors the device does not already have, as `sector N, blob, md5`.
+  sectors the device does not already have, as `sector N, blob, hash`.
 * Received sectors are staged durably. The bootloader applies the staged plan,
   verifies it, and switches partitions.
 * The bootloader can **unroll** a plan at any point and return to the partition
@@ -41,7 +41,7 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 
 | Region       | Pages   | Address range             | Size  | Purpose |
 |--------------|---------|---------------------------|-------|---------|
-| Bootloader   | 0–14    | `0x08000000`–`0x08003BFF` | 15 KB | Apply engine, MD5, SHA-256, ECDSA sign/verify, flash driver, root public key |
+| Bootloader   | 0–14    | `0x08000000`–`0x08003BFF` | 15 KB | Apply engine, SHA-256, ECDSA sign/verify, flash driver, root public key |
 | Device identity | 15   | `0x08003C00`–`0x08003FFF` | 1 KB  | Device id, device keypair, factory certificate (Section 10.2) |
 | Meta bank 0  | 16–19   | `0x08004000`–`0x08004FFF` | 4 KB  | Boot state + plan (ping-pong copy A) |
 | Meta bank 1  | 20–23   | `0x08005000`–`0x08005FFF` | 4 KB  | Boot state + plan (ping-pong copy B) |
@@ -64,7 +64,7 @@ bootloader, the root public key, or the device identity.
 | Page | Contents |
 |------|----------|
 | 0    | `MetaHeader`: magic, generation, `active_slot`, `pending_slot`, `plan_state`, `target_version`, target image SHA-256, signature (64 B), `step_count`, and the per-step op/source table (52 × 2 B) |
-| 1    | Target sector manifest: 52 × MD5 (16 B), indexed by slot-relative sector |
+| 1    | Target sector manifest: 52 × sha128 (16 B), indexed by slot-relative sector |
 | 2    | Progress journal: 52 × 16-bit state word, advanced by clearing bits (no erase) |
 | 3    | Boot attempt log: 16-bit tokens cleared one per trial boot, plus the last 8 boot outcomes |
 
@@ -78,7 +78,7 @@ only ever go from 1 to 0:
 ```
 0xFFFF  empty
 0xFFF0  sector written to flash
-0xFF00  sector written and MD5-verified
+0xFF00  sector written and hash-verified
 0x0000  step complete (for COPY: source read and destination verified)
 ```
 
@@ -128,7 +128,7 @@ Two things are deliberately absent from an entry. There is **no index**: the
 manifest always describes every sector in ascending order, so sector `i` is at
 `hashes[i]`, and a manifest that repeats or omits a sector cannot be expressed
 -- which deletes that whole class of malformed input rather than validating
-against it. And the hash is **MD5 truncated to 8 bytes**, because a per-sector
+against it. And the hash is **SHA-256 truncated to 8 bytes**, because a per-sector
 hash answers one question, "does this sector already hold the bytes the target
 needs", and is not a trust boundary: `image_sha256` and the release signature
 gate the result, so a collision costs a retried update, not a corrupt device.
@@ -167,11 +167,11 @@ warm. A bitmap marking erased sectors would take the measured case to 373 B,
 below anything a general compressor achieved, and is held in reserve for a link
 slow enough to justify it.
 
-Hashing 104 KB with software MD5 at 72 MHz costs roughly 1.1 M cycles — about
-15 ms. The manifest is therefore computed fresh at the start of every session
+Hashing 104 KB with SHA-256 at 72 MHz costs roughly 2.7 M cycles — about
+37 ms. The manifest is therefore computed fresh at the start of every session
 and never cached, which removes a whole class of staleness bugs.
 
-An erased sector (all `0xFF`) still gets a real MD5. The server recognises the
+An erased sector (all `0xFF`) still gets a real hash. The server recognises the
 constant hash of an erased page and treats it as "absent", so no special case is
 needed in the wire format.
 
@@ -181,7 +181,7 @@ needed in the wire format.
 
 The server keeps, for each released version and each slot, a precomputed
 manifest and the 1 KB blob behind every sector hash. The blob store is
-content-addressed by MD5, so identical sectors across versions and slots are
+content-addressed by SHA-256, so identical sectors across versions and slots are
 stored once.
 
 **Baseline for the diff.** The comparison is per destination sector, against
@@ -204,7 +204,7 @@ For target version `V` into destination slot `D`, for each destination sector
 2. Else if the device reports `H` anywhere — any slot, any index → emit
    **`STEP_COPY(dst=i, src_slot, src_index)`**. Zero bytes on the wire; the
    bootloader copies flash to flash.
-3. Else → emit **`STEP_WRITE(dst=i, blob, md5=H)`**.
+3. Else → emit **`STEP_WRITE(dst=i, blob, hash=H)`**.
 
 Rules 2 and 3 split the *differing* sectors by where the correct bytes can be
 found. Rule 2 is a content-addressed local lookup, not a positional one: the
@@ -274,9 +274,9 @@ buffer (~300 B).
 | → server | `MANIFEST` / `MANIFEST_END` | manifest body, `manifest_sha256`, device signature (Section 4) |
 | → device | `MANIFEST_REJECT` | reason (`BAD_SIGNATURE`, `BAD_NONCE`, `UNKNOWN_DEVICE`, `GEOMETRY_MISMATCH`, `MALFORMED`) |
 | → device | `PLAN_BEGIN` | target version, destination slot, step count, target SHA-256, signature |
-| → device | `STEP_COPY` | `dst`, `src_slot`, `src_index`, expected md5 |
-| → device | `STEP_WRITE` | `dst`, `offset`, `len`, bytes, expected md5 of the full sector |
-| → server | `STEP_ACK` / `STEP_NAK` | `dst`, reason (`MD5_MISMATCH`, `FLASH_FAIL`, `BAD_INDEX`) |
+| → device | `STEP_COPY` | `dst`, `src_slot`, `src_index`, expected hash |
+| → device | `STEP_WRITE` | `dst`, `offset`, `len`, bytes, expected hash of the full sector |
+| → server | `STEP_ACK` / `STEP_NAK` | `dst`, reason (`HASH_MISMATCH`, `FLASH_FAIL`, `BAD_INDEX`) |
 | → device | `PLAN_END` | — |
 | → server | `PLAN_READY` | journal digest, count of steps still pending |
 | → device | `COMMIT` | arm the reboot |
@@ -293,7 +293,7 @@ drawn from the working implementation.
 **Resume.** On reconnect the client repeats `HELLO`/`CHALLENGE` with the stored
 `target_version`, then re-sends only the journal: a 52-entry bitmap of verified
 sectors, inside the same signed `MANIFEST_END` structure. The server replays the missing steps. Nothing already in flash is sent
-twice, and because every sector carries its own MD5 the device never has to
+twice, and because every sector carries its own hash the device never has to
 trust that a resumed stream is consistent with the earlier one.
 
 Section 16 defines the link adapters — byte stream, Modbus, CAN with ISO-TP,
@@ -327,7 +327,7 @@ NONE ──PLAN_BEGIN──> STAGING ──all steps verified──> READY
    * `STEP_COPY`: copy `SECTOR_SIZE` bytes from `(src_slot, src_index)` to
      `(pending_slot, dst)` using a RAM-resident program routine, re-hash the
      destination, mark `0x0000`.
-   * `STEP_WRITE`: the application already wrote it; re-verify its MD5 and mark
+   * `STEP_WRITE`: the application already wrote it; re-verify its hash and mark
      `0x0000`. A mismatch means the staged data is bad → **unroll**.
 3. Verify the full pending image against `image_sha256` and the ECDSA
    signature. Failure → **unroll**.
@@ -364,7 +364,7 @@ Two distinct operations. Both are cheap because of one invariant:
 > slot is read-only for the entire update.
 
 **Unroll** — abandon a plan that has not booted yet (verify failed, `ABORT`,
-staged MD5 mismatch, signature mismatch):
+staged hash mismatch, signature mismatch):
 
 1. Erase sector 0 of the pending slot. The slot header disappears, so the slot
    is unambiguously invalid.
@@ -397,7 +397,7 @@ idempotent, so a power cut during unroll just means unroll runs again.
 | Power loss mid flash program | That sector's journal word is not `0xFF00`; it is re-sent or re-copied |
 | Power loss during apply | `plan_state == APPLYING`; the bootloader resumes the journal from where it stopped |
 | Power loss during meta write | The other bank with the lower generation is still consistent |
-| Corrupt blob in transit | Per-sector MD5 fails → `STEP_NAK` → re-sent |
+| Corrupt blob in transit | Per-sector hash fails → `STEP_NAK` → re-sent |
 | Server sends a wrong target | `image_sha256` or release signature fails → unroll |
 | TLS handshake fails or the pin does not match | No session; link fault reported, retry with backoff |
 | Manifest signature or nonce is wrong | `MANIFEST_REJECT`; no plan is generated |
@@ -412,11 +412,11 @@ idempotent, so a power cut during unroll just means unroll runs again.
 
 ## 10. Security
 
-MD5, truncated to 8 bytes, is used **only** for per-sector equality and
-transport integrity. It is not a trust boundary: a collision would let an
-attacker who already controls the server substitute a sector, and the
-truncation does not change that — what gates the result is the whole-image
-hash and the signature below.
+SHA-256 truncated to 128 bits (`sha128`, see below) is used **only** for per-sector
+equality and transport integrity. It is not a trust boundary: a collision
+would let an attacker who already controls the server substitute a sector,
+and the truncation does not change that — what gates the result is the
+whole-image hash and the signature below.
 
 Authenticity comes from one signature per image, checked by the bootloader
 before the slot is ever made bootable:
@@ -483,17 +483,17 @@ nothing new, since a slot's bytes cannot change without `image_sha256` changing.
 **It does not replace the per-sector hashes.** The whole-image hash is a
 pass/fail gate; it cannot say *which* sector differs, so there is no delta
 without the per-sector manifest. The two hashes answer different questions:
-per-sector MD5 answers "what must I transfer", `image_sha256` answers "is the
-result exactly the released image". The design needs both.
+the per-sector hash answers "what must I transfer", `image_sha256` answers
+"is the result exactly the released image". The design needs both.
 
-**Optional: drop MD5 entirely.** Per-sector hashes could be SHA-256 truncated
-to 16 bytes instead, keeping the manifest the same 1872 B and removing the weak
-primitive from the device altogether. Cost: manifest generation goes from ~15 ms
-to ~35 ms for 104 KB, and the bootloader drops the MD5 implementation (~1.5 KB)
-in exchange for reusing SHA-256 it already carries — a net flash *saving*. The
-wire format stays `sector, hash, blob`. MD5 is kept here only because it was
-specified; if the `sector,md5` format is not an external constraint, truncated
-SHA-256 is the better default.
+**Per-sector hashes reuse SHA-256.** Each is the full `sha128`
+output — SHA-256 truncated to 128 bits (16 B), stored as-is in the manifest
+and plan. Two costs, two savings: manifest generation goes from ~15 ms to
+~35 ms for the 102 KB PoC partition, and the manifest body grows to 1636 B
+(measured, section 18); against that, the bootloader drops a second hash
+primitive (~1.5 KB of flash) in favor of the SHA-256 implementation it
+already carries for `image_sha256` and the signature. The wire format is
+unaffected: `sector, hash, blob` either way, just a wider `hash`.
 
 ### 10.2 Manifest authentication
 
@@ -700,15 +700,14 @@ self-healing rather than a field visit.
 
 | Item | Size |
 |---|---|
-| Bootloader code (flash driver, MD5, SHA-256, micro-ecc, journal, apply) | ~11–14 KB of the 15 KB region |
+| Bootloader code (flash driver, SHA-256, micro-ecc, journal, apply) | ~11–14 KB of the 15 KB region |
 | Device identity page | 1 KB (page 15, `WRP` protected) |
 | Update client in the application | ~3–4 KB, plus micro-ecc sign + HMAC-SHA256 (~3 KB), plus the AT driver |
 | Manifest signing time | ~250 ms, once per session |
 | TLS stack on the MCU | 0 — terminated in the network module |
 | Application RAM: sector buffer | 1024 B |
 | Application RAM: frame buffer | ~300 B |
-| MD5 context | 92 B |
-| SHA-256 context | 108 B |
+| SHA-256 context (shared: manifest hashing, image hash, signature) | 108 B |
 | Manifest on the wire | 1872 B |
 
 ---
@@ -719,7 +718,7 @@ self-healing rather than a field visit.
   the full image SHA-256, and the signature. Produced at build time by a
   `mkmanifest` tool that splits the ELF-derived binary on page boundaries and
   pads the tail with `0xFF`.
-* **Blob store.** Content-addressed by MD5, one 1 KB object per unique sector.
+* **Blob store.** Content-addressed by SHA-256, one 1 KB object per unique sector.
 * **Device table.** Per device: last `HELLO`, running version, active slot,
   current plan, journal bitmap, last result, and the set of versions known bad
   for that device.
@@ -734,8 +733,8 @@ self-healing rather than a field visit.
 
 ## 14. Build order
 
-1. Flash driver with a RAM-resident program/erase routine; MD5; the meta bank
-   ping-pong with CRC and generation.
+1. Flash driver with a RAM-resident program/erase routine; SHA-256; the meta
+   bank ping-pong with CRC and generation.
 2. Bootloader boot path: bank selection, slot header validation, `VTOR` jump.
    No plans yet.
 3. `mkmanifest`, the blob store, and the planner, with a host-side simulator
@@ -1233,9 +1232,9 @@ layout**, chosen deliberately: one application partition, updated in place.
 
 | | A/B (Sections 2-8) | Single partition (`poc/`) |
 |---|---|---|
-| Application space | 2 x 52 KB | 104 KB |
-| Sectors in the manifest | 104, both slots | 104, the one partition |
-| Manifest body | 2088 B | 1876 B |
+| Application space | 2 x 52 KB | 102 KB |
+| Sectors in the manifest | 104, both slots | 102, the one partition |
+| Manifest body | 2088 B | 1636 B |
 | Rule 1, already correct | fires on every update | fires on every update |
 | Rule 2, local copy | finds sectors in the other slot | almost never fires |
 | Unroll | one page erase | not possible |
@@ -1272,13 +1271,13 @@ requests in its demo copy nothing. The content-addressed lookup of Section 5
 is cheap enough to keep, but it is A/B that makes it valuable, because the
 other slot holds a related release.
 
-Measured on the PoC, 104 KB partition, 45 772 B reference binary:
+Measured on the PoC, 102 KB partition, 45 772 B reference binary:
 
 ```
 case                       skip copy write     wire of full   saved B   saved      flash ms
 -------------------------- ---- ---- ----- -------- ------- --------- ------- -------------
-v2                           99    0     5     7984    6.7%    111870   93.3%       151-302
-v3                           89    0    15    19284   16.1%    100570   83.9%       454-907
+v2                           97    0     5     7752    6.6%    109610   93.4%       151-302
+v3                           87    0    15    19052   16.2%     98310   83.8%       454-907
 ```
 
 The ratios look better than Section 17's only because the image is twice as
