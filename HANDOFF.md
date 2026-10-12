@@ -33,15 +33,21 @@
   @75 ms; 5V0 1.5 V @100 ms. The G0 runs 60-70 ms past the cut: pre_trigger_us must be ~80 ms or more, `off`
   well over 100 ms (5V0 is slow; 2 s cut recovered cleanly).
 - LED on PB14 added (6f28f97), README wiring updated. Binaries rebuilt in bench/fw/out.
-- BLOCKED: Donguru dropped off USB when H8 switched the DUT on (suspected Q102 inrush browning out its hub).
-  Parent said hold the hardware; it resets Donguru via J-Link and tests a cut/restore cycle. If power-restore
-  drops the probe every time, the bench needs an inrush fix before any sweep.
+- M1 done (no cuts): page erase 22.060 / 22.067 / 22.074 ms (min/mean/max, 40 erases), firmware erase_us
+  22081. B129 now holds stock bootloader + image A + measure config (flashed by hand with probe-rs; config bytes
+  in the job tmp, the harness's `measure` writes the same now, plus image A and a blank STATE). Notes:
+  bench/results/measure-2026-10-12/NOTES.md. Reported to the parent.
+- HOLD on cuts: every power RESTORE through Q102 drops Donguru's USB hub (inrush into B129's caps). The user
+  decides the fix (series resistor in VBUS_SW and/or Donguru firmware re-inits the hub; session
+  donguru-hub-recover reflashes Donguru via the J-Link). Workaround: `probe-rs reset --probe 1366:0105 --chip
+  STM32G0B1CETx` re-enumerates Donguru. No cut, power cycle, snapshot or sweep before the user's go.
 
-## Next (this session, with the user at the bench)
-1. When the parent says the Donguru is back: `chunky-bench status`, then M1 (`just bench-measure`), M2
-   (`--pre-trigger-us 90000 --cut 0`, M2K capture), M3; numbers to `bench/results/measure-2026-10-12/NOTES.md`
-   and `tpm work say parent`. Default BOR, no option-byte changes.
-2. `chunky-bench snapshot`, then first sweeps: stock vs guarded, revert and mark_booted.
+## Next (this session, after the user's go on cuts)
+1. M2: `just bench-measure --pre-trigger-us 90000 --cut 0 --off 2s` with an M2K capture per cut (m2k scope +
+   logic are free-running: capture long enough around the cut); t_dead and its spread, idle and during an erase.
+2. M3: off time for a clean POR (5V0 is at 1.5 V after 100 ms), 3V3 rise.
+3. `chunky-bench snapshot`, single `run`s of each variant and path, then sweeps (repeats over fine steps).
+4. The harness power-cycles in `measure`, `snapshot` and every run: all of them need the inrush fix.
 
 ## Decisions
 - One-page STATE, everything in bank 1; images 32 KB with per-page filler; signing off (unsigned) on the bench.

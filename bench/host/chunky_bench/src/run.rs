@@ -2,10 +2,10 @@
 //! back, extra plain power cycles, classify.
 
 use crate::dut::{Dut, Readback, read_back, restore};
-use crate::fw::{Firmware, pages};
+use crate::fw::{Firmware, Target, pages};
 use crate::power::Power;
 use anyhow::{Context, Result};
-use bench_layout::{Config, Mode};
+use bench_layout::{ACTIVE, Config, Mode, STATE};
 use embassy_torn::classify::{Class, classify};
 use std::fmt;
 use std::str::FromStr;
@@ -333,7 +333,17 @@ pub fn measure_setup(
         ..Config::DEFAULT
     };
     dut.attach().context("attaching for measure mode")?;
-    let r = restore(dut, &fw.boot_and_config(variant, &config));
+    // Image A in ACTIVE and a blank STATE too: the bootloader must find something to boot on a fresh board.
+    let mut targets = fw.boot_and_config(variant, &config);
+    targets.push(Target {
+        region: STATE,
+        data: vec![0xFF; STATE.len as usize],
+    });
+    targets.push(Target {
+        region: ACTIVE,
+        data: fw.app_a.clone(),
+    });
+    let r = restore(dut, &targets);
     dut.detach();
     r
 }
