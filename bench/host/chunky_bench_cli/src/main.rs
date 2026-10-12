@@ -393,7 +393,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Status => {
-            let mut b = cli.bench.open(false, false)?;
+            // On reset wiring this also puts the glitcher's output into open-drain (it comes up push-pull).
+            let mut b = cli.bench.open(cli.bench.cut == CutArg::Reset, false)?;
             dry_note(&b);
             if b.dry {
                 // Something to look at: a provisioned DUT.
