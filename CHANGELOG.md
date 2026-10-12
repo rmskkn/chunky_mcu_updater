@@ -5,6 +5,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `bench/`: the hardware power-cut bench for embassy-boot's STATE erase on a B129A (STM32G0B1CE): wiring, run
+  order and measurement procedure in `bench/README.md`; `bench_layout`, the flash and RAM layout and the config
+  and report records the test firmware and the harness share. (HW-3, HW-4)
+
 ## [0.6.0] - 2026-10-11
 
 ### Added

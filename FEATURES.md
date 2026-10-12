@@ -54,7 +54,7 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 - ✅ **ECC-1 try-read-masked** — `EccError` on the flash error, `try_read`, and `Masked` (faulting units read as
   zero) for everything that reads flash a power cut may have torn.
 - 📋 **ECC-2 ecc-fault-handlers** — the real thing on hardware: G0 NMI and H7 BusFault handlers behind
-  `EccError`, and a power-cut test on a Nucleo.
+  `EccError`, and a power-cut test on a Nucleo. The G0 half comes with the power-cut bench (HW-3), on B129A.
 
 ## SEC — security
 
@@ -144,6 +144,15 @@ Design: [SECURITY.md](SECURITY.md).
   example app on a Nucleo H743ZI. To confirm there: option byte programming cut by power loss leaves the old or
   the new SWAP_BANK value and nothing else; zeros over a used flash word; timings. Then the parts that pick the
   bank another way (G4 and L4: BFB2 and the system bootloader).
+- 🚧 **HW-3 power-cut-bench-fw** — B129A (STM32G0B1CE) test firmware in `bench/fw`: bootloader `stock`
+  (embassy-boot 0.7.0 as it comes) and `guarded` (`chunky_swap::Guarded`, G0 ECC NMI reader), application images
+  A and B (filler so every page differs), PA6 high right before each STATE erase after `pre_trigger_us`, modes run
+  / measure / provision from a config record in flash, a report record in RAM. Layout and records:
+  `bench/bench_layout`; wiring, run order and the measurement procedure: `bench/README.md`. P2625#11oct-1213.
+- 🚧 **HW-4 power-cut-bench-harness** — `chunky-bench` in `bench/host`: fpga-glitch (Xyloni glitcher, push-pull
+  power cut on Donguru Q101) and probe-rs (Donguru CMSIS-DAP), restores the snapshot, cuts after a swept delay
+  from the PA6 trigger, reads back ACTIVE/DFU/STATE, report, IPSR and ECCR, classifies old/new/mixed/lost/brick
+  with embassy_torn's classifier, one CSV row per run; stock vs guarded on the revert and mark_booted paths.
 
 ## PY — Python
 
