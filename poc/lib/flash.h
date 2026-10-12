@@ -2,7 +2,6 @@
 #define CB_FLASH_H
 #include <stdint.h>
 #include <stddef.h>
-#include "md5.h"
 #include "sha256.h"
 
 /* Flash geometry, STM32F103CB as in DESIGN.md section 2 / 10.2 / 18.
@@ -20,10 +19,10 @@
 #define BL_PAGES      15
 #define ID_PAGE       15
 #define META0_PAGE    16
-#define META1_PAGE    20
-#define META_PAGES    4
-#define APP_PAGE      24
-#define APP_PAGES     104
+#define META1_PAGE    21
+#define META_PAGES    5
+#define APP_PAGE      26
+#define APP_PAGES     102
 
 #define SLOT_SIZE     (APP_PAGES * PAGE_SIZE)
 #define SECTORS_SLOT  APP_PAGES
@@ -36,14 +35,16 @@
  * the plan the bootloader reads back. */
 typedef uint16_t sector_idx_t;
 
-/* Per-sector hashes are MD5 truncated to 8 bytes. They answer one question --
- * does this sector already hold the bytes the target needs -- and they are not
- * a trust boundary: image_sha256 and the release signature gate the result, so
- * a collision costs a retried update rather than a corrupt device. At 64 bits
- * the chance of a false match is about 3e-16 for 104 sectors and 3e-14 for
- * 1000. Halving the hash halves the manifest and the stored plan, which is
- * where the bytes actually are. */
-#define SECTOR_HASH_LEN 8
+/* Per-sector hashes are the full, untruncated sha128 output (128 bits -
+ * sha128 is itself SHA-256 truncated once, at the algorithm's own output
+ * stage; sector_hash takes all of it, no second truncation on top). They
+ * answer one question -- does this sector already hold the bytes the
+ * target needs -- and they are not a trust boundary: image_sha256 and the
+ * release signature gate the result, so a collision costs a retried update
+ * rather than a corrupt device; at 128 bits the chance of one is negligible
+ * regardless. Reusing SHA-256 drops a second hash primitive from the
+ * bootloader image (DESIGN.md section 10). */
+#define SECTOR_HASH_LEN SHA128_LEN
 
 void sector_hash(const void *page, uint8_t out[SECTOR_HASH_LEN]);
 
@@ -96,7 +97,7 @@ typedef struct {
 /* Bank layout: meta_t first, then the progress journal in a page of its own.
  * The journal is advanced by clearing bits and must never be erased while a
  * plan is live, so it cannot share a page with anything. */
-#define META_PAGES_HDR  3                       /* pages meta_t may use */
+#define META_PAGES_HDR  4                       /* pages meta_t may use */
 #define JOURNAL_OFF     (META_PAGES_HDR * PAGE_SIZE)
 
 /* meta_t carries ~20 B per sector, so it grows with the partition. These two
@@ -142,8 +143,7 @@ typedef struct {
 #define F103_PROG_US_MIN   20.0
 #define F103_PROG_US_MAX   40.0
 #define F103_MHZ           72.0
-#define F103_MD5_CYC_B     10.0
-#define F103_SHA256_CYC_B  25.0
+#define F103_SHA256_CYC_B  25.0   /* also costs sha128: same compression function */
 
 /* worst = 0 uses the datasheet minimums, worst = 1 the maximums. */
 static inline double f103_flash_ms(long erases, size_t prog_bytes, int worst)
@@ -169,6 +169,9 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len);
 const uint8_t *flash_at(flash_t *f, size_t off);
 
 void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN]);
+
+/* Erase, then program, one sector of the application partition in place. */
+void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[PAGE_SIZE]);
 
 /* Meta bank ping-pong. Returns 0 if a valid bank was found. */
 int  meta_load(flash_t *f, meta_t *m);

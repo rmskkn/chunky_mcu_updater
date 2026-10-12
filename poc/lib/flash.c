@@ -92,11 +92,15 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
 
 const uint8_t *flash_at(flash_t *f, size_t off) { return f->map + off; }
 
+void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[PAGE_SIZE])
+{
+    flash_erase_page(f, APP_PAGE + index);
+    flash_program(f, (size_t)(APP_PAGE + index) * PAGE_SIZE, data, PAGE_SIZE);
+}
+
 void sector_hash(const void *page, uint8_t out[SECTOR_HASH_LEN])
 {
-    uint8_t full[MD5_LEN];
-    md5(page, PAGE_SIZE, full);
-    memcpy(out, full, SECTOR_HASH_LEN);
+    sha128(page, PAGE_SIZE, out);
 }
 
 void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN])

@@ -100,6 +100,13 @@ void sha256(const void *data, size_t len, uint8_t out[SHA256_LEN])
     sha256_final(&s, out);
 }
 
+void sha128(const void *data, size_t len, uint8_t out[SHA128_LEN])
+{
+    uint8_t full[SHA256_LEN];
+    sha256(data, len, full);
+    memcpy(out, full, SHA128_LEN);
+}
+
 void hmac_sha256(const uint8_t *key, size_t keylen,
                  const void *data, size_t len, uint8_t out[SHA256_LEN])
 {
