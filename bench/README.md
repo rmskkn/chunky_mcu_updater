@@ -26,7 +26,7 @@ tpm: P2625#11oct-1213.
 | M2K DIO0 | B129 PA6 (J1 pin 18), the capture trigger (rising) | |
 | M2K DIO1 | Q101 gate (glitcher H8, Xyloni J1-15) | |
 | M2K DIO2 | glitcher marker G8 (Xyloni J1-14) | |
-| Status LED | B129 PB14 (blue D14, high = on) | bootloader: on; image A: slow blink; image B: fast blink; measure: on during the erase |
+| Status LED | B129 PB14 (blue D14, high = on) | solid on whenever the board has power (bootloader and application, every mode) |
 
 Glitcher idle (`od_out` high) = DUT powered; low = cut. The cut is a fair power loss: Q102 opens and the
 DUT's own capacitance (>110 uF on +5V0) decays through the DUT; there is no crowbar to GND.

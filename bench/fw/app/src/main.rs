@@ -66,17 +66,6 @@ fn on_state(flash: &Shared, pin: &mut Output<'static>, config: &Config, op: Stat
     }
 }
 
-/// Half period of the status LED (PB14): image A blinks slowly, image B fast.
-const BLINK_MS: u32 = if IMAGE == IMAGE_B { 100 } else { 500 };
-
-/// Blinks the status LED for good; the harness halts the core and reads the report and IPSR.
-fn blink(led: &mut Output<'static>) -> ! {
-    loop {
-        led.toggle();
-        timer::delay_ms(BLINK_MS);
-    }
-}
-
 fn set_stage(stage: AppStage) {
     report::update(|r| r.app_stage = stage as u8);
 }
@@ -85,7 +74,9 @@ fn set_stage(stage: AppStage) {
 fn main() -> ! {
     let p = embassy_stm32::init(Default::default());
     let mut pin = Output::new(p.PA6, Level::Low, Speed::VeryHigh);
-    let mut led = Output::new(p.PB14, Level::Low, Speed::Low);
+    // Status LED (PB14): solid on whenever the board has power, in every mode.
+    let led = Output::new(p.PB14, Level::High, Speed::Low);
+    core::mem::forget(led);
     timer::start();
     report::update(|r| {
         r.app_image = IMAGE;
@@ -106,18 +97,15 @@ fn main() -> ! {
                     cortex_m::peripheral::SCB::sys_reset();
                 }
             }
-            blink(&mut led)
+            bench_fw_common::hang()
         }
         Mode::Measure => {
             let mut scratch = TriggerFlash::new(Region::new(&flash, SCRATCH), &mut pin, config.pre_trigger_us, false);
             loop {
                 let t0 = timer::now_us();
-                // LED on over the erase, switched outside the PA6 edges so it adds nothing between them.
-                led.set_high();
                 if scratch.erase(0, SCRATCH.len).is_err() {
                     set_stage(AppStage::Error);
                 }
-                led.set_low();
                 let period_us = config.period_ms.saturating_mul(1000);
                 let spent = timer::now_us().wrapping_sub(t0);
                 timer::delay_us(period_us.saturating_sub(spent));
@@ -128,7 +116,7 @@ fn main() -> ! {
             set_stage(if ok { AppStage::Running } else { AppStage::Error });
             // The harness is attached and dumps S0 from here.
             cortex_m::asm::bkpt();
-            blink(&mut led)
+            bench_fw_common::hang()
         }
     }
 }
