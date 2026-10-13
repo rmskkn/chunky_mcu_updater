@@ -49,14 +49,21 @@
   refinement keyed on STATE magic / boot state / STATE erases of the boot after the cut. Release binary rebuilt
   (bench/host/target/release/chunky-bench). All dry-run only.
 
+- 13 Oct: NRST wiring (H8 open-drain -> 100R -> B129 J1-6, B129 powered through the plug, Donguru 0.4.1
+  plug-vbus-on). reset-1 (stock, 206 runs): none bad; STATE flips untouched -> fully erased 50-100 us after the
+  erase starts (d 1.05 -> 1.10 ms at pre_trigger 1 ms) and reads erased for the rest of the erase.
+- Harness since: SWD reset-and-run before detaching on reset wiring, `--raw-state` (STATE as the cut left it,
+  needs --boot-delay-ms 3000). Release binary rebuilt. Dry-run tested only.
+
 ## Next
-1. WAIT: the parent prepares the bench for NRST (glitcher open-drain, Donguru with plug-vbus-on, H8 -> B129 J1-6
-   through 100R). No hardware runs until it says so. No more power-cut attempts for now.
-2. Then: `chunky-bench --cut reset status`; one control run per path (d well past the erase), then
-   `--cut reset sweep` stock, pre_trigger 1000 us, d 1 ms..23.5 ms step 250 us, fine 10-20 us (refinement now
-   finds the edges by itself), settle 9 s; then guarded. Report bad rows at once.
-3. Open: late upper edge of the power-cut window (d 29-31 ms); runs take ~57 s (Donguru SWD ~12 KB/s);
-   glitch git rev still 4e55b51 (fpga_tools main is 7972301, GLT-9/10).
+1. HOLD: session dap-512 flashes Donguru (FW-19, 512-byte DAP packets) and tests on this bench. No hardware
+   run until the parent says the bench is free. Then re-check once: `chunky-bench --cut reset status`, one
+   control run per path (restore works, cut fires).
+2. Fine sweep (approved): `--cut reset --width 100us sweep --name reset-2-fine --variants stock --from 1000us
+   --to 1100us --step 2us --fine 0us --repeats 2 --pre-trigger-us 1000 --boot-delay-ms 3000 --raw-state
+   --settle 8s --boots-after 1 --dumps all`. Report bad / partly erased / ECC rows at once. Then guarded (say
+   before starting).
+3. Open: late upper edge of the power-cut window; glitch git rev still 4e55b51.
 4. Before `tpm work ready`: `git rm HANDOFF.md`, `just lint`, `just test`.
 
 ## Decisions

@@ -231,7 +231,12 @@ Wiring (instead of the power switch): glitcher H8 (Xyloni J1-15) moves from Dong
 - Debug stays enabled in the core (only a power-on reset clears it); the DUT is never power-cycled in this mode.
 - `--pre-trigger-us` can be small (e.g. 1000): the reset acts at once, so `d` runs from `pre` to
   `pre + 22.1 ms`. Coarse first (250 us), then fine where the page changes.
-- The CSV has `cut` (`power`, `reset`) and `width_us` as its last two columns.
+- The CSV has `cut` (`power`, `reset`) and `width_us` after `error`.
+- `--raw-state` (with `--boot-delay-ms 3000`): as soon as the cut has fired, the harness attaches, halts the
+  bootloader inside its start delay, reads STATE and FLASH_ECCR as the cut left them, then restarts the DUT and
+  carries on as usual. CSV: `raw_state` (magic, progress, words written), `raw_unreadable`, `raw_eccr`,
+  `raw_early` (true: the bootloader had not reached `prepare_boot`, the page is as the cut left it); the page
+  itself in `raw-state.bin` of the run's dump. Works with the power cut too.
 
 ```sh
 chunky-bench --cut reset status

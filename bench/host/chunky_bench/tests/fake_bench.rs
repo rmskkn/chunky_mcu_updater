@@ -24,6 +24,7 @@ fn params(variant: Variant, path: Path, delay: Duration) -> RunParams {
         reset_after_ms: 100,
         settle: ms(4000),
         boots_after: 2,
+        raw_state: false,
     }
 }
 
@@ -261,7 +262,7 @@ fn reset_cut_runs_and_is_recorded() {
         };
         let row = record::row("t", &point, &r, "");
         assert_eq!(row.len(), HEADER.len());
-        assert_eq!(&row[HEADER.len() - 2..], ["reset", "100"]);
+        assert_eq!(&row[HEADER.len() - 6..HEADER.len() - 4], ["reset", "100"]);
         let err = record::error_row("t", &point, &p, &anyhow::anyhow!("x"));
         assert_eq!(err.len(), HEADER.len());
         assert_eq!(err[HEADER.iter().position(|h| *h == "error").unwrap()], "x");

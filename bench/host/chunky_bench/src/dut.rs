@@ -147,6 +147,28 @@ impl Readback {
     }
 }
 
+/// STATE as the cut left it: read while the bootloader of the boot after the cut still sits in its start delay.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawState {
+    pub state: Dump,
+    /// FLASH_ECCR after the harness read STATE (what a read of the torn page runs into), before clearing.
+    pub eccr: u32,
+    /// The bootloader had started but not yet reached `prepare_boot`: the page is untouched since the cut.
+    pub early: bool,
+}
+
+/// Halts the core and reads STATE and FLASH_ECCR (cleared afterwards). For the moment right after the cut.
+pub fn read_raw_state(dut: &mut dyn Dut) -> Result<RawState> {
+    dut.halt().context("halting the core for the raw STATE")?;
+    let mut report_raw = vec![0; REPORT.len as usize];
+    dut.read(REPORT.at, &mut report_raw).context("reading the report")?;
+    let early = Report::decode(&report_raw).is_some_and(|r| r.boot_state == bench_layout::BootState::None as u8);
+    clear_ecc(dut)?;
+    let state = read_tolerant(dut, STATE.at, STATE.len)?;
+    let eccr = clear_ecc(dut)?;
+    Ok(RawState { state, eccr, early })
+}
+
 /// Halts the core and reads the report, IPSR, FLASH_ECCR/SR, STATE, ACTIVE and DFU; clears ECCR at the end.
 /// ECCR is read before any flash so it shows what the firmware hit, not what the debugger hit.
 pub fn read_back(dut: &mut dyn Dut) -> Result<Readback> {

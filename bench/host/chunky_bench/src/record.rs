@@ -49,6 +49,10 @@ pub const HEADER: &[&str] = &[
     "error",
     "cut",
     "width_us",
+    "raw_state",
+    "raw_unreadable",
+    "raw_eccr",
+    "raw_early",
 ];
 
 /// What identifies a run in a sweep.
@@ -197,6 +201,15 @@ pub fn row(sweep: &str, point: &Point, rec: &RunRecord, dump: &str) -> Vec<Strin
         String::new(),
     ]);
     v.extend(cut_columns(&rec.params));
+    v.extend(match &rec.raw {
+        Some(r) => [
+            state::decode(&r.state.data, &r.state.unreadable).to_string(),
+            r.state.unreadable.len().to_string(),
+            format!("{:#010x}", r.eccr),
+            r.early.to_string(),
+        ],
+        None => Default::default(),
+    });
     v
 }
 
@@ -206,9 +219,13 @@ pub fn error_row(sweep: &str, point: &Point, p: &RunParams, err: &anyhow::Error)
     let mut v = base(sweep, point, p);
     v.push(String::new());
     v.push("error".into());
-    v.resize(HEADER.len() - 3, String::new());
+    v.resize(
+        HEADER.iter().position(|h| *h == "error").expect("error column"),
+        String::new(),
+    );
     v.push(format!("{err:#}").replace(['\n', '\r'], " "));
     v.extend(cut_columns(p));
+    v.resize(HEADER.len(), String::new());
     v
 }
 
@@ -306,6 +323,9 @@ pub fn write_dumps(dir: &FsPath, rec: &RunRecord, policy: Dumps) -> Result<bool>
         return Ok(false);
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    if let Some(r) = &rec.raw {
+        std::fs::write(dir.join("raw-state.bin"), &r.state.data)?;
+    }
     for (i, b) in rec.boots.iter().enumerate() {
         let rb = &b.readback;
         for (name, data) in [

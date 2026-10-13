@@ -1,7 +1,7 @@
 //! One run of the bench (bench/README.md "One run"): restore, detach, power-cycle and arm, let the cut land, read
 //! back, extra plain power cycles, classify.
 
-use crate::dut::{Dut, Readback, read_back, restore};
+use crate::dut::{Dut, RawState, Readback, read_back, read_raw_state, restore};
 use crate::fw::{Firmware, Target, pages};
 use crate::power::{Cut, Power};
 use anyhow::{Context, Result};
@@ -97,6 +97,9 @@ pub struct RunParams {
     pub settle: Duration,
     /// Plain power cycles after the cut, each read back.
     pub boots_after: u32,
+    /// Read STATE right after the cut, before the bootloader touches it (needs a `boot_delay_ms` of seconds:
+    /// the harness attaches and halts inside it, then restarts the DUT).
+    pub raw_state: bool,
 }
 
 impl RunParams {
@@ -203,6 +206,8 @@ pub struct RunRecord {
     pub restored: usize,
     /// The glitcher's armed cut fired.
     pub fired: bool,
+    /// STATE as the cut left it (`raw_state`), when the cut fired.
+    pub raw: Option<RawState>,
     /// The boot after the cut, then one per extra power cycle.
     pub boots: Vec<Boot>,
     pub outcome: Outcome,
@@ -238,6 +243,26 @@ pub fn run_once(power: &mut dyn Power, dut: &mut dyn Dut, fw: &Firmware, p: &Run
     power.arm_cut(p.delay, p.off)?;
     let mut boots = vec![];
     let mut fired = false;
+    let mut raw = None;
+    if p.raw_state {
+        // Wait for the cut itself, then catch the bootloader of the next boot in its start delay.
+        let mut waited = Duration::ZERO;
+        let tick = Duration::from_millis(20);
+        while !power.fired()? && waited < p.settle {
+            power.sleep(tick);
+            waited += tick;
+        }
+        if power.fired()? {
+            power.sleep(match p.cut {
+                Cut::Power => p.off,
+                Cut::Reset { width } => width,
+            });
+            dut.attach().context("attaching for the raw STATE")?;
+            let r = read_raw_state(dut).and_then(|r| dut.reset_run().map(|()| r));
+            dut.detach();
+            raw = Some(r.context("reading the raw STATE")?);
+        }
+    }
     for n in 0..=p.boots_after {
         if n > 0 {
             power.power_cycle(p.off)?;
@@ -258,6 +283,7 @@ pub fn run_once(power: &mut dyn Power, dut: &mut dyn Dut, fw: &Firmware, p: &Run
         params: p.clone(),
         restored,
         fired,
+        raw,
         boots,
         outcome,
     })

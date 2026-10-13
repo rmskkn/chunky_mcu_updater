@@ -160,6 +160,9 @@ struct RunArgs {
     /// Plain power cycles after the cut, each read back
     #[arg(long, default_value_t = 1)]
     boots_after: u32,
+    /// Also read STATE right after the cut, before the bootloader touches it (needs --boot-delay-ms >= 2000)
+    #[arg(long)]
+    raw_state: bool,
 }
 
 impl RunArgs {
@@ -175,6 +178,7 @@ impl RunArgs {
             reset_after_ms: self.reset_after_ms,
             settle: self.settle,
             boots_after: self.boots_after,
+            raw_state: self.raw_state,
         }
     }
 }
