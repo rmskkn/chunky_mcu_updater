@@ -123,3 +123,37 @@ Wiring: glitcher H8 open-drain through 100R on PF2-NRST, B129 powered through th
 - What is read is STATE after the next boot has acted on it, not the torn page itself.
 
 Next: d 1000-1100 us in 2 us steps with repeats, and a raw read of STATE before the bootloader touches it.
+
+## `reset-2-fine`: NRST 1000-1100 us after PA6, stock (13 Oct 2026)
+
+`chunky-bench --cut reset --width 100us --speed-khz 2000 sweep --name reset-2-fine --variants stock --from 1000us
+--to 1100us --step 2us --fine 0us --repeats 4 --pre-trigger-us 1000 --boot-delay-ms 3000 --raw-state --settle 8s`:
+408 runs in 3 h 33 min (the erase starts 1000 us after PA6).
+
+| d (us) | STATE right after the reset | runs | result |
+| --- | --- | --- | --- |
+| 1000-1060 | untouched | 248 | all fine (new / old), no ECC flag |
+| **1062** | partly erased, or still readable with ECC errors | 8 | **4 brick** (stock bootloader stuck in NMI), 4 fine |
+| 1064-1068 | erased, corrected single-bit errors (ECCC) on reading it | 24 | all fine |
+| 1070-1100 | erased | 128 | all fine (one more ECCC at 1068-1070) |
+
+The 8 runs at d = 1062 us (reset 62 us into the erase):
+
+| path | STATE magic after the reset | FLASH_ECCR | result |
+| --- | --- | --- | --- |
+| mark_booted | `fffffffffff7ffff`, 32 double words partly erased | ECCD at 0x08006000 (magic) | **brick:nmi** |
+| mark_booted | `fbffffdefcf6ffff` / `fafffffefcf2ffff` / `fafff7fefcf2ffff` (3 runs) | ECCC at 0x08006000 | boots, B confirms again |
+| revert | reads SWAP, all 64 progress words still written | ECCD at 0x08006008 (progress validity word) | **brick:nmi** (2 runs) |
+| revert | reads SWAP | ECCC at 0x08006008 | reverts again, fine |
+| revert | `f0eff1fefcf2f8f1` | ECCC at 0x08006000 on the debugger's read | **brick:nmi** |
+
+- A brick here: core in the NMI handler (IPSR 2), report says the bootloader never returned from
+  `prepare_boot`, the application never started. One more reset does not help (same STATE, report again
+  without a boot state). ACTIVE and DFU are whole in all four: nothing is lost but nothing boots. This is the
+  ECC case of `embassy_torn/REPORT.md`; no mixed or lost image was seen.
+- The window is narrow: untouched at 1060 us, erased at 1064 us, so the tear lives in about 2-4 us, 60-64 us
+  after the erase starts; 4 of the 8 runs in it brick the stock bootloader.
+- Bits go 0 -> 1 across the whole page at once (not word by word): every double word is partly erased in the
+  same run. Two reads of the same torn page differ in a few bits (marginal cells).
+- Harness gap: the extra boot after a brick was classified from flash content (`new`/`old`) although nothing
+  booted (IPSR 0 at the halt, no boot state in the report); the run's final outcome is right (`brick`).
