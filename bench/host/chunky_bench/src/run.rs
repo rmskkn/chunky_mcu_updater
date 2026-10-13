@@ -124,6 +124,9 @@ pub enum Brick {
     HardFault,
     /// No report: nothing ran far enough to write it.
     NoReport,
+    /// The report is there, but `prepare_boot` never returned (no boot state) although the core is in no fault
+    /// handler now: halted somewhere on the way, e.g. after a reset that left it stuck before.
+    Stuck,
 }
 
 /// One boot, classified.
@@ -152,6 +155,7 @@ impl fmt::Display for Outcome {
             Outcome::Brick(Brick::Nmi) => f.write_str("brick:nmi"),
             Outcome::Brick(Brick::HardFault) => f.write_str("brick:hardfault"),
             Outcome::Brick(Brick::NoReport) => f.write_str("brick:noreport"),
+            Outcome::Brick(Brick::Stuck) => f.write_str("brick:stuck"),
             Outcome::Flash(c) => c.fmt(f),
         }
     }
@@ -177,6 +181,12 @@ pub fn judge(fw: &Firmware, rb: Readback) -> Boot {
         2 => Outcome::Brick(Brick::Nmi),
         3 => Outcome::Brick(Brick::HardFault),
         _ if rb.report().is_none() => Outcome::Brick(Brick::NoReport),
+        _ if rb
+            .report()
+            .is_some_and(|r| r.boot_state == bench_layout::BootState::None as u8) =>
+        {
+            Outcome::Brick(Brick::Stuck)
+        }
         _ => Outcome::Flash(flash.clone()),
     };
     Boot {

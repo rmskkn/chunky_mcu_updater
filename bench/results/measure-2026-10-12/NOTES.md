@@ -199,3 +199,60 @@ What it says:
   erased, progress partly erased, all readable) did not occur, ECC faults first.
 - Power cut vs reset: with a power cut the same window exists (edge at d ~5.8-6.0 ms at pre_trigger 50 ms) but
   drifts by more than its width; 294 power-cut runs did not land in it.
+
+## `reset-3-guarded`: the same window on the guarded bootloader, 13 Oct 2026
+
+`... sweep --name reset-3-guarded --variants guarded --from 1054us --to 1070us --step 1us --fine 0us --repeats 8
+--pre-trigger-us 1000 --boot-delay-ms 3000 --raw-state --settle 8s --boots-after 1 --dumps all`: 272 runs in
+2 h 24 min. **0 brick, 0 mixed, 0 lost**: mark_booted 136 x `new`, revert 136 x `old`, the application running
+after the cut boot and after the extra reset in every run.
+
+Raw STATE right after the reset, 8 runs per delay and path (mark_booted / revert):
+
+| d | data | ECC at the raw read |
+| --- | --- | --- |
+| 1054-1060 us | untouched (magic already zeroed by `Guarded`) | none |
+| 1061 us | untouched | none 6/3, ECCC 2/4, ECCD 0/1 |
+| 1062 us | garbled (mark_booted: 2 still untouched) | ECCC 5/5, ECCD 3/3 |
+| 1063 us | erased or nearly (11-24 double words not all ones), some garbled | ECCC 6/4, ECCD 2/4 |
+| 1064 us | erased | ECCC 5/7, ECCD 3/1 |
+| 1065-1069 us | erased | ECCC (clean from 1069 on in some runs) |
+| 1070 us | erased | none (one ECCC) |
+
+- 17 runs started the next boot with an uncorrectable ECC error in STATE, the condition that bricked stock in
+  every case seen (4 of 4). The guarded bootloader came through all 17: the NMI reader caught the faults
+  (`r_ecc_faults` up to 49 in one boot, address 0x0800_6000 or 0x0800_6008: `ADDR_ECC * 8` is right) and
+  `Guarded` read the words as zero.
+- The tear window is ~3 us wide (1061-1063 us) with a tail of corrected single errors up to ~1069 us: about
+  8 us in all, 61 us after the erase starts. It was at the same place 4 hours apart (stock 1062 us).
+- Residue: on the revert path the guarded bootloader boots A and leaves the torn page as it is (magic e.g.
+  `da5f75debcb2fa7f`, still raising ECC flags on the next boot); it is erased at the next state write. Worth
+  deciding whether the bootloader should erase a STATE page it found torn.
+
+## Summary so far (B129A, STM32G0B1CE, one board)
+
+| cut | bootloader | runs | bad |
+| --- | --- | --- | --- |
+| power (stock-1, -2-coarse, -3-fine) | stock | 294 | 0 (no run known inside the window) |
+| NRST, whole erase, 250 us steps (reset-1) | stock | 206 | 0 |
+| NRST, 1000-1100 us, 2 us x 4 (reset-2-fine) | stock | 408 | 4 brick:nmi, all at 1062 us (4 of 8 there) |
+| NRST, 1054-1070 us, 1 us x 8 (reset-3-guarded) | guarded | 272 | 0 (17 runs with a double ECC error survived) |
+
+The claim of `embassy_torn/REPORT.md` holds on hardware in its ECC form: a reset (or power loss) in a few
+microseconds of the STATE erase leaves stock embassy-boot 0.7.0 stuck in the NMI handler for good; the mixed
+and lost images of the model's word and bit tears were not seen, because on this flash the page tears as a
+whole and ECC faults first. `chunky_swap::Guarded` with the G0 NMI reader survives every tear seen.
+
+## `reset-3-guarded`: NRST 1054-1070 us after PA6, guarded bootloader (13 Oct 2026)
+
+Same command with `--variants guarded --from 1054us --to 1070us --step 1us --repeats 8`: 272 runs in 2.5 h,
+**none bad** (mark_booted 136 new, revert 136 old; every boot ran an application).
+
+- Up to 1060 us STATE reads all zero with no ECC flag: `Guarded` has zeroed the magic and the erase has not
+  bitten yet. 1061-1063 us: partly erased, 1063-1070 us: erased. The window is the same as on stock.
+- The debugger's read of STATE right after the reset saw an uncorrectable error (ECCD) in 17 runs and a
+  corrected one (ECCC) in 115. In 13 runs the firmware's own NMI reader caught double errors (up to 49 in one
+  boot, at 0x08006000 and 0x08006008) and the boot went on: these are the runs that brick the stock bootloader.
+- On the revert path a torn page is left as it is (garbage magic reads as "boot", old image runs); it is only
+  erased again by the next `mark_updated`. Its marginal cells stay until then.
+- Harness: a boot whose report has no boot state now counts as `brick:stuck` (it was judged from flash content).

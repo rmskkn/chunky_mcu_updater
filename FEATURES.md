@@ -56,7 +56,8 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 - 🚧 **ECC-2 ecc-fault-handlers** — the real thing on hardware: G0 NMI and H7 BusFault handlers behind
   `EccError`, and a power-cut test on a Nucleo. G0 half written for the power-cut bench (HW-3, B129A):
   `bench_fw_common::ecc` (the NMI checks and clears FLASH_ECCR/ECCR2.ECCD, counts the fault and its address in the
-  report; a read that ran into it returns an error with `is_ecc`), not yet run on hardware. Then H7 BusFault, and
+  report; a read that ran into it returns an error with `is_ecc`). Run on hardware (HW-4, `reset-3-guarded`): it
+  caught up to 49 double errors in one boot and the bootloader carried on. Then H7 BusFault, and
   the reader as a library crate a real bootloader can use.
 
 ## SEC — security
@@ -147,20 +148,23 @@ Design: [SECURITY.md](SECURITY.md).
   example app on a Nucleo H743ZI. To confirm there: option byte programming cut by power loss leaves the old or
   the new SWAP_BANK value and nothing else; zeros over a used flash word; timings. Then the parts that pick the
   bank another way (G4 and L4: BFB2 and the system bootloader).
-- 🚧 **HW-3 power-cut-bench-fw** — B129A (STM32G0B1CE) test firmware in `bench/fw`: bootloader `stock`
+- ✅ **HW-3 power-cut-bench-fw** — B129A (STM32G0B1CE) test firmware in `bench/fw`: bootloader `stock`
   (embassy-boot 0.7.0 as it comes) and `guarded` (`chunky_swap::Guarded`, G0 ECC NMI reader), application images
   A and B (filler so every page differs), PA6 high right before each STATE erase after `pre_trigger_us`, modes run
   / measure / provision from a config record in flash, a report record in RAM. Layout and records:
   `bench/bench_layout`; wiring, run order and the measurement procedure: `bench/README.md`. P2625#11oct-1213.
-  Built (`just bench-fw`: four images and ELFs in `bench/fw/out`, sizes in `bench/README.md`); bring-up on the
-  bench is next (M0-M3 of the procedure).
-- 🚧 **HW-4 power-cut-bench-harness** — `chunky-bench` in `bench/host` (own workspace; library `chunky_bench`,
+  Built (`just bench-fw`: four images and ELFs in `bench/fw/out`, sizes in `bench/README.md`) and run on the
+  bench; status LED on PB14.
+- ✅ **HW-4 power-cut-bench-harness** — `chunky-bench` in `bench/host` (own workspace; library `chunky_bench`,
   thin CLI): the glitcher (`glitch` git dep, push-pull power cut on Donguru Q101) and probe-rs (Donguru CMSIS-DAP
   v2, no hidapi), restores S0 page-wise, cuts after a swept delay from the PA6 trigger, reads back
   ACTIVE/DFU/STATE, report, IPSR, ECCR and SR, classifies old/new/mixed/lost/brick with `embassy_torn::classify`;
   `snapshot`, `measure`, `run`, resumable `sweep` (coarse, then fine around outcome changes) into a CSV with raw
   dumps. Tested end to end on a simulated bench (real embassy-boot 0.7.0 on a G0 flash model, timed ECC tears).
-  Left: bring-up on the bench (with HW-3), decoding ECCR's address field.
+  `--cut reset`: the cut as an NRST pulse (open-drain) instead; `--raw-state`: STATE as the cut left it.
+  Results (B129A, `bench/results`, notes in `bench/results/measure-2026-10-12/NOTES.md`): power cuts, stock, 294
+  runs, none bad (the edge is < 100 us wide and drifts; never sampled inside). NRST, stock, 408 runs: 4 bricks,
+  all 62 us into the erase (4 of 8 runs there). NRST, guarded, 272 runs over the same window: none bad.
 
 ## PY — Python
 
@@ -173,6 +177,11 @@ Design: [SECURITY.md](SECURITY.md).
 
 ## Known gaps and findings
 
+- On hardware (HW-4, STM32G0B1, 13 Oct 2026): a reset 60-64 us into embassy-boot's STATE page erase leaves the
+  whole page partly erased with uncorrectable ECC errors; stock embassy-boot 0.7.0 then hangs in the NMI handler
+  on every boot (4 of 8 runs in that window; images intact, nothing boots). `Guarded` with the ECC NMI reader
+  booted a whole image in 272 of 272 runs over the same window. The mixed-image case of the model was not seen:
+  on this flash the page goes from intact to erased within a few us, all words together.
 - embassy-boot's state-page erase can leave "swap" standing after a power cut (found by the G0 sweep, guarded in
   `chunky_swap::Guarded`); reproduced on stock 0.7.0 and master with a minimal model, report ready (BOOT-5).
   Both `prepare_boot`'s revert and `set_magic` (mark_booted) erase that way. See SECURITY.md "Findings so far".
