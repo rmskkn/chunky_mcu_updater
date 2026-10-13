@@ -9,7 +9,8 @@ tpm: P2625#11oct-1213.
 - `fw/` — the B129A test firmware (own workspace, thumbv6m): bootloader `stock` and `guarded`, application
   images A and B, the PA6 trigger. (HW-3)
 - `host/` — the harness `chunky-bench` (own workspace): fpga-glitch + probe-rs, sweeps, CSV. (HW-4)
-- `results/` — CSV and raw dumps of the runs, the measurement notes.
+- `results/` — CSV of the runs and the measurement notes. The raw dumps (`results/<name>/dumps/`) are not in git:
+  those of the sweeps recorded here are on omarchy-m1 in `~/data/P2625-power-cut-bench/bench/results/`.
 
 ## Wiring
 
