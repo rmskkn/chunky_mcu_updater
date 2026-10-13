@@ -5,18 +5,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-13
+
 ### Added
 
 - Bench results on a B129A (`bench/results`): a reset 62 us into the STATE erase bricks stock embassy-boot
   0.7.0 (ECC double error, 4 of 8 runs); `chunky_swap::Guarded` with the G0 ECC NMI reader survives 272 of 272
   runs across that window. `chunky-bench --raw-state`; outcome `brick:stuck`. (HW-4, ECC-2, BOOT-5)
-
 - `chunky-bench --cut reset --width W`: the cut as an NRST pulse (glitcher output open-drain on PF2-NRST)
   instead of a power cut; every restart of a run is then a reset pulse. CSV columns `cut` and `width_us`. A
   delay below the glitcher's minimum (3 clock cycles) is raised to it instead of failing. (HW-4)
-
 - Bench firmware: status LED on PB14, solid on whenever the board has power; `bench/README.md` wiring for the glitcher pins H6/H8/G8 and the M2K channels. (HW-3)
-
 - `bench/`: the hardware power-cut bench for embassy-boot's STATE erase on a B129A (STM32G0B1CE): wiring, run
   order and measurement procedure in `bench/README.md`; `bench_layout`, the flash and RAM layout and the config
   and report records the test firmware and the harness share. (HW-3, HW-4)
