@@ -211,22 +211,17 @@ pub struct RunRecord {
 /// Core debug register DEMCR: its vector catch bits halt the core after a reset.
 pub const DEMCR: u32 = 0xE000_EDFC;
 
-/// Debug halting control: `DBGKEY | C_DEBUGEN` with C_HALT clear lets a halted core run.
-pub const DHCSR: u32 = 0xE000_EDF0;
-const DHCSR_RUN: u32 = 0xA05F_0001;
-
-/// Before detaching on reset wiring: no reset vector catch left from flashing and the core not halted (the
-/// read-back of the run before halts it, and an NRST pulse does not make a halted core run: seen on the bench),
-/// so the NRST pulse that follows starts the DUT from its reset vector. A power cycle clears the debug logic by
-/// itself, so nothing is written then.
+/// Before detaching on reset wiring: no reset vector catch left, and the core reset over SWD and running. The
+/// read-back of the run before leaves it halted and flashing leaves it in the loader's context; an NRST pulse
+/// alone did not start it from there (seen on the bench). The NRST pulse that follows restarts it once more. A
+/// power cycle clears the debug logic by itself, so nothing is done then.
 pub fn release(dut: &mut dyn Dut, cut: Cut) -> Result<()> {
     match cut {
         Cut::Power => Ok(()),
         Cut::Reset { .. } => {
             dut.write_u32(DEMCR, 0)
                 .context("clearing DEMCR before the reset start")?;
-            dut.write_u32(DHCSR, DHCSR_RUN)
-                .context("resuming the core before the reset start")
+            dut.reset_run().context("resetting the core before the reset start")
         }
     }
 }

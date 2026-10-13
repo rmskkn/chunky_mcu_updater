@@ -190,6 +190,10 @@ impl<D: Dut> Dut for Flaky<D> {
     fn program_pages(&mut self, pages: &[(u32, Vec<u8>)]) -> Result<()> {
         self.inner.program_pages(pages)
     }
+    fn reset_run(&mut self) -> Result<()> {
+        self.inner.reset_run()
+    }
+
     fn halt(&mut self) -> Result<u32> {
         self.inner.halt()
     }

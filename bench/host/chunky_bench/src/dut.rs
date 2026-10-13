@@ -34,6 +34,8 @@ pub trait Dut {
     fn program_pages(&mut self, pages: &[(u32, Vec<u8>)]) -> Result<()>;
     /// Halts the core and returns its xPSR.
     fn halt(&mut self) -> Result<u32>;
+    /// Resets the core over SWD and lets it run (reset wiring: a halted core does not start on an NRST pulse).
+    fn reset_run(&mut self) -> Result<()>;
 }
 
 /// A region read back, with the double words the bus refused (filled with [`UNREADABLE`]).

@@ -104,6 +104,10 @@ impl Dut for ProbeDut {
         Ok(())
     }
 
+    fn reset_run(&mut self) -> Result<()> {
+        Ok(self.session()?.core(0)?.reset()?)
+    }
+
     fn halt(&mut self) -> Result<u32> {
         let mut core = self.session()?.core(0)?;
         core.halt(Duration::from_millis(100))?;

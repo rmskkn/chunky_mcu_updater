@@ -711,7 +711,7 @@ impl Dut for FakeDut {
                 Ok(())
             }
             // Vector catch: the model's core always runs after a reset.
-            crate::run::DEMCR | crate::run::DHCSR => Ok(()),
+            crate::run::DEMCR => Ok(()),
             _ => bail!("fake DUT: no register at {addr:#010x}"),
         }
     }
@@ -728,6 +728,10 @@ impl Dut for FakeDut {
             c.erase_page(off);
             c.mem[off..off + data.len()].copy_from_slice(data);
         }
+        Ok(())
+    }
+
+    fn reset_run(&mut self) -> Result<()> {
         Ok(())
     }
 
