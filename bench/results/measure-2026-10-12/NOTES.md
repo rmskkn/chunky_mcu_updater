@@ -157,3 +157,45 @@ The 8 runs at d = 1062 us (reset 62 us into the erase):
   same run. Two reads of the same torn page differ in a few bits (marginal cells).
 - Harness gap: the extra boot after a brick was classified from flash content (`new`/`old`) although nothing
   booted (IPSR 0 at the halt, no boot state in the report); the run's final outcome is right (`brick`).
+
+## `reset-2-fine`: NRST into the erase, stock, 13 Oct 2026: first torn results
+
+NRST wiring (bench/README.md "Reset instead of a power cut"), SWD at 2000 kHz (Donguru FW-20).
+`chunky-bench --cut reset --width 100us --speed-khz 2000 sweep --name reset-2-fine --variants stock --from 1000us
+--to 1100us --step 2us --fine 0us --repeats 4 --pre-trigger-us 1000 --boot-delay-ms 3000 --raw-state --settle 8s
+--boots-after 1 --dumps all`: 408 runs in 3 h 34 min, ~31 s per run. `raw_state` is STATE read inside the
+bootloader's start delay after the reset, before any code touches it.
+
+| d after PA6 (erase starts at 1000 us) | raw STATE | ECC flag at the raw read | stock outcome |
+| --- | --- | --- | --- |
+| 1000-1060 us (31 points x 4 x 2 paths) | untouched | none | new / old, all |
+| **1062 us** | partly erased, or still reading as before but faulting | ECCD (double) or ECCC (single) | **4 of 8 brick:nmi** |
+| 1064-1068 us | reads erased (revert at 1064: 1-5 double words not yet all ones) | ECCC, most runs | new / old, all |
+| 1070-1100 us | erased | none | new / old, all |
+
+The 8 runs at d = 1062 us:
+
+- mark_booted r0: every double word partly erased (magic `fffffffffff7ffff`), ECCR `0x80000c00` (ECCD, address
+  0x0800_6000 = the magic word): **brick:nmi**, still stuck after the extra reset.
+- mark_booted r1-r3: magic garbled (`fbffffdefcf6ffff`, `fafffffefcf2ffff`, `fafff7fefcf2ffff`), ECCC only:
+  read as "boot", B confirms again, `new`.
+- revert r0, r1: STATE still reads `swap`, all 64 progress words written, but ECCR `0x80000c01` (ECCD at
+  0x0800_6008, the progress validity word): **brick:nmi**.
+- revert r2: the same picture with ECCC only: reverted again, `old`.
+- revert r3: magic `f0eff1fefcf2f8f1`, ECCC at the raw read, ECCD once the bootloader ran: **brick:nmi**.
+
+What it says:
+
+- A torn erase on this G0 is the `Bits` kind of the model, on the whole page at once: every double word drifts
+  towards ones together; no word-wise tear was seen. The cells are marginal (reads of the same page differ in a
+  few bits), and ECC reports it before the data looks wrong: at 1062 us on the revert path the data still read
+  as the old content in 3 of 4 runs, with a double error on one word.
+- The window is narrow: one 2 us step (1062 us) is torn, the next three still raise corrected single errors,
+  from 1070 us the page is clean. About 62 us after the erase command the cells flip within a few us; the
+  remaining ~22 ms of the erase change nothing a normal read can see.
+- Stock embassy-boot on G0: the failure is the **ECC brick** (the report's "ECC variant"): the first read of
+  STATE takes the NMI and the default handler never returns; a reset does not help, only reflashing STATE.
+  4 of 8 runs in the window. No mixed or lost image in 408 runs: the tear that needs (magic kept, validity
+  erased, progress partly erased, all readable) did not occur, ECC faults first.
+- Power cut vs reset: with a power cut the same window exists (edge at d ~5.8-6.0 ms at pre_trigger 50 ms) but
+  drifts by more than its width; 294 power-cut runs did not land in it.

@@ -1,0 +1,1 @@
+time,sweep,variant,path,d_ns,repeat,pre_trigger_us,off_us,settle_ms,boots_after,fired,final,outcome,boots,flash,ipsr,eccr,eccr_read,sr,progerr,state_magic,state_progress,state_written,unreadable,r_variant,r_boot_state,r_app_image,r_app_stage,r_ecc_faults,r_ecc_last_addr,r_erase_us,r_state_erases,restored,dump,error,cut,width_us,raw_state,raw_unreadable,raw_eccr,raw_early
