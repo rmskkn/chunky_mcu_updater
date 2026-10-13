@@ -100,3 +100,26 @@ the glitcher's minimum. The late upper edge (erase hit up to d = 31 ms, 3 ms pas
 What this means: 294 stock runs so far, none bad, but only about a dozen of them were within 100 us of the edge
 and none is known to have landed inside it. To hit it: locate and sample in one go (refine on what STATE and
 the report say, not on the outcome, which is `new`/`old` on both sides of the edge), and repeat that often.
+
+## NRST instead of the power cut: `reset-1` (stock, 13 Oct 2026)
+
+Wiring: glitcher H8 open-drain through 100R on PF2-NRST, B129 powered through the plug. `chunky-bench --cut reset
+--width 100us sweep --name reset-1 --variants stock --from 500us --to 24ms --step 250us --fine 50us
+--pre-trigger-us 1000 --settle 4s --boots-after 1`: 206 runs (190 coarse, 16 refined), none failed.
+
+| d after PA6 (erase runs 1.00-23.08 ms) | mark_booted (103) | revert (103) |
+| --- | --- | --- |
+| 0.50-1.05 ms | new; STATE untouched, next boot redoes it | old; STATE untouched, reverted again |
+| 1.10-23.15 ms | new; no SWAP magic left, B confirms again | old; STATE reads fully erased |
+| 23.20-24.00 ms | new; `mark_booted` had finished | old; REVERT magic written |
+
+0 mixed, 0 lost, 0 brick, FLASH_ECCR 0, no unreadable double word, no PROGERR, in all 206.
+
+- A reset anywhere from 0.1 ms after the erase starts to its end leaves a page that reads fully erased. The page
+  goes from untouched to erased between 50 and 100 us after the erase starts; the remaining ~22 ms change nothing
+  a normal read can see.
+- So the window in which this flash can show the tears the model needs (magic kept, some words erased) is at
+  most ~50 us wide, right at the start of the erase. The power-cut sweeps fit that picture (one sharp edge).
+- What is read is STATE after the next boot has acted on it, not the torn page itself.
+
+Next: d 1000-1100 us in 2 us steps with repeats, and a raw read of STATE before the bootloader touches it.
