@@ -109,7 +109,7 @@ exchange, and what the PoC deliberately leaves out.
 
 ## For Review/ TODO
 1. In-place single-partition updates;
-2. Compression or binary diffing;
+2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: `DESIGN.md` 17.2);
 3. Multi-generation rollback or over-the-air updates of the bootloader itself;
 4. Reasoning for each is in `DESIGN.md`.
 

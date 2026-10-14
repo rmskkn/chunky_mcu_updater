@@ -25,8 +25,8 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 ### Non-goals
 
 * No in-place single-partition update. The A/B layout is what makes unroll cheap.
-* No compression or binary-diff inside a sector. The delta unit is one flash
-  page. (Section 11 explains why.)
+* No binary diff inside a sector. A sector is sent whole, optionally LZ4
+  compressed against its old content (Section 17.2).
 * No multi-generation rollback. Exactly one previous image is recoverable.
 * No bootloader networking. The bootloader has no transport stack at all.
 * No OTA of the bootloader itself in v1.
@@ -48,9 +48,32 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 | Slot A       | 24–75   | `0x08006000`–`0x08012FFF` | 52 KB | Application image |
 | Slot B       | 76–127  | `0x08013000`–`0x0801FFFF` | 52 KB | Application image |
 
-`SECTOR_SIZE` equals the flash page size and is a build-time constant: 1 KB on
-medium-density F103, 2 KB on high-density parts. Slot size is 52 sectors.
-Sector indices are **slot-relative** (0–51) and always travel with a slot id.
+The **erase unit** (`ERASE_SIZE`) is what the part can erase: 1 KB on
+medium-density F103, 2 KB on high-density parts. The **sector** (`SECTOR_SIZE`)
+is the delta unit: what the manifest hashes, the planner diffs, the wire
+carries and the compressor sees. Both are build-time constants, powers of two,
+and a sector is a whole number of erase units. A smaller one would need
+read-modify-write of its neighbours in the same unit and would break the
+per-sector journal's atomicity. They default to equal; a larger sector
+compresses better (Section 17.2) and shrinks the manifest and plan, at the cost
+of a coarser diff. `SECTOR_SIZE` is capped at 32 KB (`STEP_WRITE` offsets are
+16 bits), and a geometry mismatch is rejected at `HELLO`.
+
+The layout is derived from the two sizes, in erase units, and only the
+application is rounded up to a sector boundary:
+
+```
+BL_UNITS       = ceil(15 KB / ERASE_SIZE)
+ID_UNIT        = BL_UNITS
+META_HDR_UNITS = ceil(4 KB / ERASE_SIZE)     meta_t area
+META_UNITS     = META_HDR_UNITS + 1          + the journal's own unit
+META0_UNIT     = ID_UNIT + 1,  META1_UNIT = META0_UNIT + META_UNITS
+APP_BASE       = round_up((META1_UNIT + META_UNITS) * ERASE_SIZE, SECTOR_SIZE)
+```
+
+At 1 KB / 1 KB this is the single-partition layout of Section 18 byte for byte.
+The A/B tables in this section show the same scheme with two slots.
+Sector indices are **slot-relative** and always travel with a slot id.
 
 The bootloader is never erased by the update path. It is the only code that can
 modify the meta banks or the inactive slot during apply.
@@ -263,9 +286,9 @@ TCP, MQTT payloads):
 | 0xA5 0x5A | len:u16 | type:u8 | seq:u8 | payload | crc32:u32 |
 ```
 
-Payload is capped at 256 B so a 1 KB sector blob arrives as four fragments.
-That keeps the client's RAM need to one sector buffer (1 KB) plus one frame
-buffer (~300 B).
+Payload is capped at 256 B so a sector blob arrives as `SECTOR_SIZE / 256`
+fragments at most. That keeps the client's RAM need to a sector buffer, an
+encoded-sector buffer and one frame buffer (~300 B).
 
 | Direction | Message | Payload |
 |-----------|---------|---------|
@@ -275,13 +298,18 @@ buffer (~300 B).
 | → device | `MANIFEST_REJECT` | reason (`BAD_SIGNATURE`, `BAD_NONCE`, `UNKNOWN_DEVICE`, `GEOMETRY_MISMATCH`, `MALFORMED`) |
 | → device | `PLAN_BEGIN` | target version, destination slot, step count, target SHA-256, signature |
 | → device | `STEP_COPY` | `dst`, `src_slot`, `src_index`, expected hash |
-| → device | `STEP_WRITE` | `dst`, `offset`, `len`, bytes, expected hash of the full sector |
-| → server | `STEP_ACK` / `STEP_NAK` | `dst`, reason (`HASH_MISMATCH`, `FLASH_FAIL`, `BAD_INDEX`) |
+| → device | `STEP_WRITE` | `dst`, `offset`, `len`, bytes of the *encoded* sector (offset and len index the encoded stream) |
+| → device | `STEP_WRITE_END` | `dst`, `compress` (u8 id: 0 raw, 1 LZ4, 2 LZ4 with the old sector as dictionary), `enc_len` (u16), hash of the *decoded* sector |
+| → server | `STEP_ACK` / `STEP_NAK` | `dst`, reason (`HASH_MISMATCH`, `FLASH_FAIL`, `BAD_INDEX`, `DECOMPRESS`) |
 | → device | `PLAN_END` | — |
 | → server | `PLAN_READY` | journal digest, count of steps still pending |
 | → device | `COMMIT` | arm the reboot |
 | → server | `STATUS` | plan state, booted version, trial result |
 | → device | `ABORT` | drop the plan and unroll |
+
+There is no `STEP_FILL`: LZ4 encodes a uniform sector in about 14 B, so a
+separate message for it saved nothing. A `NAK(DECOMPRESS)` is logged and the
+plan fails at the boot-time verify like any other NAK; the next session retries.
 
 Every session is protected as described in Section 10.3, and every manifest is
 signed by the device and verified by the server before a plan is generated
@@ -1217,9 +1245,35 @@ out structurally, not size-wise: it is real deflate, so a standard
 with no custom encoder — but it costs roughly 2x the code of the LZ4-class
 decoders for the same ratio class.
 
-No compressor is wired into the protocol yet; this table is a decision input
-for whether Section 6's `WRITE_CHUNK` payload should ever carry compressed
-bytes, not a committed design.
+**What shipped.** LZ4, because its decoder needs no RAM and a few hundred
+bytes. Each written sector travels as `STEP_WRITE` fragments of an encoded
+stream plus a `compress` byte in `STEP_WRITE_END`: 0 raw, 1 LZ4, 2 LZ4 with
+the destination's old content as dictionary. The server compresses at LZ4-HC
+maximum level and keeps the smallest of the three; raw wins unless a
+compressed form is strictly smaller.
+
+The dictionary is the device's *current* content of the destination sector.
+It stays in flash until that sector's own erase, so the decoder reads it in
+place (no RAM), and the server knows exactly what it is from the manifest
+hash, via a content-addressed sector store of every sector it has served. A
+release that shifts code by a few bytes leaves each sector a displaced copy of
+its old self, so the old sector is the best possible dictionary. Measured on
+`klipper.bin` (45 772 B), compressed size as a share of the raw sector:
+
+| sector | LZ4-HC alone | LZ4-HC, old same-index sector as dictionary (4 B code shift) |
+|---|---|---|
+| 1 KB | 86.8 % | 1.7 % |
+| 2 KB | 82.5 % | 1.0 % |
+| 4 KB | 77.8 % | 0.7 % |
+
+The first session after factory install has no stored history and sends plain
+LZ4. The device must decode with the bounds-checked variants only
+(`LZ4_decompress_safe`, `_usingDict`): the stream is decoded before its hash is
+checked. The device ships the decoder alone; the compressor and its match
+finder stay on the server. The PoC's compressors sit behind a small API
+(`lib/compress.h`: a wire id plus compress and decompress functions), so
+another library can be registered under a free id; the host build links
+system `liblz4`.
 
 ---
 
