@@ -12,9 +12,14 @@ sectors and wrapped in an image descriptor.
 ## Run it
 
 ```sh
-make
+make                                  # needs liblz4
+make ERASE_SIZE=2048 SECTOR_SIZE=4096 # other geometry, rebuilds everything
 scripts/run_demo.sh
 ```
+
+`cb-flash geometry` prints the build's geometry as a shell-sourceable line.
+`tests/run_matrix.sh` runs the whole suite at four ERASE:SECTOR geometries;
+`make test-compress` runs the compression API and LZ4 tests under ASan/UBSan.
 
 Or drive it by hand. There is no setup step: the device is created on first use
 with the reference binary in its one partition, so its first manifest
@@ -121,13 +126,13 @@ the progress record, so the next request re-diffs and sends only the gap.
     |<-- PLAN_BEGIN  version, steps, sha256 + MAC ----------------|
     |                                                             |
     |   every step streamed with no per-step wait:                |
-    |<-- STEP_WRITE  dst, offset, 256 B   (x4 per sector) --------|
-    |<-- STEP_WRITE_END  dst, hash -------------------------------|
+    |<-- STEP_WRITE  dst, offset, <=256 B of the encoded sector --|
+    |<-- STEP_WRITE_END  dst, compress id, enc_len, hash ---------|
     |<-- STEP_COPY  dst, src index, hash -------------------------|
     |   ... (one of the two, once per step, until the plan ends)  |
     |<-- PLAN_END ------------------------------------------------|
     |                                                             |
-    |   per STEP_WRITE_END: check hash against the buffer, then   |
+    |   per STEP_WRITE_END: decompress, check the hash, then      |
     |   hand the sector to a flash-write worker and start filling |
     |   the other buffer with the next STEP_WRITE - so one        |
     |   sector's erase/program overlaps the next one's transfer;  |
@@ -197,7 +202,7 @@ stable link order are what keep a one-line fix from costing a full transfer.
 |---|---|
 | `cb-server --image FILE` | serves one release; re-reads the file each request |
 | `cb-client --flash FILE --initial FILE` | the device: one request, start to finish |
-| `cb-flash` | `manifest`, `find` (which sector holds a hash), `map`, `mutate` (build a test release) |
+| `cb-flash` | `manifest`, `find` (which sector holds a hash), `map`, `geometry`, `mutate` (build a test release) |
 
 | Source | Covers |
 |---|---|
@@ -205,19 +210,27 @@ stable link order are what keep a one-line fix from costing a full transfer.
 | `manifest.c` | Canonical manifest body, digest, MAC, structural checks |
 | `plan.c` | The three planner rules of `DESIGN.md` section 5 |
 | `image.c` | Image descriptor at partition offset `0x200`, `image_sha256` with the descriptor hole, installing an image |
+| `compress.c`, `lz4.c` | Compressor registry and the LZ4 compressors. Sectors go out raw, LZ4, or LZ4 with the old sector as dictionary, whichever is smallest |
 | `frame.c` | `A5 5A \| len \| type \| seq \| payload \| crc32` framing and the byte counters |
 | `client.c` | The request, then the bootloader: apply, verify, trial boot, confirm |
 
-The flash map is `cb-flash map`, and it is the layout from `DESIGN.md`
-section 2 with the identity page from 10.2:
+The flash map is `cb-flash map`, in erase units, and it is the layout from
+`DESIGN.md` section 2 with the identity unit from 10.2 (this is the default
+1 KB / 1 KB geometry):
 
 ```
-bootloader          0-14     0x00000     15360
-device identity    15        0x03c00      1024
-meta bank 0        16-19     0x04000      4096
-meta bank 1        20-23     0x05000      4096
-application        24-127    0x06000    106496
+bootloader        0-14       0x00000      15360
+device identity   15         0x03c00       1024
+meta bank 0       16-20      0x04000       5120
+meta bank 1       21-25      0x05400       5120
+application       26-127     0x06800     104448
 ```
+
+The server keeps a sector store next to its manifest cache,
+`<cache>/sectors/<hash>`, one file per sector it has served. A stored sector
+is the dictionary for the same sector's next version, which is why a code
+shift costs about 1 % of the raw bytes. Entries are re-hashed on read, so a
+damaged file is just a miss.
 
 ## What this PoC does not do
 
