@@ -6,9 +6,9 @@ source "$(dirname "$0")/common.sh"
 need_build
 test_init noop_rerun
 
-gen_random_bin "$BASE" 40000 105
+gen_random_bin "$BASE" $((PAYLOAD_MAX * 4 / 10)) 105
 cp "$BASE" "$IMAGE"
-patch_sector "$IMAGE" 15 0xFF   # a real difference, so the first run actually updates
+patch_sector "$IMAGE" $((SECTORS * 15 / 100)) 0xFF   # a real difference, so the first run actually updates
 
 trap server_stop EXIT
 server_start

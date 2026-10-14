@@ -1,6 +1,7 @@
 /* cb-flash: inspect the emulated flash, and build test releases. */
 #include "flash.h"
 #include "manifest.h"
+#include "image.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,7 @@ static int usage(void)
         "usage:\n"
         "  cb-flash manifest FLASH             per-sector hashes and the digest\n"
         "  cb-flash map FLASH                  the flash layout\n"
+        "  cb-flash geometry                   this build's geometry, shell-sourceable\n"
         "  cb-flash mutate IN OUT RUNS SEED    a new release: RUNS patched runs\n"
         "  cb-flash find FLASH HASH            which sectors hold this hash\n");
     return 2;
@@ -69,7 +71,7 @@ static int cmd_find(const char *path, const char *hex)
         if (!memcmp(man.h[i], want, n)) {
             hexdump_line(man.h[i], SECTOR_HASH_LEN, buf);
             printf("sector %3d  %s  at 0x%05zx\n", i, buf,
-                   APP_BASE + (size_t)i * PAGE_SIZE);
+                   APP_BASE + (size_t)i * SECTOR_SIZE);
             hits++;
         }
     printf("%d of %d sectors match %s%s\n", hits, SECTORS_SLOT, hex,
@@ -78,24 +80,35 @@ static int cmd_find(const char *path, const char *hex)
     return hits ? 0 : 1;
 }
 
+/* Regions in erase units, with the byte address and size next to them. */
+static void map_row(const char *name, int unit, int units)
+{
+    char r[16];
+    if (units > 1) snprintf(r, sizeof r, "%d-%d", unit, unit + units - 1);
+    else           snprintf(r, sizeof r, "%d", unit);
+    printf("%-17s %-10s 0x%05x     %6d\n", name, r, unit * ERASE_SIZE, units * ERASE_SIZE);
+}
+
 static int cmd_map(const char *path)
 {
     flash_t f;
     if (flash_open(&f, path) < 0) die("cannot open %s", path);
-    printf("region            pages      bytes       size\n");
-    printf("bootloader        %3d-%-3d    0x%05x     %5d\n",
-           BL_PAGE, BL_PAGE + BL_PAGES - 1, 0, BL_PAGES * PAGE_SIZE);
-    printf("device identity   %3d        0x%05x     %5d\n",
-           ID_PAGE, ID_PAGE * PAGE_SIZE, PAGE_SIZE);
-    printf("meta bank 0       %3d-%-3d    0x%05x     %5d\n",
-           META0_PAGE, META0_PAGE + META_PAGES - 1, META0_PAGE * PAGE_SIZE,
-           META_PAGES * PAGE_SIZE);
-    printf("meta bank 1       %3d-%-3d    0x%05x     %5d\n",
-           META1_PAGE, META1_PAGE + META_PAGES - 1, META1_PAGE * PAGE_SIZE,
-           META_PAGES * PAGE_SIZE);
-    printf("application       %3d-%-3d    0x%05x     %5d\n",
-           APP_PAGE, APP_PAGE + APP_PAGES - 1, APP_PAGE * PAGE_SIZE, SLOT_SIZE);
+    printf("erase unit %d B, sector %d B\n", ERASE_SIZE, SECTOR_SIZE);
+    printf("region            units      bytes       size\n");
+    map_row("bootloader", 0, BL_UNITS);
+    map_row("device identity", ID_UNIT, 1);
+    map_row("meta bank 0", META0_UNIT, META_UNITS);
+    map_row("meta bank 1", META1_UNIT, META_UNITS);
+    map_row("application", (int)(APP_BASE / ERASE_SIZE), (int)(SLOT_SIZE / ERASE_SIZE));
     flash_close(&f);
+    return 0;
+}
+
+/* One line the test scripts eval, so their sizes follow the build. */
+static int cmd_geometry(void)
+{
+    printf("ERASE_SIZE=%d SECTOR_SIZE=%d SECTORS=%d SLOT_SIZE=%d PAYLOAD_MAX=%d DESC_LEN=%d\n",
+           ERASE_SIZE, SECTOR_SIZE, SECTORS_SLOT, SLOT_SIZE, IMG_MAX_PAYLOAD, DESC_LEN);
     return 0;
 }
 
@@ -123,6 +136,7 @@ int main(int argc, char **argv)
     const char *c = argv[1];
     if (!strcmp(c, "manifest") && argc == 3) return cmd_manifest(argv[2]);
     if (!strcmp(c, "map") && argc == 3)      return cmd_map(argv[2]);
+    if (!strcmp(c, "geometry") && argc == 2) return cmd_geometry();
     if (!strcmp(c, "find") && argc == 4)     return cmd_find(argv[2], argv[3]);
     if (!strcmp(c, "mutate") && argc == 6)
         return cmd_mutate(argv[2], argv[3], atoi(argv[4]), (unsigned)atoi(argv[5]));

@@ -12,26 +12,52 @@
  * device without a bootable image and the bootloader asks for another one.
  * That also means the running image cannot do the writing -- it would be
  * overwriting itself -- so the update belongs to the bootloader. */
-#define PAGE_SIZE     1024
-#define PAGE_COUNT    128
-#define FLASH_SIZE    (PAGE_SIZE * PAGE_COUNT)
+/* Erase unit: what the part can erase. Sector: the delta unit (hashed,
+ * diffed, sent, compressed). Both are build-time choices. */
+#ifndef CB_ERASE_SIZE
+#define CB_ERASE_SIZE  1024           /* minimum erasable unit of the part */
+#endif
+#ifndef CB_SECTOR_SIZE
+#define CB_SECTOR_SIZE CB_ERASE_SIZE  /* delta unit */
+#endif
+#define ERASE_SIZE   CB_ERASE_SIZE
+#define SECTOR_SIZE  CB_SECTOR_SIZE
+#define FLASH_SIZE   (128 * 1024)     /* STM32F103CB, fixed */
 
-#define BL_PAGE       0
-#define BL_PAGES      15
-#define ID_PAGE       15
-#define META0_PAGE    16
-#define META1_PAGE    21
-#define META_PAGES    5
-#define APP_PAGE      26
-#define APP_PAGES     102
+#define IS_POW2(x)   ((x) > 0 && ((x) & ((x) - 1)) == 0)
+#define DIV_CEIL(a, b)   (((a) + (b) - 1) / (b))
+#define ROUND_UP(a, b)   (DIV_CEIL(a, b) * (b))
 
-#define SLOT_SIZE     (APP_PAGES * PAGE_SIZE)
-#define SECTORS_SLOT  APP_PAGES
-#define APP_BASE      ((size_t)APP_PAGE * PAGE_SIZE)
+_Static_assert(IS_POW2(ERASE_SIZE), "ERASE_SIZE must be a power of two");
+_Static_assert(IS_POW2(SECTOR_SIZE), "SECTOR_SIZE must be a power of two");
+/* A smaller sector would need read-modify-write of its neighbours in the same
+ * unit, and break the per-sector journal's atomicity. */
+_Static_assert(SECTOR_SIZE % ERASE_SIZE == 0,
+               "a sector must be a whole number of erase units");
+_Static_assert(SECTOR_SIZE <= 32768,
+               "STEP_WRITE offsets are u16 and index the sector");
+_Static_assert(FLASH_SIZE % ERASE_SIZE == 0, "flash is not a whole number of erase units");
+
+/* Layout in erase units; only the application is rounded up to a sector. */
+#define BL_UNITS         DIV_CEIL(15 * 1024, ERASE_SIZE)
+#define ID_UNIT          BL_UNITS
+#define META_HDR_UNITS   DIV_CEIL(4096, ERASE_SIZE)   /* meta_t area, 4 KB as before */
+#define META_UNITS       (META_HDR_UNITS + 1)         /* + the journal's own unit */
+#define META0_UNIT       (ID_UNIT + 1)
+#define META1_UNIT       (META0_UNIT + META_UNITS)
+#define APP_BASE         ((size_t)ROUND_UP((META1_UNIT + META_UNITS) * ERASE_SIZE, SECTOR_SIZE))
+#define SECTORS_SLOT     ((int)((FLASH_SIZE - APP_BASE) / SECTOR_SIZE))
+#define SLOT_SIZE        (SECTORS_SLOT * SECTOR_SIZE)
 #define MANIFEST_ENTRIES SECTORS_SLOT
 
+#if CB_ERASE_SIZE == 1024 && CB_SECTOR_SIZE == 1024
+_Static_assert(BL_UNITS == 15 && ID_UNIT == 15 && META0_UNIT == 16 &&
+               META1_UNIT == 21 && APP_BASE == 26 * 1024 && SECTORS_SLOT == 102,
+               "the default geometry must keep the layout of DESIGN.md section 2");
+#endif
+
 /* Sector indices are partition-relative. A byte covers 256 sectors, which is
- * a 256 KB partition at a 1 KB page and runs out on a 1 MB part, so the index
+ * a 256 KB partition at a 1 KB sector and runs out on a 1 MB part, so the index
  * has its own type everywhere it appears: in the manifest, on the wire, and in
  * the plan the bootloader reads back. */
 typedef uint16_t sector_idx_t;
@@ -47,7 +73,7 @@ typedef uint16_t sector_idx_t;
  * bootloader image (DESIGN.md section 10). */
 #define SECTOR_HASH_LEN SHA128_LEN
 
-void sector_hash(const void *page, uint8_t out[SECTOR_HASH_LEN]);
+void sector_hash(const void *sector, uint8_t out[SECTOR_HASH_LEN]);
 
 /* Three things grow with the number of sectors, and only one of them is the
  * index width. The asserts below turn each cliff into a build error rather
@@ -56,7 +82,7 @@ _Static_assert(SECTORS_SLOT <= (1 << (8 * sizeof(sector_idx_t))) - 1,
                "sector index type too narrow for this partition size");
 
 /* Journal states. Every transition only clears bits, which is what an
- * STM32F103 half-word program can do without erasing the page first. */
+ * STM32F103 half-word program can do without erasing the unit first. */
 #define JRN_EMPTY     0xFFFFu
 #define JRN_WRITTEN   0xFFF0u
 #define JRN_VERIFIED  0xFF00u
@@ -95,29 +121,25 @@ typedef struct {
     uint32_t last_result;
 } meta_t;
 
-/* Bank layout: meta_t first, then the progress journal in a page of its own.
- * The journal is advanced by clearing bits and must never be erased while a
- * plan is live, so it cannot share a page with anything. */
-#define META_PAGES_HDR  4                       /* pages meta_t may use */
-#define JOURNAL_OFF     (META_PAGES_HDR * PAGE_SIZE)
+/* Bank layout: meta_t, then the journal in an erase unit of its own (it is
+ * never erased while a plan is live, so it cannot share one). */
+#define JOURNAL_OFF     (META_HDR_UNITS * ERASE_SIZE)
 
-/* meta_t carries ~20 B per sector, so it grows with the partition. These two
- * are the boundaries it has to respect: a 1 MB part at a 1 KB page would need
- * 10 KB of plan and fits neither. */
+/* meta_t carries ~20 B per sector, so it grows with the partition. These
+ * are the boundaries it has to respect: a 1 MB part at a 1 KB sector would
+ * need 10 KB of plan and fits neither. */
 _Static_assert(sizeof(meta_t) <= JOURNAL_OFF,
-               "meta_t runs into the journal page: use fewer, larger sectors, "
-               "or give the bank more pages");
-_Static_assert(META_PAGES_HDR < META_PAGES,
-               "no page left in the bank for the journal");
-_Static_assert((SECTORS_SLOT + 3) * 2 <= PAGE_SIZE,
-               "the progress journal does not fit its page");
+               "meta_t runs into the journal unit: use fewer, larger sectors, "
+               "or give the bank more erase units");
+_Static_assert((SECTORS_SLOT + 3) * 2 <= ERASE_SIZE,
+               "the progress journal does not fit its erase unit");
 
 /* last_result codes reported back in HELLO */
 enum { RES_NONE = 0, RES_OK, RES_VERIFY_FAILED, RES_FLASH_FAIL };
 
 typedef struct {
     plat_flash_t io;
-    long     n_erase;      /* page erases, for the device time model */
+    long     n_erase;      /* erase-unit erases, for the device time model */
     long     n_prog;
     size_t   prog_bytes;
     const char *path;
@@ -153,17 +175,18 @@ static inline double f103_flash_ms(long erases, size_t prog_bytes, int worst)
     return (double)erases * e + (double)(prog_bytes / 2) * p / 1000.0;
 }
 
-/* One sector: erase the page, then program every half-word of it. */
+/* One sector: erase its units, then program it. Assumes 1 KB-class erase time
+ * per unit, which is the datasheet's figure. */
 static inline double f103_sector_ms(int worst)
 {
-    return f103_flash_ms(1, PAGE_SIZE, worst);
+    return f103_flash_ms(SECTOR_SIZE / ERASE_SIZE, SECTOR_SIZE, worst);
 }
 
 int  flash_create(const char *path);
 int  flash_open(flash_t *f, const char *path);
 void flash_close(flash_t *f);
 
-void flash_erase_page(flash_t *f, int page);
+void flash_erase_unit(flash_t *f, int unit);
 /* Half-word granular, bits may only go 1 -> 0. Dies on violation. */
 void flash_program(flash_t *f, size_t off, const void *buf, size_t len);
 const uint8_t *flash_at(flash_t *f, size_t off);
@@ -171,20 +194,20 @@ const uint8_t *flash_at(flash_t *f, size_t off);
 void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN]);
 
 /* Erase, then program, one sector of the application partition in place. */
-void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[PAGE_SIZE]);
+void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[SECTOR_SIZE]);
 
 /* Meta bank ping-pong. Returns 0 if a valid bank was found. */
 int  meta_load(flash_t *f, meta_t *m);
 void meta_store(flash_t *f, meta_t *m);        /* bumps generation, erases the older bank */
 void meta_init(meta_t *m);
 
-/* A spare half-word in the journal page used as the "plan committed" flag,
+/* A spare half-word in the journal unit used as the "plan committed" flag,
  * cleared when the server sends COMMIT. Bit-clearing, so no erase. */
 #define JRN_ARM_INDEX (SECTORS_SLOT + 2)
 
 uint16_t journal_get(flash_t *f, int index);
 void     journal_set(flash_t *f, int index, uint16_t state);
-void     journal_clear(flash_t *f);            /* erases the journal page of the live bank */
+void     journal_clear(flash_t *f);            /* erases the journal unit of the live bank */
 
 identity_t *identity_get(flash_t *f);
 

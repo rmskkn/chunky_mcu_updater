@@ -11,7 +11,7 @@ void plan_build(const manifest_t *dev, const uint8_t target[SLOT_SIZE],
 
     for (int i = 0; i < SECTORS_SLOT; i++) {
         uint8_t h[SECTOR_HASH_LEN];
-        sector_hash(target + (size_t)i * PAGE_SIZE, h);
+        sector_hash(target + (size_t)i * SECTOR_SIZE, h);
 
         const uint8_t *at = manifest_hash_at(dev, i);
         step_t s;

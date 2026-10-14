@@ -31,10 +31,9 @@ static void cli_log(void *ctx, const char *line)
     puts(line);
 }
 
-/* What one written sector and one copy step cost on the wire, from the frame
- * and message sizes rather than from a measurement, so the full-image baseline
- * is exact for any run. */
-#define SECTOR_WIRE  ((PAGE_SIZE / WRITE_CHUNK) \
+/* Wire cost of a raw sector and of a copy step, from frame and message sizes:
+ * the raw full-image baseline is exact for any run. */
+#define SECTOR_WIRE  ((SECTOR_SIZE / WRITE_CHUNK) \
                         * (FRAME_OVERHEAD + WRITE_HDR + WRITE_CHUNK) \
                       + (FRAME_OVERHEAD + (int)sizeof(msg_step_write_end_t)) \
                       + (FRAME_OVERHEAD + (int)sizeof(msg_step_ack_t)))
@@ -70,13 +69,14 @@ static void sector_list(const plan_t *p, int op, char *out, size_t cap)
 }
 
 /* One row per update request, so repeated requests build the table up. */
-static void report(const char *label, const plan_t *p, uint64_t tx_bytes, uint64_t rx_bytes)
+static void report(const char *label, const server_session_result_t *r)
 {
+    const plan_t *p = &r->plan;
     static int header;
-    double wire = (double)(tx_bytes + rx_bytes);
+    double wire = (double)(r->tx_bytes + r->rx_bytes);
     /* Everything that is not a step is session overhead: manifest, plan
      * header, closing messages. A full-image transfer pays it too. */
-    double fixed = wire - (double)p->n_write * SECTOR_WIRE
+    double fixed = wire - (double)r->write_wire
                         - (double)p->n_copy * COPY_WIRE;
     double full = fixed + (double)SECTORS_SLOT * SECTOR_WIRE;
 
@@ -94,6 +94,7 @@ static void report(const char *label, const plan_t *p, uint64_t tx_bytes, uint64
            p->n_copy + p->n_write, SECTORS_SLOT, p->n_write, p->n_copy, p->n_skip);
     printf("  sent    %s\n", wl);
     printf("  copied  %s\n", cl);
+    printf("  encoded %llu B\n", (unsigned long long)r->enc_bytes);
 
     if (!header) {
         printf("\n%-26s %4s %4s %5s %8s %7s %9s %7s %13s\n",
@@ -117,7 +118,7 @@ static void session(int fd)
                               cli_log, NULL, &res)) {
         char label[32];
         snprintf(label, sizeof label, "v%u", res.ver);
-        report(label, &res.plan, res.tx_bytes, res.rx_bytes);
+        report(label, &res);
     }
 }
 
