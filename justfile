@@ -22,6 +22,7 @@ lint:
     just lint-bench-fw
     just bench-fw
     just bench-lint
+    cd chunky_format/size_bench && cargo fmt --check
 
 # The no_std crates build for Cortex-M0+ and M4F, signed and unsigned, with a series-* feature or chip-custom
 check-fw:
@@ -32,6 +33,7 @@ check-fw:
     cargo check -q -p chunky_bank --target thumbv6m-none-eabi --features ed25519,chunky/chip-custom
     cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features ed25519,chunky/series-stm32h7
     cargo check -q -p chunky_bank --target thumbv7em-none-eabihf --features unsigned,chunky/series-stm32h7
+    cargo check -q -p chunky_format --target thumbv6m-none-eabi
 
 # Power-cut bench firmware (HW-3): both bootloaders and apps A and B, raw images and ELFs in bench/fw/out
 bench-fw:
@@ -83,3 +85,11 @@ bench-measure *ARGS:
 # A sweep into bench/results/NAME, e.g. `just bench-sweep --name s1 --from 3ms --to 30ms --pre-trigger-us 12000` (--dry-run: simulated)
 bench-sweep *ARGS:
     {{bench-cargo}} run -q --release --manifest-path bench/host/Cargo.toml -- sweep {{ARGS}}
+
+# Code size of the plan readers (PROTO-3) on Cortex-M0 and RV32IMC: empty floor, format 1 (chunky::plan), format 2
+# through the fixed-layout fast path and through shrink_wrap's BufReader. Text includes a 2048-byte buffer.
+size-bench:
+    cd chunky_format/size_bench && cargo build -q --release --target-dir target --target thumbv6m-none-eabi
+    cd chunky_format/size_bench && cargo build -q --release --target-dir target --target riscv32imc-unknown-none-elf
+    cd chunky_format/size_bench/target/thumbv6m-none-eabi/release && llvm-size empty v1 fixed sw
+    cd chunky_format/size_bench/target/riscv32imc-unknown-none-elf/release && llvm-size empty v1 fixed sw

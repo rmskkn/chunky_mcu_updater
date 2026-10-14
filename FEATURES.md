@@ -163,6 +163,28 @@ Design: [SECURITY.md](SECURITY.md).
   firmware pairs; open points: hash length, Ed25519, release-time signing, version floor and seq. The WireWeaver
   carrier is `ww_dfu` (wire_weaver STD-12). Segmentation is the transport's: CAN and Modbus do not aggregate.
 
+- 🧪 **PROTO-3 typed-plan-format** — spike: plan header, signed descriptor and steps as shrink_wrap types with a
+  fixed little-endian layout (`chunky_format`, format 2): one schema, read by the shrink_wrap path (app, full
+  bootloader with WireWeaver), by the fixed-layout fast path `#[derive_shrink_wrap]` generates for such types
+  (wire_weaver SW-44: offset consts, `from_fixed`, no `BufReader`) for a minimal bootloader, and by the C reader
+  generated from the same derive (`chunky_format/c/chunky_format.h`). `signed!` stamps a `Signed<T>` envelope:
+  the body's encoded bytes and a seal over the domain and those bytes, reachable only through `open` (verify, then
+  decode). Golden vectors (`chunky_format/vectors`, `c/golden.h`) checked by all three readers (`just test-c`),
+  the layout pinned by offset tests, 20 000 garbage inputs read alike by both Rust readers without a panic.
+  Format 2: descriptor 64-byte body + 64-byte seal (the reserved bytes are signed too); header 145 bytes (adds the
+  body length); steps sized per op, ERASE 3 bytes, COPY 13, WRITE 13 + data with an explicit `data_len`; 8-byte
+  chunk hashes (MAN-2). Measured (`cargo run -p chunky_format --example plan_size`, `just size-bench`):
+  on the bench pairs (app A → B and bootloader stock → guarded, every chunk changes, no COPY) the plan's overhead
+  beyond the data drops from 480 to 257 bytes with 1 KB chunks (336 → 209 with 2 KB, 288 → 193 with 4 KB): 3 % of
+  a 7.6 KB plan; per step ERASE 24 → 3, COPY and WRITE 24 → 13 bytes (8 of the 11 from the shorter hash). Code to
+  read a plan (header, every step and its data) beyond an empty image, Cortex-M0 / RV32IMC, `opt-level = "z"`:
+  format 1 hand-written 840 / 1252 bytes, format 2 fast path 880 / 1074, format 2 through `BufReader` 1854 / 2130.
+  Not wired in: `chunky` still reads format 1. Switching takes the apply engine and planner on `chunky_format`,
+  8-byte `ChunkHash` and manifest (MAN-2), the descriptor v2 in `chunky_server::image` and in `Trust` (a
+  `SealCheck`), the sweeps re-run; ww_dfu needs nothing (it carries the header's octets, 145 < `MAX_HEADER_LEN`).
+  Open: `chunky_format` depends on wire_weaver by path (../wire_weaver), until shrink_wrap 0.2 with SW-44 is
+  published.
+
 ## CFG — configuration
 
 - 💡 **CFG-1 config-out-of-the-way** — a config slot in the layout (GEO), never in image hashes, manifests or plans

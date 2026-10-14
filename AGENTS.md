@@ -59,6 +59,9 @@ adding a dependency.
   `SwapUpdater` the application's handle, `Guarded` the state partition as embassy-boot gets it.
 - `chunky_bank/` — the hardware bank swap backend, `no_std`: `boot()` again the whole decision, `BankUpdater`
   the application's handle, `BankSwitch` the SWAP_BANK option bit, `log.rs` the state log of write-once flags.
+- `chunky_format/` — the plan format as fixed-layout shrink_wrap types (format 2, PROTO-3, a spike not yet read by
+  `chunky`): `signed!`, golden `vectors/`, the generated C reader in `c/`, `size_bench/` (own nightly workspace).
+  Needs `../wire_weaver` (SW-44).
 - `chunky_server/` — host side: `image.rs` (build and seal), `store.rs` (blob store), `manifest.rs` (parse),
   `planner.rs`.
 - `chunky_sim/` — `flash.rs` (NOR flash with per-family write rules, torn writes and erases, ECC faults),

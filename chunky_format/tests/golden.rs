@@ -157,7 +157,7 @@ fn layout_is_pinned() {
     assert_eq!(Step::COPY_HASH_OFFSET, 5);
     assert_eq!(Step::WRITE_LEN, 13);
     assert_eq!(Step::WRITE_DATA_LEN_OFFSET, 3);
-    assert!(!Step::SAME_LEN);
+    const { assert!(!Step::SAME_LEN) };
     // and shrink_wrap agrees that they have no length of their own on the wire
     assert_eq!(
         <PlanHeader as SerializeShrinkWrap>::ELEMENT_SIZE,

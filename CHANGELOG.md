@@ -5,6 +5,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `chunky_format`: the plan format as shrink_wrap types with a fixed little-endian layout, format 2 (descriptor
+  `CKY2`, plan `CKP2`, steps sized per op, 8-byte chunk hashes, an explicit WRITE data length), the `signed!`
+  envelope (verify, then decode), golden vectors in `chunky_format/vectors`, and the C reader generated from the
+  types (`chunky_format/c`, checked by `just test-c`, part of `just test`). Not yet read by `chunky`, which stays on
+  format 1. Needs wire_weaver checked out next to this repository. (PROTO-3)
+- `just size-bench`: code size of the plan readers on Cortex-M0 and RV32IMC; `chunky_format`'s `plan_size` example:
+  a plan's size in format 1 and 2 for every preset geometry. (PROTO-3)
+
 ## [0.7.0] - 2026-10-13
 
 ### Added

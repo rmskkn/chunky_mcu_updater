@@ -12,3 +12,5 @@ shrink_wrap = { path = "../../wire_weaver/shrink_wrap/shrink_wrap", default-feat
 [dev-dependencies]
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 sha2.workspace = true
+chunky = { workspace = true, features = ["ed25519", "unsigned"] }
+chunky_server.workspace = true

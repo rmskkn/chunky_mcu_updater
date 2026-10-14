@@ -204,6 +204,8 @@ dependencies = [
 name = "chunky_format"
 version = "0.7.0"
 dependencies = [
+ "chunky",
+ "chunky_server",
  "ed25519-dalek",
  "sha2",
  "shrink_wrap",
