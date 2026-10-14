@@ -37,11 +37,20 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 
 - ✅ **MAN-1 chunk-manifest** — per chunk of ACTIVE and DFU: truncated SHA-256, blank, or unreadable (ECC). Computed
   fresh every session; it is the only progress record, there is no journal. Wire format 1.
+- 📋 **MAN-2 manifest-v2** — aligned with upstream PR #1: implicit sector order (no index, malformed manifests
+  unrepresentable) and 8-byte hashes, SHA-256/64 instead of MD5/64 (the device already has SHA-256; MD5 goes away).
 
 ## PLAN — plan format
 
 - ✅ **PLAN-1 plan-wire-format** — header with the target's descriptor, then ERASE / COPY / WRITE steps of 24 bytes;
   strict parser, one encoding per plan. Wire format 1.
+- 💡 **PLAN-2 pull-mode** — the release ships a signed target manifest, the device diffs locally (no_std planner and a
+  hash -> chunk lookup) and fetches chunks by hash from a dumb content-addressed store (HTTP, CDN, MQTT); no device
+  signing key needed for planning.
+- 💡 **PLAN-3 broadcast-update** — one plan to a whole fleet in one transmission: nodes on the same version get the
+  same plan (bulk delivery), each checks every step and asks only for what it missed; optional parity fragments
+  (idea from LoRaWAN FUOTA TS004, our own format). CAN fits best (one broadcast id, per-node acks staggered by node
+  id); also radio multicast and UDP multicast. Node group selector: product, geometry, version, manifest digest.
 
 ## APPLY — apply engine
 
@@ -136,10 +145,35 @@ Design: [SECURITY.md](SECURITY.md).
   the git SHA and build time, colour off without a TTY or with `NO_COLOR`. Key files, `Manifest::of_running_image`
   and `DirStore::list` are in `chunky_server`. Open: the Python wrapper (PY), no progress bar (nothing here takes
   seconds), completion of store ids is not live.
+- 💡 **CLI-2 pypi-wheels** — the Rust tooling (chunky CLI, later the wire_weaver C generator) as binary wheels on
+  PyPI, so C users run it with `uvx` and need no Rust toolchain. Publishing needs the user's OK.
 
 ## NET — transport
 
-- 📋 **NET-1 wire-weaver-transport** — the update API over wire_weaver (RTT first), no COM ports.
+- 📋 **NET-1 wire-weaver-transport** — the update API over wire_weaver (RTT first), no COM ports: implement
+  wire_weaver `ww_dfu` (STD-12: UpdateNode, BootControl, Inventory, Stage, StageBulk) on the chunky core.
+
+## PROTO — shared protocol spec
+
+- 📋 **PROTO-1 protocol-spec** — SPEC.md drafted for upstream (rmskkn/chunky_mcu_updater, agreed with Roman Skakun
+  on PR #1, 13 Oct 2026): layer 0 (manifest, plan, steps, state machine) in octets with explicit byte order,
+  versioned, generic over erase unit, write unit and chunk size; integrity, signing, A/B and in-place profiles and
+  transport framing as layers on top; three delivery modes (A/B live, in place from a stored plan, in place live),
+  per-step and bulk delivery, stored form = wire form, resume rules, the in-place planner rule; vectors/ folder with
+  firmware pairs; open points: hash length, Ed25519, release-time signing, version floor and seq. The WireWeaver
+  carrier is `ww_dfu` (wire_weaver STD-12). Segmentation is the transport's: CAN and Modbus do not aggregate.
+
+## CFG — configuration
+
+- 💡 **CFG-1 config-out-of-the-way** — a config slot in the layout (GEO), never in image hashes, manifests or plans
+  (planner and apply refuse steps touching it), untouched by swap, revert and factory restore; bank-physical
+  addressing under bank swap. The store and its format: P2626 flash-config.
+
+## PORT — other languages
+
+- 💡 **PORT-1 c-device-core** — hand-written freestanding C99 device side (manifest, plan parser, apply, descriptor
+  check, SHA-256) for targets without Rust (TMS320 C28x first), CHAR_BIT=16-safe, same wire format, checked
+  against the Rust core with shared vectors and the simulator's power-cut sweeps. Only when a C28x board is real.
 
 ## HW — hardware
 
@@ -174,6 +208,8 @@ Design: [SECURITY.md](SECURITY.md).
 
 - ✅ **DEV-1 repo-dev-rules** — AGENTS.md, CLAUDE.md, FEATURES.md, CHANGELOG.md, SECURITY.md, justfile with
   default, test, lint, install, deploy.
+- 💡 **DEV-2 delta-flash-dev-loop** — the in-place delta path as a faster reflash than probe-rs during development
+  (only changed sectors written); measure first on two real dev builds (depends on SRV-4 stable-code-first layout).
 
 ## Known gaps and findings
 
