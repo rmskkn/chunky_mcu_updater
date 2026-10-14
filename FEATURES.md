@@ -178,7 +178,10 @@ Design: [SECURITY.md](SECURITY.md).
   beyond the data drops from 480 to 257 bytes with 1 KB chunks (336 → 209 with 2 KB, 288 → 193 with 4 KB): 3 % of
   a 7.6 KB plan; per step ERASE 24 → 3, COPY and WRITE 24 → 13 bytes (8 of the 11 from the shorter hash). Code to
   read a plan (header, every step and its data) beyond an empty image, Cortex-M0 / RV32IMC, `opt-level = "z"`:
-  format 1 hand-written 840 / 1252 bytes, format 2 fast path 880 / 1074, format 2 through `BufReader` 1854 / 2130.
+  format 1 hand-written 840 / 1252 bytes, format 2 fast path 892 / 1086 (880 / 1074 before SW-45 made the generated
+  code general), format 2 through `BufReader` 1854 / 2130. Bit fields (SW-45) were checked for the steps: packing the
+  op into 2 bits next to a 14-bit chunk index saves one byte per step, 0.1 % of the bench plans, and gives up the
+  typed `Step` enum; not done.
   Not wired in: `chunky` still reads format 1. Switching takes the apply engine and planner on `chunky_format`,
   8-byte `ChunkHash` and manifest (MAN-2), the descriptor v2 in `chunky_server::image` and in `Trust` (a
   `SealCheck`), the sweeps re-run; ww_dfu needs nothing (it carries the header's octets, 145 < `MAX_HEADER_LEN`).

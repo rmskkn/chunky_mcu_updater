@@ -28,6 +28,23 @@ static inline double sw_fixed_f64(const uint8_t *p) {
     memcpy(&f, &u, sizeof f);
     return f;
 }
+/* n (1 to 32) bits from bit `bit`, counted from the most significant bit of p[0] */
+static inline uint32_t sw_fixed_bits(const uint8_t *p, size_t bit, unsigned n) {
+    size_t first = bit / 8u;
+    size_t last = (bit + n - 1u) / 8u;
+    size_t i;
+    uint64_t window = 0u;
+    for (i = first; i <= last; i++) {
+        window = (window << 8u) | (uint64_t)p[i];
+    }
+    return (uint32_t)((window >> ((last + 1u) * 8u - bit - n)) & (UINT64_MAX >> (64u - n)));
+}
+/* the same, sign extended from bit n - 1 */
+static inline int32_t sw_fixed_sbits(const uint8_t *p, size_t bit, unsigned n) {
+    uint32_t sign = (uint32_t)1u << (n - 1u);
+    uint32_t u = sw_fixed_bits(p, bit, n);
+    return (int32_t)(int64_t)((int64_t)(u ^ sign) - (int64_t)sign);
+}
 #endif
 
 /* Scheme: a 1-byte tag, then the fields of its variant */
@@ -37,7 +54,7 @@ static inline uint8_t chunky_scheme_tag(const uint8_t *p) { return sw_fixed_u8(p
 #define CHUNKY_SCHEME_ED25519_LEN 1u
 #define CHUNKY_SCHEME_UNSIGNED 2u
 #define CHUNKY_SCHEME_UNSIGNED_LEN 1u
-/* length of the value with this tag, 0 for an unknown tag */
+/* length of the value with this tag before a variable last field (the whole value when there is none), 0 for an unknown tag */
 static inline size_t chunky_scheme_len(uint32_t tag) {
     switch (tag) {
     case 1u: return 1u;
@@ -46,8 +63,9 @@ static inline size_t chunky_scheme_len(uint32_t tag) {
     }
 }
 
-/* DescriptorBody: 64 bytes */
+/* DescriptorBody: 64 to 64 bytes */
 #define CHUNKY_DESCRIPTOR_BODY_LEN 64u
+#define CHUNKY_DESCRIPTOR_BODY_MIN_LEN 64u
 #define CHUNKY_DESCRIPTOR_BODY_MAGIC_OFFSET 0u
 static inline const uint8_t *chunky_descriptor_body_magic(const uint8_t *p) { return p + 0u; }
 #define CHUNKY_DESCRIPTOR_BODY_MAGIC_COUNT 4u
@@ -75,8 +93,9 @@ static inline const uint8_t *chunky_descriptor_body_image_sha256(const uint8_t *
 static inline const uint8_t *chunky_descriptor_body_reserved_end(const uint8_t *p) { return p + 60u; }
 #define CHUNKY_DESCRIPTOR_BODY_RESERVED_END_COUNT 4u
 
-/* SignedDescriptor: 128 bytes */
+/* SignedDescriptor: 128 to 128 bytes */
 #define CHUNKY_SIGNED_DESCRIPTOR_LEN 128u
+#define CHUNKY_SIGNED_DESCRIPTOR_MIN_LEN 128u
 #define CHUNKY_SIGNED_DESCRIPTOR_BODY_OFFSET 0u
 static inline const uint8_t *chunky_signed_descriptor_body(const uint8_t *p) { return p + 0u; }
 #define CHUNKY_SIGNED_DESCRIPTOR_BODY_COUNT 64u
@@ -84,8 +103,9 @@ static inline const uint8_t *chunky_signed_descriptor_body(const uint8_t *p) { r
 static inline const uint8_t *chunky_signed_descriptor_seal(const uint8_t *p) { return p + 64u; }
 #define CHUNKY_SIGNED_DESCRIPTOR_SEAL_COUNT 64u
 
-/* PlanHeader: 145 bytes */
+/* PlanHeader: 145 to 145 bytes */
 #define CHUNKY_PLAN_HEADER_LEN 145u
+#define CHUNKY_PLAN_HEADER_MIN_LEN 145u
 #define CHUNKY_PLAN_HEADER_MAGIC_OFFSET 0u
 static inline const uint8_t *chunky_plan_header_magic(const uint8_t *p) { return p + 0u; }
 #define CHUNKY_PLAN_HEADER_MAGIC_COUNT 4u
@@ -125,7 +145,7 @@ static inline uint16_t chunky_step_write_data_len(const uint8_t *p) { return sw_
 #define CHUNKY_STEP_WRITE_HASH_OFFSET 5u
 static inline const uint8_t *chunky_step_write_hash(const uint8_t *p) { return p + 5u; }
 #define CHUNKY_STEP_WRITE_HASH_COUNT 8u
-/* length of the value with this tag, 0 for an unknown tag */
+/* length of the value with this tag before a variable last field (the whole value when there is none), 0 for an unknown tag */
 static inline size_t chunky_step_len(uint32_t tag) {
     switch (tag) {
     case 1u: return 3u;
