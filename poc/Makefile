@@ -9,6 +9,7 @@ override CFLAGS += -DCB_ERASE_SIZE=$(ERASE_SIZE) -DCB_SECTOR_SIZE=$(SECTOR_SIZE)
 BUILD   := build
 SRC     := src
 LIB     := lib
+PLAT    := platform
 OBJ     := $(BUILD)/obj
 
 LIB_SRC := $(LIB)/util.c $(LIB)/sha256.c $(LIB)/flash.c \
@@ -38,17 +39,20 @@ $(OBJ)/%.o: $(LIB)/%.c $(STAMP) | $(OBJ)
 $(OBJ)/%.o: $(SRC)/%.c $(STAMP) | $(OBJ)
 	$(CC) $(CFLAGS) -iquote $(LIB) -c -o $@ $<
 
+$(OBJ)/%.o: $(PLAT)/%.c $(STAMP) | $(OBJ)
+	$(CC) $(CFLAGS) -iquote $(LIB) -c -o $@ $<
+
 $(LIBCB): $(LIB_OBJ) | $(BUILD)
 	$(AR) rcs $@ $^
 
 $(BUILD)/cb-server: $(SRC)/server.c $(PLAT_OBJ) $(LIBCB) $(STAMP) | $(BUILD)
-	$(CC) $(CFLAGS) -iquote $(LIB) -o $@ $(SRC)/server.c $(PLAT_OBJ) $(LIBCB) -llz4
+	$(CC) $(CFLAGS) -iquote $(LIB) -o $@ $(SRC)/server.c $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
 
 $(BUILD)/cb-client: $(SRC)/client.c $(PLAT_OBJ) $(LIBCB) $(STAMP) | $(BUILD)
-	$(CC) $(CFLAGS) -iquote $(LIB) -pthread -o $@ $(SRC)/client.c $(PLAT_OBJ) $(LIBCB) -llz4
+	$(CC) $(CFLAGS) -iquote $(LIB) -o $@ $(SRC)/client.c $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
 
 $(BUILD)/cb-flash: $(SRC)/cbflash.c $(PLAT_OBJ) $(LIBCB) $(STAMP) | $(BUILD)
-	$(CC) $(CFLAGS) -iquote $(LIB) -o $@ $(SRC)/cbflash.c $(PLAT_OBJ) $(LIBCB) -llz4
+	$(CC) $(CFLAGS) -iquote $(LIB) -o $@ $(SRC)/cbflash.c $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
 
 # the decoder eats unchecked bytes: test it under ASan/UBSan
 $(BUILD)/compress_test: tests/compress_test.c $(LIB)/compress.c $(LIB)/lz4.c $(STAMP) | $(BUILD)
