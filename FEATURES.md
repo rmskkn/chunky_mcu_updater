@@ -182,6 +182,9 @@ Design: [SECURITY.md](SECURITY.md).
   code general), format 2 through `BufReader` 1854 / 2130. Bit fields (SW-45) were checked for the steps: packing the
   op into 2 bits next to a 14-bit chunk index saves one byte per step, 0.1 % of the bench plans, and gives up the
   typed `Step` enum; not done.
+  The head+tail encoding (wire_weaver SW-46: fixed fields in a head, lists and payloads in a tail) was built for
+  types with lists in the middle; the plan needs none of it: each record is already a fixed head with its data
+  after it (WRITE's `data_len`), so format 2 stays fixed-layout.
   Not wired in: `chunky` still reads format 1. Switching takes the apply engine and planner on `chunky_format`,
   8-byte `ChunkHash` and manifest (MAN-2), the descriptor v2 in `chunky_server::image` and in `Trust` (a
   `SealCheck`), the sweeps re-run; ww_dfu needs nothing (it carries the header's octets, 145 < `MAX_HEADER_LEN`).
