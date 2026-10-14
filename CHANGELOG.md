@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-14
+
 ### Added
 
 - `chunky_format`: the plan format as shrink_wrap types with a fixed little-endian layout, format 2 (descriptor
