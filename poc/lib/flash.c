@@ -2,9 +2,9 @@
 #include "util.h"
 #include <string.h>
 
-/* Bank 0 holds meta at page META0_PAGE and its journal at META0_PAGE+2. */
-#define BANK_PAGE(b)    ((b) == 0 ? META0_PAGE : META1_PAGE)
-#define BANK_META(b)    ((size_t)BANK_PAGE(b) * PAGE_SIZE)
+/* A bank is meta_t in META_HDR_UNITS units, then the journal's own unit. */
+#define BANK_UNIT(b)    ((b) == 0 ? META0_UNIT : META1_UNIT)
+#define BANK_META(b)    ((size_t)BANK_UNIT(b) * ERASE_SIZE)
 #define BANK_JOURNAL(b) (BANK_META(b) + JOURNAL_OFF)
 
 static int live_bank;   /* bank meta_load() picked, or the one meta_store() wrote */
@@ -19,7 +19,7 @@ int flash_create(const char *path)
 
     /* a recognisable bootloader region so the image is visible in a hex
      * dump; 0xFF -> 0xEE only clears bits, same as a real program would. */
-    uint8_t bl_marker[BL_PAGES * PAGE_SIZE];
+    uint8_t bl_marker[BL_UNITS * ERASE_SIZE];
     memset(bl_marker, 0xEE, sizeof bl_marker);
     plat_flash_write(&f.io, 0, bl_marker, sizeof bl_marker);
 
@@ -30,7 +30,7 @@ int flash_create(const char *path)
     /* fixed keys: the PoC server shares them, standing in for a provisioned
      * device key and the root public key held in the bootloader region. */
     for (int i = 0; i < 32; i++) { id.dev_key[i] = (uint8_t)(0xA0 + i); id.root_key[i] = (uint8_t)(0x50 + i); }
-    plat_flash_write(&f.io, (size_t)ID_PAGE * PAGE_SIZE, &id, sizeof id);
+    plat_flash_write(&f.io, (size_t)ID_UNIT * ERASE_SIZE, &id, sizeof id);
 
     plat_flash_close(&f.io);
     return 0;
@@ -51,9 +51,9 @@ void flash_close(flash_t *f)
     plat_flash_close(&f->io);
 }
 
-void flash_erase_page(flash_t *f, int page)
+void flash_erase_unit(flash_t *f, int unit)
 {
-    plat_flash_erase(&f->io, (size_t)page * PAGE_SIZE, PAGE_SIZE);
+    plat_flash_erase(&f->io, (size_t)unit * ERASE_SIZE, ERASE_SIZE);
     f->n_erase++;
 }
 
@@ -70,7 +70,7 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
     for (size_t i = 0; i < len; i++) {
         if ((cur[i] & src[i]) != src[i])
             die("flash: program at 0x%zx would set bits (0x%02x -> 0x%02x); "
-                "erase the page first", off + i, cur[i], src[i]);
+                "erase the unit first", off + i, cur[i], src[i]);
     }
     plat_flash_write(&f->io, off, src, len);
     f->n_prog++;
@@ -79,27 +79,30 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
 
 const uint8_t *flash_at(flash_t *f, size_t off) { return plat_flash_read(&f->io, off); }
 
-void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[PAGE_SIZE])
+void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[SECTOR_SIZE])
 {
-    flash_erase_page(f, APP_PAGE + index);
-    flash_program(f, (size_t)(APP_PAGE + index) * PAGE_SIZE, data, PAGE_SIZE);
+    size_t off = APP_BASE + (size_t)index * SECTOR_SIZE;
+
+    for (int u = 0; u < SECTOR_SIZE / ERASE_SIZE; u++)
+        flash_erase_unit(f, (int)(off / ERASE_SIZE) + u);
+    flash_program(f, off, data, SECTOR_SIZE);
 }
 
-void sector_hash(const void *page, uint8_t out[SECTOR_HASH_LEN])
+void sector_hash(const void *sector, uint8_t out[SECTOR_HASH_LEN])
 {
-    sha128(page, PAGE_SIZE, out);
+    sha128(sector, SECTOR_SIZE, out);
 }
 
 void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN])
 {
-    sector_hash(flash_at(f, APP_BASE + (size_t)index * PAGE_SIZE), out);
+    sector_hash(flash_at(f, APP_BASE + (size_t)index * SECTOR_SIZE), out);
 }
 
 identity_t *identity_get(flash_t *f)
 {
-    identity_t *id = (identity_t *)flash_at(f, (size_t)ID_PAGE * PAGE_SIZE);
+    identity_t *id = (identity_t *)flash_at(f, (size_t)ID_UNIT * ERASE_SIZE);
     if (id->magic != ID_MAGIC)
-        die("device identity page is blank: provisioning fault");
+        die("device identity unit is blank: provisioning fault");
     return id;
 }
 
@@ -144,7 +147,7 @@ void meta_store(flash_t *f, meta_t *m)
     m->crc = 0;
     m->crc = crc32_buf(m, sizeof *m);
 
-    for (int p = 0; p < META_PAGES; p++) flash_erase_page(f, BANK_PAGE(target) + p);
+    for (int u = 0; u < META_UNITS; u++) flash_erase_unit(f, BANK_UNIT(target) + u);
     flash_program(f, BANK_META(target), m, sizeof *m);
     live_bank = target;
 }
@@ -163,5 +166,5 @@ void journal_set(flash_t *f, int index, uint16_t state)
 
 void journal_clear(flash_t *f)
 {
-    flash_erase_page(f, BANK_PAGE(live_bank) + META_PAGES_HDR);
+    flash_erase_unit(f, BANK_UNIT(live_bank) + META_HDR_UNITS);
 }

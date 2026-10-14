@@ -8,15 +8,59 @@
 #include "proto.h"
 #include "manifest.h"
 #include "image.h"
+#include "compress.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 static void cache_path(char *out, size_t len, const uint8_t id[16], const char *cache_dir)
 {
     char hex[33];
     hexdump_line(id, 16, hex);
     snprintf(out, len, "%s/%s.manifest", cache_dir, hex);
+}
+
+/* Sector store: every sector of every image served, by content hash. The
+ * device's current content of a sector is what its manifest hash names, so a
+ * hit gives the compressor the exact bytes the device will hold as dictionary.
+ * Files are trusted by content, never by name. */
+static void store_path(char *out, size_t len, const char *cache_dir,
+                       const uint8_t h[SECTOR_HASH_LEN])
+{
+    char hex[2 * SECTOR_HASH_LEN + 1];
+    hexdump_line(h, SECTOR_HASH_LEN, hex);
+    snprintf(out, len, "%s/sectors/%s", cache_dir, hex);
+}
+
+static void store_put(const char *cache_dir, const uint8_t *sector)
+{
+    uint8_t h[SECTOR_HASH_LEN];
+    char path[512], tmp[560];
+
+    sector_hash(sector, h);
+    store_path(path, sizeof path, cache_dir, h);
+    if (access(path, F_OK) == 0) return;
+    snprintf(tmp, sizeof tmp, "%s.%d", path, (int)getpid());   /* rename: no torn files */
+    if (write_file(tmp, sector, SECTOR_SIZE) < 0 || rename(tmp, path) < 0) unlink(tmp);
+}
+
+static int store_get(const char *cache_dir, const uint8_t h[SECTOR_HASH_LEN],
+                     uint8_t out[SECTOR_SIZE])
+{
+    char path[512];
+    size_t n = 0;
+    uint8_t got[SECTOR_HASH_LEN];
+
+    store_path(path, sizeof path, cache_dir, h);
+    uint8_t *b = read_file(path, &n);
+    if (!b) return -1;
+    if (n == SECTOR_SIZE) memcpy(out, b, SECTOR_SIZE);
+    free(b);
+    if (n != SECTOR_SIZE) return -1;
+    sector_hash(out, got);
+    return memcmp(got, h, SECTOR_HASH_LEN) ? -1 : 0;
 }
 
 int server_update_session(int fd, const char *image_path, const char *cache_dir,
@@ -32,10 +76,11 @@ int server_update_session(int fd, const char *image_path, const char *cache_dir,
     char cpath[512];
 
     link_init(&l, fd);
+    memset(out, 0, sizeof *out);
 
     if (frame_expect(&l, MSG_HELLO, pay, &n) < 0) return 0;
     memcpy(&hello, pay, sizeof hello);
-    if (hello.sector_size != PAGE_SIZE || hello.sectors != SECTORS_SLOT) {
+    if (hello.sector_size != SECTOR_SIZE || hello.sectors != SECTORS_SLOT) {
         uint8_t r = REJ_GEOMETRY_MISMATCH;
         frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
         log_fmt(log, log_ctx, "server: geometry mismatch, session refused");
@@ -127,6 +172,13 @@ int server_update_session(int fd, const char *image_path, const char *cache_dir,
         die("%s is %zu B, over the %d B slot payload", image_path, binlen, IMG_MAX_PAYLOAD);
     free(bin);
 
+    /* The first session after factory install finds no history and falls back
+     * to plain LZ4; from then on every served sector is a future dictionary. */
+    snprintf(cpath, sizeof cpath, "%s/sectors", cache_dir);
+    mkdir(cpath, 0755);
+    for (int i = 0; i < SECTORS_SLOT; i++)
+        store_put(cache_dir, target + (size_t)i * SECTOR_SIZE);
+
     /* The device already runs this firmware if its active slot has the same
      * content hash. image_sha256 excludes the descriptor, so the version
      * stamp does not affect the comparison. */
@@ -166,42 +218,38 @@ int server_update_session(int fd, const char *image_path, const char *cache_dir,
             memcpy(c.hash, s->hash, SECTOR_HASH_LEN);
             frame_send(&l, MSG_STEP_COPY, &c, sizeof c);
         } else {
-            uint8_t sect[PAGE_SIZE];
-            memcpy(sect, target + (size_t)s->dst * PAGE_SIZE, PAGE_SIZE);
-            uint8_t hsh[SECTOR_HASH_LEN];
-            memcpy(hsh, s->hash, SECTOR_HASH_LEN);
+            /* dev.h[dst] is the device's current content of dst, which is what
+             * its flash holds when it decompresses: each dst is written once
+             * per plan, and writes happen in-session. */
+            uint8_t enc[SECTOR_SIZE], dict[SECTOR_SIZE], method;
+            int have_dict = store_get(cache_dir, dev.h[s->dst], dict) == 0;
+            size_t enc_len = compress_sector(target + (size_t)s->dst * SECTOR_SIZE,
+                                             have_dict ? dict : NULL, enc, &method);
+            out->n_raw      += method == COMPRESS_RAW;
+            out->n_lz4      += method == COMPRESS_LZ4;
+            out->n_lz4_dict += method == COMPRESS_LZ4_DICT;
+            out->enc_bytes  += enc_len;
 
-            /* Erased (0xFF) or zeroed (0x00) sectors are common padding at
-             * the tail of a short image. Send the repeated byte instead of
-             * the page: one small frame instead of four. */
-            uint8_t fill = sect[0];
-            int fillable = (fill == 0xFF || fill == 0x00);
-            for (size_t i = 1; fillable && i < PAGE_SIZE; i++)
-                fillable = (sect[i] == fill);
-
-            if (fillable) {
-                msg_step_fill_t fl;
-                fl.dst = s->dst; fl.value = fill;
-                memcpy(fl.hash, hsh, SECTOR_HASH_LEN);
-                frame_send(&l, MSG_STEP_FILL, &fl, sizeof fl);
-            } else {
-                for (size_t off = 0; off < PAGE_SIZE; off += WRITE_CHUNK) {
-                    uint8_t buf[WRITE_HDR + WRITE_CHUNK];
-                    uint16_t len = WRITE_CHUNK;
-                    uint16_t o16 = (uint16_t)off;
-                    memcpy(buf + 0, &s->dst, 2);
-                    memcpy(buf + 2, &o16, 2);
-                    memcpy(buf + 4, &len, 2);
-                    memcpy(buf + WRITE_HDR, sect + off, len);
-                    frame_send(&l, MSG_STEP_WRITE, buf, WRITE_HDR + len);
-                }
-                msg_step_write_end_t we;
-                we.dst = s->dst;
-                memcpy(we.hash, hsh, SECTOR_HASH_LEN);
-                frame_send(&l, MSG_STEP_WRITE_END, &we, sizeof we);
+            for (size_t off = 0; off < enc_len; off += WRITE_CHUNK) {
+                uint8_t buf[WRITE_HDR + WRITE_CHUNK];
+                uint16_t len = (uint16_t)(enc_len - off < WRITE_CHUNK ? enc_len - off : WRITE_CHUNK);
+                uint16_t o16 = (uint16_t)off;
+                memcpy(buf + 0, &s->dst, 2);
+                memcpy(buf + 2, &o16, 2);
+                memcpy(buf + 4, &len, 2);
+                memcpy(buf + WRITE_HDR, enc + off, len);
+                frame_send(&l, MSG_STEP_WRITE, buf, WRITE_HDR + len);
+                out->write_wire += FRAME_OVERHEAD + WRITE_HDR + len;
             }
+            msg_step_write_end_t we = { .dst = s->dst, .compress = method, .enc_len = (uint16_t)enc_len };
+            memcpy(we.hash, s->hash, SECTOR_HASH_LEN);
+            frame_send(&l, MSG_STEP_WRITE_END, &we, sizeof we);
+            out->write_wire += FRAME_OVERHEAD + sizeof we + FRAME_OVERHEAD + sizeof(msg_step_ack_t);
         }
     }
+
+    log_fmt(log, log_ctx, "server: compress raw=%d lz4=%d lz4_dict=%d",
+           out->n_raw, out->n_lz4, out->n_lz4_dict);
 
     frame_send(&l, MSG_PLAN_END, NULL, 0);
 

@@ -8,6 +8,7 @@
 #include "proto.h"
 #include "manifest.h"
 #include "image.h"
+#include "compress.h"
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -98,18 +99,17 @@ static void *flash_worker(void *arg)
         j->np->op[j->dst] = OP_WRITE;
         memcpy(j->np->target_hash[j->dst], j->hash, SECTOR_HASH_LEN);
         j->done[j->dst] = 1;
-        j->stats->sha_bytes += 2 * PAGE_SIZE;   /* hash of the buffer and of the page */
+        j->stats->sha_bytes += 2 * SECTOR_SIZE;   /* hash of the buffer and of the sector in flash */
         frame_send(j->l, MSG_STEP_ACK, &a, sizeof a);
     }
     pthread_mutex_unlock(&io_lock);
     return NULL;
 }
 
-/* Verifies the assembled buffer against the sender's hash, then hands it to
- * the flash worker and flips to the other buffer. Shared by STEP_WRITE_END
- * and STEP_FILL - both close out one sector the same way. */
+/* Verifies the decoded buffer against the sender's hash, then hands it to
+ * the flash worker and flips to the other buffer. */
 static void stage_sector(link_t *l, meta_t *np, uint8_t *done, flash_job_t *job,
-                          flash_t *f, uint8_t sect[2][PAGE_SIZE], int *cur,
+                          flash_t *f, uint8_t sect[2][SECTOR_SIZE], int *cur,
                           sector_idx_t dst, const uint8_t hash[SECTOR_HASH_LEN],
                           client_update_stats_t *stats, log_fn log, void *log_ctx)
 {
@@ -155,7 +155,7 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
     msg_hello_t h;
     memset(&h, 0, sizeof h);
     memcpy(h.device_id, id->device_id, 16);
-    h.sector_size     = PAGE_SIZE;
+    h.sector_size     = SECTOR_SIZE;
     h.sectors         = SECTORS_SLOT;
     h.last_result     = (uint8_t)m.last_result;
     h.running_version = client_app_version(f);
@@ -172,7 +172,7 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
     double t0 = now_ms();
     manifest_build(f, &man);
     stats->t_manifest = now_ms() - t0;
-    stats->sha_bytes += (size_t)MANIFEST_ENTRIES * PAGE_SIZE;   /* both slots hashed */
+    stats->sha_bytes += (size_t)MANIFEST_ENTRIES * SECTOR_SIZE;   /* both slots hashed */
 
     t0 = now_ms();
     msg_manifest_auth_t auth;
@@ -219,7 +219,8 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
     memcpy(np.target_sha256, pb.image_sha256, SHA256_LEN);
     memcpy(np.target_mac, pb.image_mac, SHA256_LEN);
 
-    uint8_t sect[2][PAGE_SIZE];
+    uint8_t sect[2][SECTOR_SIZE];
+    uint8_t enc[SECTOR_SIZE];   /* the encoded sector being assembled */
     uint8_t done[SECTORS_SLOT];
     memset(done, 0, sizeof done);
     int pending_copies = 0;
@@ -252,19 +253,31 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
             memcpy(&dst, pay + 0, 2);
             memcpy(&off, pay + 2, 2);
             memcpy(&len, pay + 4, 2);
-            if (dst >= SECTORS_SLOT || (size_t)off + len > PAGE_SIZE)
+            if (dst >= SECTORS_SLOT || (size_t)off + len > SECTOR_SIZE)
                 die("bad write fragment");
-            memcpy(sect[cur] + off, pay + WRITE_HDR, len);
+            memcpy(enc + off, pay + WRITE_HDR, len);
         } else if (t == MSG_STEP_WRITE_END) {
             msg_step_write_end_t we;
             memcpy(&we, pay, sizeof we);
+            if (we.dst >= SECTORS_SLOT || we.enc_len > SECTOR_SIZE ||
+                (we.compress == COMPRESS_RAW && we.enc_len != SECTOR_SIZE))
+                die("bad write end");
+
+            /* The dictionary is dst's current flash content, which is what our
+             * manifest told the server it holds: dst is written once per plan,
+             * and only after this. Not while the worker may be rewriting it. */
+            if (job.active && job.dst == we.dst) { pthread_join(job.tid, NULL); job.active = 0; }
+            if (decompress_sector(we.compress, enc, we.enc_len,
+                                  flash_at(f, APP_BASE + (size_t)we.dst * SECTOR_SIZE),
+                                  sect[cur]) < 0) {
+                msg_step_ack_t nak = { we.dst, NAK_DECOMPRESS };
+                pthread_mutex_lock(&io_lock);
+                frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
+                pthread_mutex_unlock(&io_lock);
+                log_fmt(log, log_ctx, "device: sector %u does not decompress", we.dst);
+                continue;
+            }
             stage_sector(&l, &np, done, &job, f, sect, &cur, we.dst, we.hash, stats, log, log_ctx);
-        } else if (t == MSG_STEP_FILL) {
-            msg_step_fill_t fl;
-            memcpy(&fl, pay, sizeof fl);
-            if (fl.dst >= SECTORS_SLOT) die("bad sector index %u", fl.dst);
-            memset(sect[cur], fl.value, PAGE_SIZE);
-            stage_sector(&l, &np, done, &job, f, sect, &cur, fl.dst, fl.hash, stats, log, log_ctx);
         } else {
             die("protocol: unexpected message %d during plan", t);
         }
@@ -331,9 +344,9 @@ void client_update_boot(flash_t *f, const uint8_t root_key[32],
             uint8_t got[SECTOR_HASH_LEN];
             if (m.op[i] == OP_COPY) {
                 /* Flash to flash inside the partition, through RAM. */
-                uint8_t tmp[PAGE_SIZE];
+                uint8_t tmp[SECTOR_SIZE];
                 memcpy(tmp, flash_at(f, APP_BASE +
-                       (size_t)m.src_index[i] * PAGE_SIZE), PAGE_SIZE);
+                       (size_t)m.src_index[i] * SECTOR_SIZE), SECTOR_SIZE);
                 sector_hash(tmp, got);
                 if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
                     log_fmt(log, log_ctx, "boot: copy source for sector %d no longer matches", i);
@@ -349,7 +362,7 @@ void client_update_boot(flash_t *f, const uint8_t root_key[32],
                 break;
             }
             journal_set(f, i, JRN_DONE);
-            stats->sha_bytes += 2 * PAGE_SIZE;
+            stats->sha_bytes += 2 * SECTOR_SIZE;
         }
         stats->t_apply = now_ms() - t0;
 

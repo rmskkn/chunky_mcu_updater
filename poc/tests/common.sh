@@ -14,7 +14,13 @@ CB_FLASH="$BUILD/cb-flash"
 CB_SERVER="$BUILD/cb-server"
 CB_CLIENT="$BUILD/cb-client"
 
-need_build() { [ -x "$CB_FLASH" ] || make -C "$POC" >/dev/null; }
+# Geometry comes from the binary under test (cb-flash geometry); RAW_WIRE is
+# what one uncompressed sector costs to receive.
+need_build() {
+    [ -x "$CB_FLASH" ] || make -C "$POC" >/dev/null
+    eval "$("$CB_FLASH" geometry)"
+    RAW_WIRE=$((SECTOR_SIZE / 256 * 272))   # per 256 B fragment: frame 10 + header 6
+}
 
 # test_init NAME: sets RUN, CACHE, FLASH, IMAGE, BASE, PORT and clears RUN.
 test_init() {
@@ -51,8 +57,8 @@ update() { "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --port "$PORT" "$@"; 
 
 # gen_random_bin OUT SIZE SEED: a deterministic, non-uniform firmware payload.
 # Self-contained (no external reference binary), so a test's content is
-# reproducible from the test alone, and plain enough that no 1 KB window of
-# it is ever accidentally all-0xFF or all-0x00.
+# reproducible from the test alone, and plain enough that no sector-sized window
+# of it is ever accidentally all-0xFF or all-0x00.
 gen_random_bin() {
     python3 -I -c "
 import random, sys
@@ -64,16 +70,16 @@ open('$1', 'wb').write(bytes(random.randrange(1, 255) for _ in range($2)))
 # patch_sector BIN SECTOR BYTE: overwrite sector index SECTOR's slot-image
 # range with one repeated byte. SECTOR must be >= 1 - sector 0 straddles the
 # vector table and the descriptor, so its bin offset is not a clean multiple
-# of PAGE_SIZE. Mirrors the slot layout in lib/image.h: a target byte at
-# offset T (T >= CODE_OFF=640) comes from bin offset T-128.
+# of SECTOR_SIZE. Mirrors the slot layout in lib/image.h: a target byte at
+# offset T (T >= CODE_OFF=640) comes from bin offset T-DESC_LEN.
 patch_sector() {
     python3 -I -c "
-PAGE = 1024
+SECT = $SECTOR_SIZE
 sector = $2
-start = sector * PAGE - 128
-end = start + PAGE
+start = sector * SECT - $DESC_LEN
+end = start + SECT
 data = bytearray(open('$1', 'rb').read())
-data[start:end] = bytes([$3]) * PAGE
+data[start:end] = bytes([$3]) * SECT
 open('$1', 'wb').write(data)
 "
 }
@@ -86,14 +92,59 @@ open('$1', 'wb').write(data)
 scramble_sector() {
     python3 -I -c "
 import random
-PAGE = 1024
+SECT = $SECTOR_SIZE
 sector = $2
 random.seed($3)
-start = sector * PAGE - 128
-end = start + PAGE
+start = sector * SECT - $DESC_LEN
+end = start + SECT
 data = bytearray(open('$1', 'rb').read())
-data[start:end] = bytes(random.randrange(1, 255) for _ in range(PAGE))
+data[start:end] = bytes(random.randrange(1, 255) for _ in range(SECT))
 open('$1', 'wb').write(data)
+"
+}
+
+# motif_sector BIN SECTOR: fill the sector with a repeating 16-byte motif:
+# compressible, but not one repeated byte. SECTOR >= 1, as above.
+motif_sector() {
+    python3 -I -c "
+SECT = $SECTOR_SIZE
+start = $2 * SECT - $DESC_LEN
+motif = bytes((i * 7 + 3) % 251 + 1 for i in range(16))
+data = bytearray(open('$1', 'rb').read())
+data[start:start + SECT] = motif * (SECT // 16)
+open('$1', 'wb').write(data)
+"
+}
+
+# insert_bytes BIN SECTOR N: insert N bytes inside SECTOR and truncate to the
+# old length, so everything after it shifts by N: a release that grew some code.
+insert_bytes() {
+    python3 -I -c "
+SECT = $SECTOR_SIZE
+at = $2 * SECT - $DESC_LEN + SECT // 2
+data = open('$1', 'rb').read()
+open('$1', 'wb').write((data[:at] + bytes([0x77]) * $3 + data[at:])[:len(data)])
+"
+}
+
+# tweak_sector BIN SECTOR [XOR]: change 16 bytes in the middle of SECTOR.
+tweak_sector() {
+    python3 -I -c "
+SECT = $SECTOR_SIZE
+at = $2 * SECT - $DESC_LEN + SECT // 2
+data = bytearray(open('$1', 'rb').read())
+for i in range(16): data[at + i] ^= ${3:-0x55}
+open('$1', 'wb').write(data)
+"
+}
+
+# sector_hash_hex FLASH SECTOR: the manifest hash of one sector of a device.
+sector_hash_hex() {
+    "$CB_FLASH" manifest "$1" | python3 -I -c "
+import sys
+t = sys.stdin.read().split()
+i = t.index('$2')
+print(t[i + 1])
 "
 }
 
@@ -101,14 +152,19 @@ open('$1', 'wb').write(data)
 # current bytes, both >= 1 (see patch_sector).
 copy_sector() {
     python3 -I -c "
-PAGE = 1024
+SECT = $SECTOR_SIZE
 dst, src = $2, $3
-def rng(s): start = s * PAGE - 128; return start, start + PAGE
+def rng(s): start = s * SECT - $DESC_LEN; return start, start + SECT
 data = bytearray(open('$1', 'rb').read())
 ds, de = rng(dst); ss, se = rng(src)
 data[ds:de] = bytes(data[ss:se])
 open('$1', 'wb').write(data)
 "
+}
+
+# compress_count raw|lz4|lz4_dict: sectors the server's last session sent that way.
+compress_count() {
+    grep 'server: compress' "$RUN/server.log" | tail -1 | sed -n "s/.* $1=\([0-9]*\).*/\1/p"
 }
 
 ok()   { printf 'PASS  %s\n' "$1"; }

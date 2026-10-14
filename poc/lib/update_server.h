@@ -8,6 +8,9 @@ typedef struct {
     uint32_t ver;
     plan_t   plan;
     uint64_t tx_bytes, rx_bytes;
+    int      n_raw, n_lz4, n_lz4_dict;   /* written sectors per compressor */
+    uint64_t enc_bytes;                  /* encoded sector bytes */
+    uint64_t write_wire;                 /* tx bytes of the write steps, framing included */
 } server_session_result_t;
 
 /* Handles one device connection end to end: HELLO, the manifest (with the

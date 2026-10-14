@@ -9,7 +9,7 @@ enum {
     MSG_MANIFEST_DIGEST, MSG_MANIFEST_NEEDED, MSG_MANIFEST_REJECT,
     MSG_PLAN_BEGIN, MSG_STEP_COPY, MSG_STEP_WRITE, MSG_STEP_WRITE_END,
     MSG_STEP_ACK, MSG_STEP_NAK, MSG_PLAN_END, MSG_PLAN_READY,
-    MSG_COMMIT, MSG_STATUS, MSG_ABORT, MSG_NO_UPDATE, MSG_STEP_FILL
+    MSG_COMMIT, MSG_STATUS, MSG_ABORT, MSG_NO_UPDATE
 };
 
 /* MANIFEST_REJECT reasons */
@@ -17,7 +17,7 @@ enum { REJ_BAD_SIGNATURE = 1, REJ_BAD_NONCE, REJ_UNKNOWN_DEVICE,
        REJ_GEOMETRY_MISMATCH, REJ_MALFORMED };
 
 /* STEP_NAK reasons */
-enum { NAK_HASH_MISMATCH = 1, NAK_FLASH_FAIL, NAK_BAD_INDEX };
+enum { NAK_HASH_MISMATCH = 1, NAK_FLASH_FAIL, NAK_BAD_INDEX, NAK_DECOMPRESS };
 
 #define NONCE_LEN 16
 
@@ -59,16 +59,22 @@ typedef struct {
     uint8_t      hash[SECTOR_HASH_LEN];
 } msg_step_copy_t;
 
-/* STEP_WRITE fragments a sector; STEP_WRITE_END closes it with the hash. */
+/* STEP_WRITE fragments the encoded sector (offset/len index the encoded
+ * stream); STEP_WRITE_END closes it with the compressor id and the hash. */
 #define WRITE_CHUNK 256
 /* Serialised by hand as dst:u16, offset:u16, len:u16, then the bytes. */
 #define WRITE_HDR   6
+_Static_assert(SECTOR_SIZE % WRITE_CHUNK == 0,
+               "a sector must be a whole number of STEP_WRITE fragments");
 
-typedef struct { sector_idx_t dst; uint8_t hash[SECTOR_HASH_LEN]; } msg_step_write_end_t;
-
-/* STEP_FILL: the whole sector is one repeated byte (0xFF erased, or 0x00),
- * so send the byte instead of PAGE_SIZE/WRITE_CHUNK fragments. */
-typedef struct { sector_idx_t dst; uint8_t value; uint8_t hash[SECTOR_HASH_LEN]; } msg_step_fill_t;
+/* hash is of the decoded sector. */
+typedef struct {
+    sector_idx_t dst;
+    uint8_t      compress;     /* COMPRESS_* */
+    uint8_t      pad;
+    uint16_t     enc_len;
+    uint8_t      hash[SECTOR_HASH_LEN];
+} msg_step_write_end_t;
 typedef struct { sector_idx_t dst; uint8_t code; } msg_step_ack_t;
 typedef struct { uint16_t pending; } msg_plan_ready_t;
 

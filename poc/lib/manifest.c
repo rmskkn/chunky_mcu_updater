@@ -4,7 +4,7 @@
 void manifest_build(flash_t *f, manifest_t *m)
 {
     memset(m, 0, sizeof *m);
-    m->sector_size = PAGE_SIZE;
+    m->sector_size = SECTOR_SIZE;
     m->sectors     = SECTORS_SLOT;
 
     for (int i = 0; i < SECTORS_SLOT; i++)
@@ -33,7 +33,7 @@ void manifest_mac(const uint8_t key[32], const uint8_t device_id[16],
  * a duplicated or missing sector is unrepresentable. */
 int manifest_check(const manifest_t *m, const char **why)
 {
-    if (m->sector_size != PAGE_SIZE) { *why = "sector_size"; return -1; }
+    if (m->sector_size != SECTOR_SIZE) { *why = "sector_size"; return -1; }
     if (m->sectors != SECTORS_SLOT)  { *why = "sectors";     return -1; }
     *why = NULL;
     return 0;

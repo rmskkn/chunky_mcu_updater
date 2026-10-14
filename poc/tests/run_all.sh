@@ -2,7 +2,7 @@
 # Runs every case_*.sh in this directory and summarises pass/fail.
 #
 #   tests/run_all.sh              every case
-#   tests/run_all.sh case_fill_*  a glob, for just the cases you're touching
+#   tests/run_all.sh case_lz4_*  a glob, for just the cases you're touching
 #
 # Each case builds its own fixture binaries and runs against its own
 # server+client pair on its own port and scratch dir (see common.sh), so
@@ -24,6 +24,21 @@ shopt -u nullglob
 [ ${#cases[@]} -gt 0 ] || { echo "no cases match: $pattern" >&2; exit 2; }
 
 pass=0 fail=0
+
+# compress test first, at the geometry of the existing build (so no rebuild flip)
+if [ "$pattern" = "case_*.sh" ]; then
+    [ -x ../build/cb-flash ] || make -C .. >/dev/null
+    eval "$(../build/cb-flash geometry)"
+    echo "== compress_test"
+    if out="$(make -C .. test-compress ERASE_SIZE="$ERASE_SIZE" SECTOR_SIZE="$SECTOR_SIZE" 2>&1)"; then
+        grep -E '^PASS' <<<"$out"
+        pass=$((pass + 1))
+    else
+        echo "$out"
+        fail=$((fail + 1))
+    fi
+fi
+
 for c in "${cases[@]}"; do
     echo "== $c"
     if bash "$c"; then

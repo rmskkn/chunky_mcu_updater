@@ -9,10 +9,12 @@ source "$(dirname "$0")/common.sh"
 need_build
 test_init copy_dedup
 
-gen_random_bin "$BASE" 60000 103
+# sector numbers scale with the geometry (10, 20, 40 at 1 KB)
+S_DST=$((SECTORS / 10)); S_MID=$((SECTORS / 5)); S_SRC=$((SECTORS * 4 / 10))
+gen_random_bin "$BASE" $((PAYLOAD_MAX * 6 / 10)) 103
 cp "$BASE" "$IMAGE"
-copy_sector "$IMAGE" 10 40        # sector 10 now wants sector 40's bytes
-scramble_sector "$IMAGE" 20 999   # plus an ordinary write, so copy and write interleave
+copy_sector "$IMAGE" $S_DST $S_SRC   # sector 10 now wants sector 40's bytes
+scramble_sector "$IMAGE" $S_MID 999   # plus an ordinary write, so copy and write interleave
 
 trap server_stop EXIT
 server_start
@@ -25,10 +27,11 @@ assert_contains "$out" "booting version 2" "boots the new version"
 assert_contains "$out" "verified" "image verifies"
 
 rx="$(sed -n 's/.*rx=\([0-9]*\) bytes/\1/p' <<<"$out")"
-# Two real STEP_WRITEs (sector 0 and sector 20) plus one STEP_COPY that
-# carries no sector bytes at all. Three full writes would run past 3.2 KB.
-[ "$rx" -lt 2700 ] || fail "wire size" "rx=$rx B, expected under ~2.7 KB (two writes + one copy, not three writes)"
+# two writes (sector 0, the scrambled one) + a copy; ~524 B of handshake/acks
+limit=$((2 * RAW_WIRE + 524))
+[ "$rx" -lt "$limit" ] || fail "wire size" "rx=$rx B, expected under $limit B (two writes + one copy, not three writes)"
 
-grep -q 'copied  10' "$RUN/server.log" || fail "copy step" "server log does not show sector 10 as copied"
+[ "$(compress_count raw)" -ge 1 ] || fail "raw fallback" "the scrambled sector did not stay raw"
+grep -q "copied  $S_DST" "$RUN/server.log" || fail "copy step" "server log does not show sector 10 as copied"
 
 ok "copy_dedup (rx=$rx B)"

@@ -88,7 +88,7 @@ static int cmd_session(void)
     double session_ms = now_ms() - t_start;
 
     printf("time: manifest   host %8.2f ms   F103 model %8.1f ms  (%d sectors hashed)\n",
-           g_stats.t_manifest, (double)MANIFEST_ENTRIES * PAGE_SIZE * F103_SHA256_CYC_B / (F103_MHZ * 1000.0),
+           g_stats.t_manifest, (double)MANIFEST_ENTRIES * SECTOR_SIZE * F103_SHA256_CYC_B / (F103_MHZ * 1000.0),
            MANIFEST_ENTRIES);
     printf("time: sign       host %8.2f ms   F103 model %8.1f ms  (ECDSA P-256, budgeted)\n",
            g_stats.t_auth, ECDSA_SIGN_MS);
