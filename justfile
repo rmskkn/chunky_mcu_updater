@@ -6,6 +6,13 @@ default:
 # All tests: unit tests, planner properties, security cases and the power-cut sweeps (CHUNKY_SWEEP_SEEDS=500 digs deeper)
 test:
     cargo test --workspace
+    just test-c
+
+# The C reader generated from chunky_format's types against its golden vectors (PROTO-3)
+test-c:
+    mkdir -p target
+    cc -std=c99 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion -o target/chunky_format_c_test chunky_format/c/test.c
+    target/chunky_format_c_test
 
 # clippy (warnings are errors), formatting, and the firmware-target builds of both trust options
 lint:
