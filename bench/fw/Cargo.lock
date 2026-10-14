@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "bench_layout"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "bit_field"
@@ -136,7 +136,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "chunky"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "embedded-storage",
  "sha2",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "chunky_swap"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "chunky",
  "embassy-boot",
