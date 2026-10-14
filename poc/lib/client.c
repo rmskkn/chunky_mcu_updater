@@ -9,10 +9,10 @@
 #include "manifest.h"
 #include "image.h"
 #include "compress.h"
+#include "platform.h"
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
-#include <pthread.h>
 
 /* Opens the device, creating it on first use with the firmware it shipped
  * with in slot 0. The manifest the client sends is a statement about real
@@ -62,8 +62,8 @@ uint32_t client_app_version(flash_t *f)
  * link. The job owns dst's slot in np/done; the main thread must join
  * before it reads or writes that slot itself. */
 typedef struct {
-    pthread_t   tid;
-    int         active;
+    plat_thread_t *thread;   /* NULL when no job is in flight */
+    plat_mutex_t  *io_lock;  /* serialises frame_send between worker and main thread */
     flash_t     *f;
     link_t      *l;
     meta_t      *np;
@@ -74,9 +74,12 @@ typedef struct {
     client_update_stats_t *stats;
 } flash_job_t;
 
-static pthread_mutex_t io_lock = PTHREAD_MUTEX_INITIALIZER;
+static void job_join(flash_job_t *job)
+{
+    if (job->thread) { plat_thread_join(job->thread); job->thread = NULL; }
+}
 
-static void *flash_worker(void *arg)
+static void flash_worker(void *arg)
 {
     flash_job_t *j = arg;
     uint8_t got[SECTOR_HASH_LEN];
@@ -91,7 +94,7 @@ static void *flash_worker(void *arg)
     }
 
     msg_step_ack_t a = { j->dst, 0 };
-    pthread_mutex_lock(&io_lock);
+    plat_mutex_lock(j->io_lock);
     if (memcmp(got, j->hash, SECTOR_HASH_LEN)) {
         a.code = NAK_FLASH_FAIL;
         frame_send(j->l, MSG_STEP_NAK, &a, sizeof a);
@@ -102,8 +105,7 @@ static void *flash_worker(void *arg)
         j->stats->sha_bytes += 2 * SECTOR_SIZE;   /* hash of the buffer and of the sector in flash */
         frame_send(j->l, MSG_STEP_ACK, &a, sizeof a);
     }
-    pthread_mutex_unlock(&io_lock);
-    return NULL;
+    plat_mutex_unlock(j->io_lock);
 }
 
 /* Verifies the decoded buffer against the sender's hash, then hands it to
@@ -117,19 +119,19 @@ static void stage_sector(link_t *l, meta_t *np, uint8_t *done, flash_job_t *job,
     sector_hash(sect[*cur], got);
     if (memcmp(got, hash, SECTOR_HASH_LEN)) {
         msg_step_ack_t nak = { dst, NAK_HASH_MISMATCH };
-        pthread_mutex_lock(&io_lock);
+        plat_mutex_lock(job->io_lock);
         frame_send(l, MSG_STEP_NAK, &nak, sizeof nak);
-        pthread_mutex_unlock(&io_lock);
+        plat_mutex_unlock(job->io_lock);
         log_fmt(log, log_ctx, "device: sector %u hash mismatch", dst);
         return;
     }
 
-    if (job->active) { pthread_join(job->tid, NULL); job->active = 0; }
+    job_join(job);
     job->f = f; job->l = l; job->np = np; job->done = done;
     job->dst = dst; job->buf = sect[*cur]; job->stats = stats;
     memcpy(job->hash, hash, SECTOR_HASH_LEN);
-    job->active = 1;
-    pthread_create(&job->tid, NULL, flash_worker, job);
+    job->thread = plat_thread_start(flash_worker, job);
+    if (!job->thread) die("cannot start the flash worker");
     *cur = 1 - *cur;
 }
 
@@ -225,7 +227,8 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
     memset(done, 0, sizeof done);
     int pending_copies = 0;
     int cur = 0;                /* buffer the next STEP_WRITE fills */
-    flash_job_t job = { .active = 0 };
+    flash_job_t job = { .thread = NULL, .io_lock = plat_mutex_create() };
+    if (!job.io_lock) die("cannot create the link mutex");
     t0 = now_ms();
 
     for (;;) {
@@ -244,9 +247,9 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
             memcpy(np.target_hash[c.dst], c.hash, SECTOR_HASH_LEN);
             pending_copies++;
             msg_step_ack_t a = { c.dst, 0 };
-            pthread_mutex_lock(&io_lock);
+            plat_mutex_lock(job.io_lock);
             frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
-            pthread_mutex_unlock(&io_lock);
+            plat_mutex_unlock(job.io_lock);
         } else if (t == MSG_STEP_WRITE) {
             sector_idx_t dst;
             uint16_t off, len;
@@ -266,14 +269,14 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
             /* The dictionary is dst's current flash content, which is what our
              * manifest told the server it holds: dst is written once per plan,
              * and only after this. Not while the worker may be rewriting it. */
-            if (job.active && job.dst == we.dst) { pthread_join(job.tid, NULL); job.active = 0; }
+            if (job.thread && job.dst == we.dst) job_join(&job);
             if (decompress_sector(we.compress, enc, we.enc_len,
                                   flash_at(f, APP_BASE + (size_t)we.dst * SECTOR_SIZE),
                                   sect[cur]) < 0) {
                 msg_step_ack_t nak = { we.dst, NAK_DECOMPRESS };
-                pthread_mutex_lock(&io_lock);
+                plat_mutex_lock(job.io_lock);
                 frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
-                pthread_mutex_unlock(&io_lock);
+                plat_mutex_unlock(job.io_lock);
                 log_fmt(log, log_ctx, "device: sector %u does not decompress", we.dst);
                 continue;
             }
@@ -285,7 +288,8 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
 
     /* Every STEP_WRITE_END's job must land - and its ACK/NAK be sent, and its
      * np/done slot be written - before np/done are read below. */
-    if (job.active) { pthread_join(job.tid, NULL); job.active = 0; }
+    job_join(&job);
+    plat_mutex_destroy(job.io_lock);
 
     stats->t_stage = now_ms() - t0;
 
