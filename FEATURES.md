@@ -64,6 +64,14 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
   a slice of the step, no copy), each `step` call takes exactly one encoded step, a WRITE exactly one chunk, the
   header's step count and body length are bounded by the geometry and must be met exactly; `step_len` frames a
   step from its head for a receiver of a stream and refuses a WRITE count that is not one chunk before the data.
+- 📋 **APPLY-2 apply-resume** — what ww_dfu (STD-12) promises and the engine does not do yet: a step resent after a
+  lost reply is accepted and skipped, and `Stage::begin` with the same header resumes a session. Today `Applier`
+  refuses a resent step (`OutOfOrder`) and a programmed chunk (`NotBlank`), and has no resume entry point. Way
+  without a journal: an exact repeat of the last step whose chunk reads back right is answered "done" (no
+  flash operation); a resume after a reset is a new manifest and a new plan (the planner already makes only
+  what is left), or a resume entry point that re-derives position and body offset from a verified prefix of the
+  plan, never from what the carrier says. After a cut inside a block, restart at the ERASE of that block (a torn
+  chunk is neither blank nor right). Needed by NET-1 (P2625#15oct-0943).
 
 ## ECC — torn words on ECC flash
 
