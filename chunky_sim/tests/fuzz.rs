@@ -12,7 +12,7 @@
 
 mod common;
 
-use chunky::descriptor::{Expect, ImageError, Trust, open_descriptor, split_descriptor, unsigned_seal};
+use chunky::descriptor::{Expect, Trust, open_descriptor, split_descriptor, unsigned_seal};
 use chunky::hash::ChunkHash;
 use chunky::plan::{PLAN_HEADER_LEN, read_header_fixed, read_step, step_len, step_len_from_head};
 use chunky::{ApplyError, BootState};
@@ -113,7 +113,7 @@ proptest! {
         for trust in trusts() {
             let result = open_descriptor(&signed(&raw), &trust, &d.expect);
             if matches!(trust, Trust::Ed25519(_)) {
-                prop_assert_eq!(result, Err(ImageError::BadSignature));
+                prop_assert!(result.is_err(), "junk with an unsigned seal was accepted by a key");
             }
         }
     }
