@@ -2,10 +2,10 @@
 //! path write the same bytes, read them to the same values, and those bytes are the ones in `vectors/`. The C
 //! reader (`c/chunky_format.h`, generated) checks the same vectors in `c/test.c` (`just test-c`).
 //!
-//! `CHUNKY_UPDATE_GOLDEN=1 cargo test -p chunky_format` rewrites `vectors/` and the files in `c/` after a deliberate
-//! format change.
+//! The vectors themselves (`vectors/`, `c/golden.h`) are made by `chunky_server::vectors` from a firmware pair
+//! (`just vectors`); this file reads them with both readers. Only the generated C reader `c/chunky_format.h` is
+//! written from here: `CHUNKY_UPDATE_GOLDEN=1 cargo test -p chunky_format` rewrites it after a deliberate change.
 
-use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use chunky_format::*;
@@ -46,6 +46,17 @@ impl SealCheck for Ed25519 {
         self.0
             .verify(&message, &ed25519_dalek::Signature::from_bytes(seal))
             .is_ok()
+    }
+}
+
+/// The unsigned opt-out: the seal is SHA-256 over `domain || body`, then zeros.
+struct UnsignedSeal;
+
+impl SealCheck for UnsignedSeal {
+    fn check(&self, domain: &[u8], body: &[u8], seal: &[u8; SEAL_LEN]) -> bool {
+        let mut want = [0; SEAL_LEN];
+        want[..32].copy_from_slice(&Sha256::digest([domain, body].concat()));
+        *seal == want
     }
 }
 
@@ -180,34 +191,76 @@ fn bytes_at_their_offsets() {
     assert_eq!(&s[45..], &[1, 2, 1]);
 }
 
+/// The vectors of `chunky_server::vectors`, read with both readers: the plan header, the descriptor opened
+/// with the key (or the unsigned seal), every step as view and as value, the manifest.
 #[test]
 fn both_readers_read_the_vectors() {
-    let plan = plan();
-    golden(dir("vectors/plan.bin"), &plan);
-    golden(dir("vectors/descriptor.bin"), &descriptor().seal_bytes());
+    for kind in ["signed", "unsigned"] {
+        let read = |file: &str| std::fs::read(dir(&format!("vectors/{kind}/{file}"))).unwrap();
+        let plan = read("plan.bin");
+        let fixed = read_header_fixed(&plan).unwrap();
+        let sw = read_header_sw(&plan).unwrap();
+        assert_eq!(fixed, sw);
+        assert_eq!(fixed.descriptor.seal_bytes(), read("descriptor.bin"), "{kind}");
+        let body = if kind == "signed" {
+            fixed.descriptor.open(&Ed25519(key().verifying_key())).unwrap()
+        } else {
+            fixed.descriptor.open(&UnsignedSeal).unwrap()
+        };
+        assert_eq!(body.format, FORMAT);
+        assert_eq!(
+            body.scheme,
+            if kind == "signed" {
+                Scheme::Ed25519
+            } else {
+                Scheme::Unsigned
+            }
+        );
+        // the descriptor is the one at the end of the target image, and describes it
+        let new = read("new.bin");
+        assert_eq!(
+            &new[new.len() - SignedDescriptor::ENCODED_LEN..],
+            &fixed.descriptor.seal_bytes()[..]
+        );
+        assert_eq!(body.image_len as usize, new.len() - SignedDescriptor::ENCODED_LEN);
+        assert_eq!(
+            body.image_sha256,
+            <[u8; 32]>::from(Sha256::digest(&new[..body.image_len as usize]))
+        );
 
-    let fixed = read_header_fixed(&plan).unwrap();
-    let sw = read_header_sw(&plan).unwrap();
-    assert_eq!(fixed, sw);
-    let body = fixed.descriptor.open(&Ed25519(key().verifying_key())).unwrap();
-    assert_eq!(body, self::body());
-
-    let mut at = PlanHeader::ENCODED_LEN;
-    for step in steps() {
-        let view = read_step(&plan[at..]).unwrap();
-        let len = step_len(&view);
-        // the view and the value read the same step, and both are the bytes the vectors hold
-        let value = Step::from_head_tail(&plan[at..at + len]).unwrap();
-        assert_eq!(value, step);
-        if let StepView::Write(w) = &view {
-            assert_eq!(w.dst(), 6);
-            assert_eq!(w.data().as_bytes(), DATA);
-            assert_eq!(w.hash(), hash8(&DATA));
+        let (mut at, mut kinds) = (PlanHeader::ENCODED_LEN, [0u32; 3]);
+        for _ in 0..fixed.step_count {
+            let view = read_step(&plan[at..]).unwrap();
+            let len = step_len(&view);
+            // the view and the value read the same step
+            let value = Step::from_head_tail(&plan[at..at + len]).unwrap();
+            match (&view, value) {
+                (StepView::Erase(_), Step::Erase { .. }) => kinds[0] += 1,
+                (StepView::Copy(_), Step::Copy { .. }) => kinds[1] += 1,
+                (StepView::Write(w), Step::Write { dst, data, hash }) => {
+                    kinds[2] += 1;
+                    assert_eq!((w.dst(), w.data().as_bytes(), w.hash()), (dst, data.as_bytes(), hash));
+                    assert_eq!(hash, hash8(data.as_bytes()));
+                    // the chunk is the new image's chunk dst
+                    let c = data.as_bytes().len();
+                    assert_eq!(data.as_bytes(), &new[dst as usize * c..][..c]);
+                }
+                _ => panic!("view and value disagree"),
+            }
+            at += len;
         }
-        at += len;
+        assert!(kinds.iter().all(|&n| n > 0), "{kind}: {kinds:?}");
+        assert_eq!(at, plan.len());
+        assert_eq!(at - PlanHeader::ENCODED_LEN, fixed.body_len as usize);
+
+        let manifest = read("manifest.bin");
+        let header = ManifestHeader::from_fixed(&manifest).unwrap();
+        let mut at = ManifestHeader::ENCODED_LEN;
+        for _ in 0..2 * header.chunks {
+            at += ChunkEntry::from_head_tail(&manifest[at..]).unwrap().head_tail_len();
+        }
+        assert_eq!(at, manifest.len());
     }
-    assert_eq!(at, plan.len());
-    assert_eq!(at - PlanHeader::ENCODED_LEN, fixed.body_len as usize);
 }
 
 trait SealBytes {
@@ -303,48 +356,12 @@ fn garbage_never_panics_and_view_and_value_agree() {
     }
 }
 
-/// The generated C reader and the vectors as C arrays, both checked in.
+/// The generated C reader, checked in.
 #[test]
 fn c_files() {
     let mut header = String::new();
     write_c_header(&mut header).unwrap();
     golden(dir("c/chunky_format.h"), header.as_bytes());
-
-    let plan = plan();
-    let body = body();
-    let mut g = String::new();
-    writeln!(
-        g,
-        "/* Golden vectors of format 2, generated by chunky_format/tests/golden.rs, do not edit. */"
-    )
-    .unwrap();
-    writeln!(
-        g,
-        "#ifndef CHUNKY_GOLDEN_H\n#define CHUNKY_GOLDEN_H\n\n#include <stdint.h>\n"
-    )
-    .unwrap();
-    writeln!(g, "static const uint8_t golden_plan[{}] = {{", plan.len()).unwrap();
-    for line in plan.chunks(16) {
-        let bytes: Vec<String> = line.iter().map(|b| format!("0x{b:02x}")).collect();
-        writeln!(g, "    {},", bytes.join(", ")).unwrap();
-    }
-    writeln!(g, "}};\n").unwrap();
-    for (name, value) in [
-        ("GOLDEN_GEOMETRY_ID", 0x6a09_e667u32),
-        ("GOLDEN_STEP_COUNT", steps().len() as u32),
-        ("GOLDEN_PRODUCT_ID", body.product_id),
-        ("GOLDEN_VERSION", body.version),
-        ("GOLDEN_SECURITY_COUNTER", body.security_counter),
-        ("GOLDEN_IMAGE_LEN", body.image_len),
-        ("GOLDEN_COPY_SRC", 5),
-        ("GOLDEN_WRITE_DST", 6),
-        ("GOLDEN_WRITE_LEN", DATA.len() as u32),
-        ("GOLDEN_LAST_ERASE", 0x0102),
-    ] {
-        writeln!(g, "#define {name} 0x{value:08x}u").unwrap();
-    }
-    writeln!(g, "\n#endif /* CHUNKY_GOLDEN_H */").unwrap();
-    golden(dir("c/golden.h"), g.as_bytes());
 }
 
 #[test]

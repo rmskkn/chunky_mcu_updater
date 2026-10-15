@@ -61,10 +61,10 @@ adding a dependency.
   the application's handle, `BankSwitch` the SWAP_BANK option bit, `log.rs` the state log of write-once flags.
 - `chunky_format/` — the wire format as fixed-layout and head+tail shrink_wrap types (format 2, PROTO-3:
   descriptor, plan header, steps, manifest), what `chunky` reads and `chunky_server` writes: `signed!`, golden
-  `vectors/`, the generated C reader in `c/`, `size_bench/` (own nightly workspace). Needs `../wire_weaver`
-  (SW-44), and so does every crate above it.
+  `vectors/` (made by `chunky_server::vectors`, `just vectors`), the generated C reader in `c/`, `size_bench/`
+  (own nightly workspace). Needs `../wire_weaver` (SW-44), and so does every crate above it.
 - `chunky_server/` — host side: `image.rs` (build and seal), `store.rs` (blob store), `manifest.rs` (parse),
-  `planner.rs`.
+  `planner.rs`, `vectors.rs` (the one generator of the golden vectors and `c/golden.h`).
 - `chunky_sim/` — `flash.rs` (NOR flash with per-family write rules, torn writes and erases, ECC faults),
   `device.rs` (a whole device on either backend, `Device<M, B>`), `tests/` (power-cut sweeps, security cases,
   planner properties; `tests/common` is the update loop they share).

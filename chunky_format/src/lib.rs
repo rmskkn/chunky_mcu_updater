@@ -13,7 +13,7 @@
 //! (SW-52: no copy of the data, only the lengths are checked), and the same bytes as the fixed-layout steps of
 //! the first draft of format 2 (the vectors did not change).
 //!
-//! Golden vectors (`tests/golden.rs`, `c/golden.h`) are checked by all readers.
+//! Golden vectors (`vectors/`, `c/golden.h`, made by `chunky_server::vectors`) are checked by all readers.
 //!
 //! Format 2, little-endian: what `chunky` reads and `chunky_server` writes (descriptor, plan, manifest). See
 //! FEATURES.md PROTO-3 for the numbers.

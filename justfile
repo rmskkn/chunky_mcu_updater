@@ -14,6 +14,10 @@ test-c:
     cc -std=c99 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion -o target/chunky_format_c_test chunky_format/c/test.c
     target/chunky_format_c_test
 
+# Regenerate the golden vectors and c/golden.h from the fixed firmware pair (PROTO-3); a test fails when they differ
+vectors:
+    cargo run -q -p chunky_server --example vectors
+
 # clippy (warnings are errors), formatting, and the firmware-target builds of both trust options
 lint:
     cargo clippy --workspace --all-targets -- -D warnings

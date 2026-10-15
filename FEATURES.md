@@ -194,7 +194,7 @@ Design: [SECURITY.md](SECURITY.md).
   (wire_weaver SW-44: offset consts, `from_fixed`, no `BufReader`) for a minimal bootloader, and by the C reader
   generated from the same derive (`chunky_format/c/chunky_format.h`). `signed!` stamps a `Signed<T>` envelope:
   the body's encoded bytes and a seal over the domain and those bytes, reachable only through `open` (verify, then
-  decode). Golden vectors (`chunky_format/vectors`, `c/golden.h`) checked by all three readers (`just test-c`),
+  decode). Golden vectors (`chunky_format/vectors`, `c/golden.h`; made by `chunky_server::vectors`, see below) checked by all three readers (`just test-c`),
   the layout pinned by offset tests, 20 000 garbage inputs read alike by both Rust readers without a panic.
   Format 2: descriptor 64-byte body + 64-byte seal (the reserved bytes are signed too); header 145 bytes (adds the
   body length); steps sized per op, ERASE 3 bytes, COPY 13, WRITE 13 + data with an explicit `data_len`; 8-byte
@@ -209,7 +209,7 @@ Design: [SECURITY.md](SECURITY.md).
   typed `Step` enum; not done.
   Steps are a `head_tail` enum (SW-46, SW-52): op byte, then the variant's head, a WRITE's data a typed
   `List<'i, u8>` whose `u16` count sits where `data_len` was, the bytes as the tail. The encoded bytes are
-  identical to the earlier fixed-layout steps (`vectors/plan.bin` and `c/golden.h` unchanged, checked by the Rust
+  identical to the earlier fixed-layout steps (the hand-made vectors were unchanged, checked by the Rust
   value and view readers and the C reader). Read with `Step::view(buf)` (`read_step`, `data()` a slice into
   the plan, no copy), no hand glue. Plan reader code beyond an empty image, Cortex-M0 / RV32IMC: with the view
   734 / 912 bytes (header fast path), 1486 / 1764 with the header through `BufReader`; the hand glue it replaces
@@ -219,8 +219,16 @@ Design: [SECURITY.md](SECURITY.md).
   Wired in (P2625#15oct-0919): `chunky` reads format 2 only, through `chunky_format` (descriptor, plan, manifest;
   format 1 is gone), and `chunky_server` writes it; 8-byte `ChunkHash` (MAN-2); the plan's numbers
   `cargo run -p chunky_server --example plan_size`. ww_dfu needs nothing (it carries the header's octets,
-  145 < `MAX_HEADER_LEN`). Still to do: golden vectors made by the planner and applied end to end
-  (P2625#15oct-0923b), fuzzing at scale (SIM-3), SPEC.md (PROTO-1).
+  145 < `MAX_HEADER_LEN`).
+  Golden vectors end to end (P2625#15oct-0923b): one generator, `chunky_server::vectors`, builds a fixed firmware
+  pair (STM32G0, 256-byte chunks, key seed `[7; 32]`, and the unsigned opt-out) and writes per kind `old`, `new`,
+  `dfu_before`, `manifest`, `plan` (ERASE, COPY and WRITE) and `descriptor` to `chunky_format/vectors/{signed,
+  unsigned}/` plus `c/golden.h` (the plans, manifests and the expected step and entry tables taken from the planner,
+  not from the bytes). `just vectors` rewrites them; `chunky_server/tests/vectors.rs` fails when they differ or a
+  file is stale. `chunky_sim/tests/vectors.rs` applies the checked-in plans to a simulated device (its manifest
+  equals the vector, DFU ends as the target, boot, confirm, floor); `chunky_format/tests/golden.rs` reads them with
+  both Rust readers; `c/test.c` walks every step and manifest entry. Not covered: an Unreadable manifest entry (the
+  C reader reads the tag, the Rust parser has its own test). Still to do: fuzzing at scale (SIM-3), SPEC.md (PROTO-1).
   Open: `chunky_format` depends on wire_weaver by path (../wire_weaver), until shrink_wrap 0.2 with SW-44 is
   published.
 

@@ -11,6 +11,7 @@ pub mod keys;
 pub mod manifest;
 pub mod planner;
 pub mod store;
+pub mod vectors;
 
 pub use image::{ImageBuildError, ImageMeta, Signer, build_image};
 pub use manifest::{Manifest, ManifestParseError};
