@@ -188,4 +188,60 @@ static inline int chunky_step_tail(const uint8_t *h, const uint8_t **t, const ui
     }
 }
 
+/* ManifestHeader: 13 to 13 bytes */
+#define CHUNKY_MANIFEST_HEADER_LEN 13u
+#define CHUNKY_MANIFEST_HEADER_MIN_LEN 13u
+#define CHUNKY_MANIFEST_HEADER_MAGIC_OFFSET 0u
+static inline const uint8_t *chunky_manifest_header_magic(const uint8_t *p) { return p + 0u; }
+#define CHUNKY_MANIFEST_HEADER_MAGIC_COUNT 4u
+#define CHUNKY_MANIFEST_HEADER_FORMAT_OFFSET 4u
+static inline uint8_t chunky_manifest_header_format(const uint8_t *p) { return sw_fixed_u8(p + 4u); }
+#define CHUNKY_MANIFEST_HEADER_BACKEND_OFFSET 5u
+static inline uint8_t chunky_manifest_header_backend(const uint8_t *p) { return sw_fixed_u8(p + 5u); }
+#define CHUNKY_MANIFEST_HEADER_SCHEME_OFFSET 6u
+static inline const uint8_t *chunky_manifest_header_scheme(const uint8_t *p) { return p + 6u; }
+#define CHUNKY_MANIFEST_HEADER_GEOMETRY_ID_OFFSET 7u
+static inline uint32_t chunky_manifest_header_geometry_id(const uint8_t *p) { return sw_fixed_u32(p + 7u); }
+#define CHUNKY_MANIFEST_HEADER_CHUNKS_OFFSET 11u
+static inline uint16_t chunky_manifest_header_chunks(const uint8_t *p) { return sw_fixed_u16(p + 11u); }
+
+/* ChunkEntry: a 1-byte tag (the head), then the head and tail of its variant */
+#define CHUNKY_CHUNK_ENTRY_TAG_LEN 1u
+static inline uint8_t chunky_chunk_entry_tag(const uint8_t *p) { return sw_fixed_u8(p); }
+#define CHUNKY_CHUNK_ENTRY_HASH 0u
+#define CHUNKY_CHUNK_ENTRY_HASH_HEAD_LEN 8u
+#define CHUNKY_CHUNK_ENTRY_HASH_HASH_OFFSET 0u
+static inline const uint8_t *chunky_chunk_entry_hash_hash(const uint8_t *p) { return p + 0u; }
+#define CHUNKY_CHUNK_ENTRY_HASH_HASH_COUNT 8u
+#define CHUNKY_CHUNK_ENTRY_BLANK 1u
+#define CHUNKY_CHUNK_ENTRY_BLANK_HEAD_LEN 0u
+#define CHUNKY_CHUNK_ENTRY_UNREADABLE 2u
+#define CHUNKY_CHUNK_ENTRY_UNREADABLE_HEAD_LEN 0u
+typedef struct {
+    const uint8_t *head; /* the head of the variant */
+} chunky_chunk_entry_tail_t;
+/* walks the tail of a ChunkEntry whose tag is at h and tail at *t (ending at end): fills tl and moves *t past it; 0, or -1 when the bytes are short or the tag unknown */
+static inline int chunky_chunk_entry_tail(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_chunk_entry_tail_t *tl) {
+    const uint8_t *vh;
+    switch (chunky_chunk_entry_tag(h)) {
+    case 0u:
+        vh = sw_ht_take(t, end, 8u);
+        if (vh == NULL) { return -1; }
+        tl->head = vh;
+        return 0;
+    case 1u:
+        vh = sw_ht_take(t, end, 0u);
+        if (vh == NULL) { return -1; }
+        tl->head = vh;
+        return 0;
+    case 2u:
+        vh = sw_ht_take(t, end, 0u);
+        if (vh == NULL) { return -1; }
+        tl->head = vh;
+        return 0;
+    default:
+        return -1;
+    }
+}
+
 #endif /* CHUNKY_FORMAT_H */

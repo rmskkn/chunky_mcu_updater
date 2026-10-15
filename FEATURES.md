@@ -36,14 +36,18 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 ## MAN — device manifest
 
 - ✅ **MAN-1 chunk-manifest** — per chunk of ACTIVE and DFU: truncated SHA-256, blank, or unreadable (ECC). Computed
-  fresh every session; it is the only progress record, there is no journal. Wire format 1.
-- 📋 **MAN-2 manifest-v2** — aligned with upstream PR #1: implicit sector order (no index, malformed manifests
-  unrepresentable) and 8-byte hashes, SHA-256/64 instead of MD5/64 (the device already has SHA-256; MD5 goes away).
+  fresh every session; it is the only progress record, there is no journal. Now in format 2 (MAN-2).
+- ✅ **MAN-2 manifest-v2** — aligned with upstream PR #1: implicit chunk order (no index) and 8-byte hashes,
+  SHA-256/64 instead of MD5/64 (the device already has SHA-256). `chunky_format::ManifestHeader` (13 bytes: `CKM2`,
+  format 2, backend, scheme, geometry id, chunks) and a `ChunkEntry` per chunk, ACTIVE then DFU: `0` + 8-byte
+  hash, `1` blank, `2` unreadable, so a blank with a hash cannot be written. The server's parser takes exactly
+  `2 * chunks` entries and nothing after them; what it accepts encodes back to the same bytes (property test).
 
 ## PLAN — plan format
 
-- ✅ **PLAN-1 plan-wire-format** — header with the target's descriptor, then ERASE / COPY / WRITE steps of 24 bytes;
-  strict parser, one encoding per plan. Wire format 1.
+- ✅ **PLAN-1 plan-wire-format** — header with the target's descriptor, then ERASE / COPY / WRITE steps; strict
+  parser, one encoding per plan. Format 1 had 24-byte steps; since PROTO-3 it is format 2 (`chunky_format`):
+  145-byte header with step count and body length, ERASE 3, COPY 13, WRITE 13 + one chunk.
 - 💡 **PLAN-2 pull-mode** — the release ships a signed target manifest, the device diffs locally (no_std planner and a
   hash -> chunk lookup) and fetches chunks by hash from a dumb content-addressed store (HTTP, CDN, MQTT); no device
   signing key needed for planning.
@@ -56,7 +60,10 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 
 - ✅ **APPLY-1 apply-engine** — runs an untrusted plan against DFU over `embedded_storage`: descriptor first,
   ascending steps, blank-only programming, hash checks on COPY sources and WRITE data, read-back, full image
-  verification, then "staged". One chunk of RAM.
+  verification, then "staged". One chunk of RAM. On format 2 the steps are read with `Step::view` (a WRITE's data
+  a slice of the step, no copy), each `step` call takes exactly one encoded step, a WRITE exactly one chunk, the
+  header's step count and body length are bounded by the geometry and must be met exactly; `step_len` frames a
+  step from its head for a receiver of a stream and refuses a WRITE count that is not one chunk before the data.
 
 ## ECC — torn words on ECC flash
 
@@ -74,7 +81,11 @@ IDs are stable: never renumbered, never reused. New ids come from `tpm work clai
 Design: [SECURITY.md](SECURITY.md).
 
 - ✅ **SEC-1 signed-descriptor** — 128-byte descriptor at the end of ACTIVE (product, version, security counter,
-  geometry, SHA-256), Ed25519 with a domain string, strict verification. Format 1.
+  geometry, SHA-256), Ed25519 with a domain string, strict verification. Format 2 (PROTO-3): a 64-byte body and a
+  64-byte seal over `chunky image descriptor v2` and exactly the body's bytes; `Trust` is the `SealCheck`, and
+  the seal is checked before any field is decoded (`open_descriptor`), then scheme, product, geometry, length,
+  floor. An unsigned seal on a signed device now fails as `BadSignature`; `WrongScheme` is a sealed body naming
+  another scheme.
 - ✅ **SEC-2 version-floor** — unary write-once counter in its own partition, raised only by the bootloader when an
   image is confirmed, enforced on every path that picks an image; robust against a single flipped bit.
 - 📋 **SEC-3 release-key-handling** — private key on a hardware key, signing apart from building; two key slots
@@ -109,6 +120,12 @@ Design: [SECURITY.md](SECURITY.md).
 - ✅ **SRV-2 blob-store** — content-addressed by chunk hash, in memory and in a directory (checked on read).
 - 📋 **SRV-3 rollout-control** — device table, targets per group, known-bad marks, automatic stop of a rollout.
 - 💡 **SRV-4 delta-shrinkers** — linker order (stable code first) and compressed WRITE chunks, measured first.
+- 📋 **SRV-5 collision-fallback** — 8-byte chunk hashes (MAN-2) collide for someone who controls the contents of
+  both images (about 2^32 work): the planner may skip or COPY a wrong chunk, and the update fails at the end
+  every time (liveness only; the full SHA-256 under the seal holds). After a failed apply (`WrongImage`,
+  `HashMismatch`) for a release, plan the next one for that device without COPY and without skipping. The blob
+  store is keyed by the same 8 bytes: key it by the full SHA-256 so two colliding chunks cannot replace each
+  other (P2625#15oct-0923d).
 
 ## BOOT — boot backends
 
@@ -173,7 +190,7 @@ Design: [SECURITY.md](SECURITY.md).
   the layout pinned by offset tests, 20 000 garbage inputs read alike by both Rust readers without a panic.
   Format 2: descriptor 64-byte body + 64-byte seal (the reserved bytes are signed too); header 145 bytes (adds the
   body length); steps sized per op, ERASE 3 bytes, COPY 13, WRITE 13 + data with an explicit `data_len`; 8-byte
-  chunk hashes (MAN-2). Measured (`cargo run -p chunky_format --example plan_size`, `just size-bench`):
+  chunk hashes (MAN-2). Measured (`cargo run -p chunky_server --example plan_size`, `just size-bench`):
   on the bench pairs (app A → B and bootloader stock → guarded, every chunk changes, no COPY) the plan's overhead
   beyond the data drops from 480 to 257 bytes with 1 KB chunks (336 → 209 with 2 KB, 288 → 193 with 4 KB): 3 % of
   a 7.6 KB plan; per step ERASE 24 → 3, COPY and WRITE 24 → 13 bytes (8 of the 11 from the shorter hash). Code to
@@ -191,9 +208,11 @@ Design: [SECURITY.md](SECURITY.md).
   was 892 / 1086 and 1854 / 2130, format 1 hand-written 840 / 1252. So the view is smaller than the fast path
   and kept; on M0 it also beats format 1's hand reader. The C reader walks steps with the generated
   `chunky_step_tail` (names `chunky_step_write_data_count`, ... changed; `c/test.c` updated).
-  Not wired in: `chunky` still reads format 1. Switching takes the apply engine and planner on `chunky_format`,
-  8-byte `ChunkHash` and manifest (MAN-2), the descriptor v2 in `chunky_server::image` and in `Trust` (a
-  `SealCheck`), the sweeps re-run; ww_dfu needs nothing (it carries the header's octets, 145 < `MAX_HEADER_LEN`).
+  Wired in (P2625#15oct-0919): `chunky` reads format 2 only, through `chunky_format` (descriptor, plan, manifest;
+  format 1 is gone), and `chunky_server` writes it; 8-byte `ChunkHash` (MAN-2); the plan's numbers
+  `cargo run -p chunky_server --example plan_size`. ww_dfu needs nothing (it carries the header's octets,
+  145 < `MAX_HEADER_LEN`). Still to do: golden vectors made by the planner and applied end to end
+  (P2625#15oct-0923b), fuzzing at scale (SIM-3), SPEC.md (PROTO-1).
   Open: `chunky_format` depends on wire_weaver by path (../wire_weaver), until shrink_wrap 0.2 with SW-44 is
   published.
 

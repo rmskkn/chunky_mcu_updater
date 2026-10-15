@@ -12,8 +12,6 @@ publish = false
 
 [dependencies]
 chunky_format = { path = ".." }
-# format 1, the hand-written parser of today, for comparison
-chunky = { path = "../../chunky", features = ["unsigned", "chip-custom"] }
 
 # As wire_weaver's shrink_wrap/size_bench (docs/serdes/code_size.md), so the numbers compare
 [profile.release]

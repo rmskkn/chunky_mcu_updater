@@ -5,6 +5,38 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Wire format 2 everywhere: `chunky` reads and `chunky_server` writes the descriptor, plan and manifest of
+  `chunky_format` (descriptor `CKY2`, plan `CKP2`, manifest `CKM2`); format 1 is gone, and images built before
+  are not read any more. `chunky` now depends on wire_weaver checked out next to this repository. (PROTO-3)
+- Descriptor format 2: a 64-byte body and a 64-byte seal over `chunky image descriptor v2` and exactly the body's
+  bytes. `Trust` implements `chunky_format::SealCheck`; `open_descriptor` checks the seal before it decodes a field,
+  then scheme, product, geometry, length, floor. An unsigned image on a signed device is now refused as
+  `BadSignature` (the seal fails first), `WrongScheme` means a sealed body that names another scheme.
+  `ImageDescriptor` is `chunky_format::DescriptorBody`; `ImageDescriptor::parse` is gone (hosts:
+  `chunky_server::image::read_descriptor_unverified`). (SEC-1, PROTO-3)
+- Chunk hashes are SHA-256 truncated to 8 bytes (`ChunkHash`, the manifest, COPY and WRITE, the blob store's
+  names). (MAN-2)
+- Manifest format 2: a 13-byte header and one entry per chunk, `0` + hash, `1` blank, `2` unreadable.
+  `chunky_server::Manifest::encode` writes it. (MAN-2)
+- The apply engine reads format 2 steps with `Step::view`: `Applier::step` takes exactly one encoded step (a
+  WRITE with its chunk, no separate data argument), `Applier::step_len` frames a step from its head and refuses a
+  WRITE that is not one chunk before its data. New `ApplyError::BodyLength`: a header body length beyond the
+  geometry, or steps that do not add up to it. (APPLY-1)
+- The planner's steps are `chunky_server::planner::PlanStep` (a WRITE owns its chunk); the header carries the body
+  length. (SRV-1)
+- `plan_size` is an example of `chunky_server` and prints format 2 only; `just size-bench` drops format 1.
+  (PROTO-3)
+
+### Added
+
+- `chunky_format`: `ManifestHeader`, `ChunkEntry`, `step_len_from_head`, `WRITE_COUNT_OFFSET`; the C header has
+  the manifest readers. (MAN-2, PROTO-3)
+- `chunky_sim`: `Device::apply_steps` (one message per step); security cases for a lying body length, a step that
+  is not exactly one step, a WRITE count beyond a chunk, a key-signed body naming another scheme, a signed image
+  on an unsigned device. (SIM-2)
+
 ## [0.9.0] - 2026-10-15
 
 ### Changed

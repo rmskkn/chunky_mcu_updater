@@ -12,7 +12,7 @@ use chunky::descriptor::{ImageDescriptor, Trust};
 use chunky::floor::read_floor;
 use chunky::geometry::{BackendKind, FlashGeometry, Region};
 use chunky::manifest::{ManifestError, write_manifest};
-use chunky::plan::{PLAN_HEADER_LEN, STEP_LEN, Step};
+use chunky::plan::PLAN_HEADER_LEN;
 use chunky::{Applier, ApplyError, BootBackend, BootState, Part, ReadOnly};
 use chunky_bank::{BankMap, BankParts, BankSwitch, BankUpdater};
 use chunky_swap::{MAX_WRITE_SIZE, SwapUpdater};
@@ -345,8 +345,42 @@ impl<M: FlashModel, B: Backend<M>> Device<M, B> {
         read_floor(&mut self.part(floor), M::WRITE_SIZE, &mut buf).expect("the floor reads")
     }
 
-    /// The application applies a plan as it arrives and, when the image verifies, marks it staged.
+    /// The application applies a plan as it arrives in one stream and, when the image verifies, marks it
+    /// staged: steps are framed from their heads, as a receiver of a stream frames them.
     pub fn apply(&self, plan: &[u8]) -> Result<ImageDescriptor, ApplyError> {
+        let (header, mut rest) = plan
+            .split_first_chunk::<PLAN_HEADER_LEN>()
+            .ok_or(ApplyError::Incomplete)?;
+        self.apply_with(header, |applier, step| {
+            if rest.is_empty() {
+                return Ok(false);
+            }
+            let len = applier.step_len(rest)?.ok_or(ApplyError::Incomplete)?;
+            let (bytes, after) = rest.split_at_checked(len).ok_or(ApplyError::Incomplete)?;
+            rest = after;
+            step(applier, bytes)?;
+            Ok(true)
+        })
+    }
+
+    /// The application applies a plan delivered one step per message (each message one encoded step).
+    pub fn apply_steps(&self, header: &[u8; PLAN_HEADER_LEN], steps: &[&[u8]]) -> Result<ImageDescriptor, ApplyError> {
+        let mut steps = steps.iter();
+        self.apply_with(header, |applier, step| match steps.next() {
+            Some(bytes) => step(applier, bytes).map(|()| true),
+            None => Ok(false),
+        })
+    }
+
+    /// Begins the plan, runs the steps `next` hands over (it returns false when there are no more), finishes.
+    fn apply_with(
+        &self,
+        header: &[u8; PLAN_HEADER_LEN],
+        mut next: impl FnMut(
+            &mut Applier<'_>,
+            &mut dyn FnMut(&mut Applier<'_>, &[u8]) -> Result<(), ApplyError>,
+        ) -> Result<bool, ApplyError>,
+    ) -> Result<ImageDescriptor, ApplyError> {
         let chunk = self.geometry.chunk as usize;
         let mut buf = vec![0; chunk];
         let mut word = [0; MAX_WRITE_SIZE];
@@ -364,9 +398,6 @@ impl<M: FlashModel, B: Backend<M>> Device<M, B> {
             .map_err(|_| ApplyError::Flash)?
         };
 
-        let (header, mut rest) = plan
-            .split_first_chunk::<PLAN_HEADER_LEN>()
-            .ok_or(ApplyError::Incomplete)?;
         let mut applier = Applier::begin(
             &self.geometry,
             header,
@@ -375,19 +406,8 @@ impl<M: FlashModel, B: Backend<M>> Device<M, B> {
             floor,
             &mut backend,
         )?;
-        while !rest.is_empty() {
-            let (step, after) = rest.split_first_chunk::<STEP_LEN>().ok_or(ApplyError::Incomplete)?;
-            rest = after;
-            let data = match Step::decode(step) {
-                Ok(step) if step.has_data() => {
-                    let (data, after) = rest.split_at_checked(chunk).ok_or(ApplyError::Incomplete)?;
-                    rest = after;
-                    Some(data)
-                }
-                _ => None,
-            };
-            applier.step(step, data, &mut active, &mut dfu, &mut buf)?;
-        }
+        let mut step = |applier: &mut Applier<'_>, bytes: &[u8]| applier.step(bytes, &mut active, &mut dfu, &mut buf);
+        while next(&mut applier, &mut step)? {}
         applier.finish(&mut dfu, &mut backend, &mut buf)
     }
 

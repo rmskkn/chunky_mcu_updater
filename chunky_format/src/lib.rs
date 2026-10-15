@@ -15,8 +15,8 @@
 //!
 //! Golden vectors (`tests/golden.rs`, `c/golden.h`) are checked by all readers.
 //!
-//! Format 2, little-endian. This is not yet what `chunky` reads (format 1, `chunky::plan`); see FEATURES.md
-//! PROTO-3 for the numbers and what switching takes.
+//! Format 2, little-endian: what `chunky` reads and `chunky_server` writes (descriptor, plan, manifest). See
+//! FEATURES.md PROTO-3 for the numbers.
 //!
 //! Descriptor, 128 bytes at the end of the image ([SignedDescriptor]): the 64-byte [DescriptorBody], then a
 //! 64-byte seal over the domain string [DESCRIPTOR_DOMAIN] and the body's bytes.
@@ -46,9 +46,13 @@
 //! | 1 ERASE | 3 | erase block (u16) |
 //! | 2 COPY | 13 | chunk of DFU (u16), chunk of ACTIVE (u16), chunk hash (8) |
 //! | 3 WRITE | 13 + data length | chunk of DFU (u16), data length (u16, the list's count), chunk hash (8), then the data |
+//!
+//! Manifest ([ManifestHeader], 13 bytes, then [ChunkEntry] per chunk, ACTIVE then DFU): magic `CKM2`, format 2,
+//! backend (u8), scheme (u8), geometry id (u32), chunks (u16); an entry is `0` and an 8-byte hash, `1` blank or
+//! `2` unreadable.
 #![no_std]
 
-use shrink_wrap::head_tail::List;
+pub use shrink_wrap::head_tail::List;
 use shrink_wrap::prelude::*;
 
 /// Format of descriptor and plan.
@@ -253,6 +257,81 @@ pub enum Step<'i> {
     } = 3,
 }
 
+/// Manifest magic.
+pub const MANIFEST_MAGIC: [u8; 4] = *b"CKM2";
+
+/// The header of a device manifest (MAN-2). Untrusted on the server: a hint for the planner, nothing more.
+#[derive_shrink_wrap(borrowed, fixed_layout, derive(Clone, Copy, Debug, PartialEq, Eq))]
+pub struct ManifestHeader {
+    /// [MANIFEST_MAGIC].
+    pub magic: [u8; 4],
+    /// [FORMAT].
+    pub format: u8,
+    /// Boot backend of the device (`chunky::BackendKind`).
+    pub backend: u8,
+    /// Seal scheme the device accepts.
+    pub scheme: Scheme,
+    /// Geometry id of the device.
+    pub geometry_id: u32,
+    /// Chunks per area: entries for ACTIVE, then as many for DFU.
+    pub chunks: u16,
+}
+
+impl ManifestHeader {
+    /// Magic and format.
+    pub fn check(&self) -> Result<(), FormatError> {
+        if self.magic != MANIFEST_MAGIC {
+            return Err(FormatError::BadMagic);
+        }
+        if self.format != FORMAT {
+            return Err(FormatError::BadFormat);
+        }
+        Ok(())
+    }
+}
+
+/// What the device found in one chunk: one entry per chunk, in chunk order, ACTIVE first, then DFU. A blank or
+/// unreadable chunk has no hash bytes, so an entry with both cannot be written.
+#[derive_shrink_wrap(head_tail, ww_repr = u8, derive(Clone, Copy, Debug, PartialEq, Eq))]
+pub enum ChunkEntry {
+    /// Readable data with this hash.
+    Hash {
+        /// SHA-256 of the chunk, truncated.
+        hash: [u8; CHUNK_HASH_LEN],
+    } = 0,
+    /// Every byte reads `0xFF`.
+    Blank = 1,
+    /// Faults on ECC.
+    Unreadable = 2,
+}
+
+/// Offset of a WRITE's data count in the step: after the op byte and `dst`.
+pub const WRITE_COUNT_OFFSET: usize = 1 + 2;
+
+/// Bytes of the step that starts with `head`, from its op byte and head alone, before the data of a WRITE is
+/// there: what a receiver of a stream needs to frame a step. `Ok(None)` while `head` is shorter than the head of
+/// its op (or empty); an unknown op is an error. A WRITE's count is read, not bounded: the device refuses a count
+/// that is not one chunk (`chunky::Applier::step_len`) before it buffers the data.
+pub fn step_len_from_head(head: &[u8]) -> Result<Option<usize>, FormatError> {
+    let Some(&op) = head.first() else {
+        return Ok(None);
+    };
+    let head_len = 1 + match op {
+        Step::ERASE_TAG => Step::ERASE_HEAD_LEN,
+        Step::COPY_TAG => Step::COPY_HEAD_LEN,
+        Step::WRITE_TAG => Step::WRITE_HEAD_LEN,
+        _ => return Err(FormatError::Wire(ShrinkWrapError::EnumFutureVersionOrMalformedData)),
+    };
+    if head.len() < head_len {
+        return Ok(None);
+    }
+    if op != Step::WRITE_TAG {
+        return Ok(Some(head_len));
+    }
+    let count = u16::from_le_bytes([head[WRITE_COUNT_OFFSET], head[WRITE_COUNT_OFFSET + 1]]);
+    Ok(Some(head_len + count as usize))
+}
+
 /// Bytes of a step on the wire: its head, and for a WRITE its data.
 pub fn step_len(step: &StepView<'_>) -> usize {
     match step {
@@ -295,6 +374,8 @@ pub fn write_c_header(out: &mut dyn core::fmt::Write) -> core::fmt::Result {
             <SignedDescriptor as HeadTail>::write_c_ht,
             <PlanHeader as HeadTail>::write_c_ht,
             <Step as HeadTail>::write_c_ht,
+            <ManifestHeader as HeadTail>::write_c_ht,
+            <ChunkEntry as HeadTail>::write_c_ht,
         ],
     )
 }

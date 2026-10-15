@@ -13,11 +13,14 @@
 use std::collections::HashMap;
 use std::io;
 
-use chunky::descriptor::{DESCRIPTOR_LEN, ImageDescriptor};
+use chunky::descriptor::{DESCRIPTOR_LEN, ImageDescriptor, split_descriptor};
 use chunky::geometry::FlashGeometry;
 use chunky::manifest::ChunkState;
-use chunky::plan::{PLAN_HEADER_LEN, PlanHeader, STEP_LEN, Step};
+use chunky::plan::{PLAN_HEADER_LEN, PlanHeader, Step};
 use chunky::{ChunkHash, ImageError};
+use chunky_format::{FORMAT, List, PLAN_MAGIC};
+
+use crate::image::read_descriptor_unverified;
 
 use crate::manifest::Manifest;
 use crate::store::BlobStore;
@@ -38,7 +41,7 @@ impl Release {
             return Err(PlanningError::BadImage(ImageError::BadLength));
         }
         let descriptor: [u8; DESCRIPTOR_LEN] = *image.last_chunk().expect("the image is longer than a descriptor");
-        let parsed = ImageDescriptor::parse(&descriptor).map_err(PlanningError::BadImage)?;
+        let parsed = read_descriptor_unverified(&descriptor).map_err(PlanningError::BadImage)?;
         if parsed.geometry_id != geometry.id() {
             return Err(PlanningError::GeometryMismatch);
         }
@@ -53,9 +56,9 @@ impl Release {
         Ok(Self { descriptor, chunks })
     }
 
-    /// The parsed descriptor.
+    /// The descriptor's fields (its seal is the device's to check).
     pub fn info(&self) -> ImageDescriptor {
-        ImageDescriptor::parse(&self.descriptor).expect("a release holds a descriptor that parsed when it was added")
+        read_descriptor_unverified(&self.descriptor).expect("a release holds a descriptor that read when it was added")
     }
 }
 
@@ -127,13 +130,68 @@ impl std::fmt::Display for PlanningError {
 
 impl std::error::Error for PlanningError {}
 
+/// One step of a plan, a WRITE holding its chunk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanStep {
+    /// Erase one erase block of DFU.
+    Erase {
+        /// Erase block index.
+        block: u16,
+    },
+    /// Copy one chunk of the running image into DFU.
+    Copy {
+        /// Chunk of DFU.
+        dst: u16,
+        /// Chunk of ACTIVE.
+        src: u16,
+        /// Hash the source must have.
+        hash: ChunkHash,
+    },
+    /// Program one chunk of DFU with `data`.
+    Write {
+        /// Chunk of DFU.
+        dst: u16,
+        /// Hash of `data`.
+        hash: ChunkHash,
+        /// The chunk.
+        data: Vec<u8>,
+    },
+}
+
+impl PlanStep {
+    /// The step as `chunky_format` writes it.
+    pub fn wire(&self) -> Step<'_> {
+        match self {
+            PlanStep::Erase { block } => Step::Erase { block: *block },
+            PlanStep::Copy { dst, src, hash } => Step::Copy {
+                dst: *dst,
+                src: *src,
+                hash: hash.0,
+            },
+            PlanStep::Write { dst, hash, data } => Step::Write {
+                dst: *dst,
+                data: List::new(data),
+                hash: hash.0,
+            },
+        }
+    }
+
+    /// Wire form.
+    pub fn encode(&self) -> Vec<u8> {
+        let step = self.wire();
+        let mut out = vec![0; step.head_tail_len()];
+        step.to_head_tail(&mut out).expect("the buffer is the step's length");
+        out
+    }
+}
+
 /// A plan, ready to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     /// The header.
     pub header: PlanHeader,
-    /// The steps, each WRITE with its chunk.
-    pub steps: Vec<(Step, Option<Vec<u8>>)>,
+    /// The steps.
+    pub steps: Vec<PlanStep>,
     /// What it costs.
     pub stats: PlanStats,
     /// What the operator must see.
@@ -143,12 +201,12 @@ pub struct Plan {
 impl Plan {
     /// Wire form.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = self.header.encode().to_vec();
-        for (step, data) in &self.steps {
+        let mut out = vec![0; PLAN_HEADER_LEN];
+        self.header
+            .to_fixed(&mut out)
+            .expect("the buffer is the header's length");
+        for step in &self.steps {
             out.extend_from_slice(&step.encode());
-            if let Some(data) = data {
-                out.extend_from_slice(data);
-            }
         }
         out
     }
@@ -170,7 +228,7 @@ pub fn plan(
     if manifest.active.len() != chunks || manifest.dfu.len() != chunks || release.chunks.len() != chunks {
         return Err(PlanningError::BadManifest);
     }
-    if manifest.header.scheme != info.scheme as u8 {
+    if manifest.header.scheme != info.scheme {
         return Err(PlanningError::SchemeMismatch);
     }
     let trust_blank = policy.trust_blank.unwrap_or(geometry.chunk < geometry.erase);
@@ -187,7 +245,7 @@ pub fn plan(
         image_bytes: geometry.active.len as usize,
         ..PlanStats::default()
     };
-    let mut program = |index: usize, steps: &mut Vec<(Step, Option<Vec<u8>>)>| -> Result<(), PlanningError> {
+    let mut program = |index: usize, steps: &mut Vec<PlanStep>| -> Result<(), PlanningError> {
         let ChunkState::Hash(hash) = release.chunks[index] else {
             return Ok(());
         };
@@ -199,7 +257,7 @@ pub fn plan(
         };
         match source {
             Some(src) => {
-                steps.push((Step::Copy { dst, src, hash }, None));
+                steps.push(PlanStep::Copy { dst, src, hash });
                 stats.copied += 1;
             }
             None => {
@@ -207,7 +265,7 @@ pub fn plan(
                     .get(&hash)
                     .map_err(PlanningError::Store)?
                     .ok_or(PlanningError::MissingBlob(hash))?;
-                steps.push((Step::Write { dst, hash }, Some(data)));
+                steps.push(PlanStep::Write { dst, hash, data });
                 stats.written += 1;
             }
         }
@@ -230,7 +288,7 @@ pub fn plan(
                 program(index, &mut steps)?;
             }
         } else {
-            steps.push((Step::Erase { block: block as u16 }, None));
+            steps.push(PlanStep::Erase { block: block as u16 });
             stats.erased_blocks += 1;
             for index in range {
                 program(index, &mut steps)?;
@@ -239,16 +297,20 @@ pub fn plan(
     }
 
     stats.skipped = chunks as u32 - stats.copied - stats.written;
-    stats.wire_bytes = PLAN_HEADER_LEN + steps.len() * STEP_LEN + stats.written as usize * geometry.chunk as usize;
+    let body_len: usize = steps.iter().map(|step| step.wire().head_tail_len()).sum();
+    stats.wire_bytes = PLAN_HEADER_LEN + body_len;
     let mut warnings = Vec::new();
     if manifest.unsigned() {
         warnings.push(Warning::UnsignedDevice);
     }
     Ok(Plan {
         header: PlanHeader {
+            magic: PLAN_MAGIC,
+            format: FORMAT,
             geometry_id: geometry.id(),
             step_count: steps.len() as u32,
-            descriptor: release.descriptor,
+            body_len: body_len as u32,
+            descriptor: split_descriptor(&release.descriptor),
         },
         steps,
         stats,

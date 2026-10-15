@@ -9,6 +9,7 @@ repository = "https://github.com/romixlab/chunky_mcu_updater"
 
 [workspace.dependencies]
 chunky = { path = "chunky" }
+chunky_format = { path = "chunky_format" }
 chunky_swap = { path = "chunky_swap" }
 chunky_bank = { path = "chunky_bank" }
 chunky_server = { path = "chunky_server" }

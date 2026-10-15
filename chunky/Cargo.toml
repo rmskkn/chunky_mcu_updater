@@ -23,6 +23,7 @@ series-rp235x = []
 chip-custom = []
 
 [dependencies]
+chunky_format.workspace = true
 embedded-storage.workspace = true
 sha2.workspace = true
 ed25519-dalek = { workspace = true, optional = true }

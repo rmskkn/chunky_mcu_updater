@@ -33,9 +33,21 @@ be hostile: the worst it achieves is wear and a refused update.
 ## The image and its descriptor
 
 An image fills the whole ACTIVE partition: payload, `0xFF` padding, and a 128-byte descriptor at the end
-(`chunky/src/descriptor.rs` has the layout). The descriptor carries the product id, the version, the security
-counter, the geometry id and the SHA-256 of every byte before it. An Ed25519 signature (strict verification, a
-domain string in the signed message) covers the descriptor. Nothing in ACTIVE is unsigned, padding included.
+(format 2, `chunky_format` has the layout): a 64-byte body and a 64-byte seal. The body carries the scheme, the
+product id, the version, the security counter, the image length, the geometry id and the SHA-256 of every byte
+before the descriptor; its reserved bytes are zero and sealed too. The seal is an Ed25519 signature (strict
+verification) over the domain string `chunky image descriptor v2` followed by exactly the body's 64 bytes.
+Nothing in ACTIVE is unsealed, padding included.
+
+**Verify, then decode.** The seal is checked over the body's bytes as they lie in flash or in the plan header,
+before a single field of the body is read (`SignedDescriptor::open`, `chunky::descriptor::open_descriptor`); the
+fields are then decoded from those same bytes, not from a copy. On a device there is no other way to get the
+fields of a descriptor. So a seal is never checked over one set of bytes while the decision is made on
+another, and no field of an unverified body steers anything, not even which error is reported. Then, in this
+order: framing (magic, format, reserved bytes), scheme, product, geometry, length, floor. The price: a garbage
+descriptor costs one Ed25519 verification before it is refused, which someone on the transport can make the
+device spend; they can waste its time anyway. Host tools read descriptors without a key
+(`chunky_server::image::read_descriptor_unverified`) only to show and plan, never to trust.
 
 - **Product id** stops a validly signed image for another board from being installed.
 - **Geometry id** stops an image built for another flash layout.
@@ -43,14 +55,18 @@ domain string in the signed message) covers the descriptor. Nothing in ACTIVE is
 - **Security counter** is the anti-rollback number. It is raised only by a release that must not be rolled back
   past, so ordinary downgrades between releases with the same counter stay possible.
 
-Per-chunk hashes are SHA-256 truncated to 16 bytes. They decide what to transfer and nothing else; whether the
-result is the release is decided by the full SHA-256 under the signature.
+Per-chunk hashes are SHA-256 truncated to 8 bytes (MAN-2). They decide what to transfer and nothing else; whether
+the result is the release is decided by the full SHA-256 under the seal, at the end of the plan, before a swap
+and on every boot. 64 bits are short against someone who controls the contents of both images: a collision
+takes about 2^32 hash evaluations, and with one the planner may skip or COPY a chunk that is not the target's.
+That fails the update every time (liveness), never integrity; SRV-5 makes the planner fall back to plain WRITEs
+after such a failure.
 
 ## Where an image is checked
 
 | When | By | What | A failure means |
 |---|---|---|---|
-| A plan begins | application | descriptor from the plan header: scheme, product, geometry, length, signature, floor | the plan is refused before any flash is touched |
+| A plan begins | application | descriptor from the plan header: seal first, then scheme, product, geometry, length, floor | the plan is refused before any flash is touched |
 | A plan ends | application | the whole staged image against that descriptor | no swap is requested |
 | Before a swap starts | bootloader | the whole staged image again, floor included | the swap is cancelled, ACTIVE untouched |
 | Every boot | bootloader | the whole of ACTIVE, floor included | a trial image is reverted on the spot; otherwise recovery, no jump |
@@ -113,10 +129,18 @@ as strong as the chip's protection (next section).
 
 ## The plan is untrusted input
 
-`chunky/src/plan.rs` and `apply.rs`. A plan can come from anyone, so:
+`chunky_format` (the types), `chunky/src/plan.rs` and `apply.rs`. A plan can come from anyone, so:
 
-- Fixed-size records, one encoding per plan: unknown ops, non-zero reserved bytes and stray fields are errors.
-- Nothing is written before the target's descriptor verifies.
+- One encoding per plan: steps have no reserved bytes and no optional fields, an unknown op is an error, and a
+  step is handed to the engine as exactly its bytes (`Step::view` checks the lengths; a trailing byte or two
+  steps in one are refused).
+- A WRITE carries exactly one chunk. A receiver of a stream frames a step from its head
+  (`Applier::step_len`), which refuses any other count before the data needs a buffer.
+- The header's own fields are outside the seal: geometry id, step count and body length can only make the plan
+  refused. The step count and the body length are bounded by the geometry at the start (every block erased,
+  every chunk written), and the steps must add up to exactly both at the end.
+- Nothing is written before the target's descriptor verifies, and the image staged at the end must have exactly
+  the descriptor body the plan announced.
 - Steps come in ascending order, an erase before the programs of its block. So each block is erased at most
   once and each chunk programmed at most once per plan, the step count is bounded by the geometry, and a COPY
   whose source was already overwritten cannot be expressed (sources are in ACTIVE, which no step writes).
@@ -163,9 +187,12 @@ Small-flash builds can leave the verifier out. It is a build option with a name,
 - `chunky` and `chunky_swap` have features `ed25519` and `unsigned`. Neither chosen is a compile error; both on
   a firmware target is a compile error.
 - An unsigned image carries the same descriptor with scheme 2 and, in place of the signature, the SHA-256 of
-  the descriptor. Image SHA-256, product, geometry and the version floor are checked exactly as before.
-- The scheme is inside the sealed part, and `Trust::Ed25519` refuses every other scheme: a signed device cannot
-  be talked down to unsigned, and an unsigned build has no way to accept "signed" images it cannot check.
+  the domain string and the body, then 32 zero bytes. Image SHA-256, product, geometry and the version floor
+  are checked exactly as before.
+- The scheme is inside the sealed body, and each `Trust` checks the seal its own way first: on a signed device
+  an unsigned seal fails as a signature, on an unsigned device a signature fails as a hash, and a body that
+  passes and names another scheme is refused (`WrongScheme`). A signed device cannot be talked down to
+  unsigned, and an unsigned build has no way to accept "signed" images it cannot check.
 - The device says so in its manifest header; the planner returns `Warning::UnsignedDevice` for every such
   device and refuses to plan a release sealed the other way.
 

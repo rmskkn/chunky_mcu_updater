@@ -41,4 +41,4 @@ pub use geometry::{BackendKind, EraseRun, Family, FlashGeometry, GeometryError, 
 pub use hash::ChunkHash;
 pub use manifest::ChunkState;
 pub use part::{Part, PartError, ReadOnly};
-pub use plan::{PLAN_HEADER_LEN, PlanError, PlanHeader, STEP_LEN, Step};
+pub use plan::{MAX_STEP_HEAD_LEN, PLAN_HEADER_LEN, PlanError, PlanHeader, Step, StepView};

@@ -3,8 +3,9 @@
 mod common;
 
 use chunky::descriptor::{ImageError, Trust};
-use chunky::plan::{PLAN_HEADER_LEN, Step};
+use chunky::plan::{PLAN_HEADER_LEN, PlanError};
 use chunky::{ApplyError, BootState, ChunkHash};
+use chunky_server::planner::PlanStep;
 use chunky_server::{Manifest, MemStore, PlanningError, Policy, Release, Signer, Warning, build_image, plan};
 use chunky_sim::{Device, F1, G0, H7Mini, layout};
 use chunky_swap::BootOutcome;
@@ -37,7 +38,7 @@ fn refused_untouched(world: &World, device: &Device<Model>, image: &[u8]) -> App
     let target = Release::add(image, &world.geometry, &mut store).unwrap();
     let mut manifest = Manifest::parse(&device.manifest().unwrap()).unwrap();
     // The planner would refuse some of these itself; the device must not rely on that.
-    manifest.header.scheme = target.info().scheme as u8;
+    manifest.header.scheme = target.info().scheme;
     let plan = plan(&world.geometry, &manifest, &target, &store, &Policy::default()).unwrap();
     let before = device.flash.borrow().ops();
     let error = device.apply(&plan.encode()).unwrap_err();
@@ -94,12 +95,48 @@ fn image_for_another_product_is_refused() {
 
 #[test]
 fn unsigned_image_is_refused_by_a_signed_device() {
+    // The seal is checked before the body is read, so the hash an unsigned image carries fails as a signature.
     let world = world();
     let device = booted(&world);
     let image = build_image(&bytes(5, 4096), &world.geometry, &meta(2, 2), &Signer::Unsigned).unwrap();
     assert_eq!(
         refused_untouched(&world, &device, &image),
+        ApplyError::Image(ImageError::BadSignature)
+    );
+}
+
+#[test]
+fn a_signed_body_that_names_another_scheme_is_refused() {
+    // The release key signed a body that says "unsigned": the seal checks, the scheme does not.
+    let world = world();
+    let device = booted(&world);
+    let mut image = world.new.clone();
+    let at = image.len() - 128;
+    image[at + 5] = chunky::Scheme::Unsigned as u8;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let message = [chunky::descriptor::DESCRIPTOR_DOMAIN, &image[at..at + 64]].concat();
+    let seal = ed25519_dalek::Signer::sign(&key, &message).to_bytes();
+    image[at + 64..].copy_from_slice(&seal);
+    assert_eq!(
+        refused_untouched(&world, &device, &image),
         ApplyError::Image(ImageError::WrongScheme)
+    );
+}
+
+#[test]
+fn a_signed_image_is_refused_by_an_unsigned_device() {
+    let world = World::new::<F1>(1024, 8, Signer::Unsigned);
+    let device = world.device::<F1>();
+    device.boot().unwrap();
+    let signed = build_image(&bytes(5, 4096), &world.geometry, &meta(2, 2), &signer()).unwrap();
+    let mut store = MemStore::default();
+    let target = Release::add(&signed, &world.geometry, &mut store).unwrap();
+    let mut manifest = Manifest::parse(&device.manifest().unwrap()).unwrap();
+    manifest.header.scheme = target.info().scheme;
+    let plan = plan(&world.geometry, &manifest, &target, &store, &Policy::default()).unwrap();
+    assert_eq!(
+        device.apply(&plan.encode()).unwrap_err(),
+        ApplyError::Image(ImageError::BadSignature)
     );
 }
 
@@ -210,10 +247,11 @@ fn plan_for_another_geometry_is_refused_on_both_sides() {
     assert_eq!(device.flash.borrow().ops(), before);
 }
 
-/// A real plan header followed by the steps a test wants.
-fn crafted(world: &World, device: &Device<Model>, steps: &[(Step, Option<Vec<u8>>)]) -> Vec<u8> {
+/// A real plan header followed by the steps a test wants, counted in the header.
+fn crafted(world: &World, device: &Device<Model>, steps: &[PlanStep]) -> Vec<u8> {
     let mut real = world.plan_for(&device.manifest().unwrap(), &world.new_release);
     real.header.step_count = steps.len() as u32;
+    real.header.body_len = steps.iter().map(|step| step.encode().len() as u32).sum();
     real.steps = steps.to_vec();
     real.encode()
 }
@@ -225,24 +263,25 @@ fn hostile_steps_are_stopped_and_touch_nothing_but_dfu() {
     let chunks = world.geometry.chunks() as u16;
     let data = bytes(42, chunk);
     let hash = ChunkHash::of(&data);
-    let write = |dst| (Step::Write { dst, hash }, Some(data.clone()));
-    let erase = |block| (Step::Erase { block }, None);
+    let write = |dst| PlanStep::Write {
+        dst,
+        hash,
+        data: data.clone(),
+    };
+    let erase = |block| PlanStep::Erase { block };
     let active_hash = ChunkHash::of(&world.old[..chunk]);
 
-    type Steps = Vec<(Step, Option<Vec<u8>>)>;
+    type Steps = Vec<PlanStep>;
     let cases: Vec<(&str, Steps, ApplyError)> = vec![
         ("write past the image", vec![write(chunks)], ApplyError::OutOfRange),
         ("erase past the image", vec![erase(chunks)], ApplyError::OutOfRange),
         (
             "copy from past the image",
-            vec![(
-                Step::Copy {
-                    dst: 0,
-                    src: chunks,
-                    hash,
-                },
-                None,
-            )],
+            vec![PlanStep::Copy {
+                dst: 0,
+                src: chunks,
+                hash,
+            }],
             ApplyError::OutOfRange,
         ),
         (
@@ -267,28 +306,56 @@ fn hostile_steps_are_stopped_and_touch_nothing_but_dfu() {
         ),
         (
             "data that does not match its hash",
-            vec![erase(0), (Step::Write { dst: 0, hash }, Some(bytes(43, chunk)))],
+            vec![
+                erase(0),
+                PlanStep::Write {
+                    dst: 0,
+                    hash,
+                    data: bytes(43, chunk),
+                },
+            ],
             ApplyError::DataMismatch,
         ),
         (
             "copy of a source that is not what the step says",
             vec![
                 erase(0),
-                (
-                    Step::Copy {
-                        dst: 0,
-                        src: 1,
-                        hash: active_hash,
-                    },
-                    None,
-                ),
+                PlanStep::Copy {
+                    dst: 0,
+                    src: 1,
+                    hash: active_hash,
+                },
             ],
             ApplyError::SourceMismatch,
         ),
         (
+            "a write of less than a chunk",
+            vec![
+                erase(0),
+                PlanStep::Write {
+                    dst: 0,
+                    hash: ChunkHash::of(&data[1..]),
+                    data: data[1..].to_vec(),
+                },
+            ],
+            ApplyError::BadData,
+        ),
+        (
+            "a write of more than a chunk",
+            vec![
+                erase(0),
+                PlanStep::Write {
+                    dst: 0,
+                    hash: ChunkHash::of(&[&data[..], &[0]].concat()),
+                    data: [&data[..], &[0]].concat(),
+                },
+            ],
+            ApplyError::BadData,
+        ),
+        (
             "a plan that stops short of the image",
             vec![erase(0), write(0)],
-            ApplyError::Image(ImageError::BadMagic),
+            ApplyError::Image(ImageError::BadSignature),
         ),
     ];
     for (name, steps, expected) in cases {
@@ -329,7 +396,7 @@ fn more_steps_than_announced_or_possible_are_refused() {
     let mut plan = world.plan_for(&device.manifest().unwrap(), &world.new_release);
 
     let mut longer = plan.encode();
-    longer.extend_from_slice(&Step::Erase { block: 0 }.encode());
+    longer.extend_from_slice(&PlanStep::Erase { block: 0 }.encode());
     assert_eq!(device.apply(&longer).unwrap_err(), ApplyError::TooManySteps);
 
     plan.header.step_count = u32::MAX;
@@ -342,6 +409,86 @@ fn more_steps_than_announced_or_possible_are_refused() {
         device.apply(&longer[..PLAN_HEADER_LEN - 1]).unwrap_err(),
         ApplyError::Incomplete
     );
+}
+
+#[test]
+fn a_body_length_that_lies_is_refused() {
+    let world = world();
+    let real = world.plan_for(&booted(&world).manifest().unwrap(), &world.new_release);
+
+    // Longer than any plan for the geometry: refused before any flash operation.
+    let device = booted(&world);
+    let mut plan = real.clone();
+    plan.header.body_len = u32::MAX;
+    let ops = device.flash.borrow().ops();
+    assert_eq!(device.apply(&plan.encode()).unwrap_err(), ApplyError::BodyLength);
+    assert_eq!(device.flash.borrow().ops(), ops);
+
+    // Shorter than the steps: the step that does not fit is refused.
+    let device = booted(&world);
+    let mut plan = real.clone();
+    plan.header.body_len -= 1;
+    assert_eq!(device.apply(&plan.encode()).unwrap_err(), ApplyError::BodyLength);
+    assert_eq!(device.boot_state(), Ok(BootState::Confirmed));
+
+    // Longer than the steps: the plan is not finished.
+    let device = booted(&world);
+    let mut plan = real;
+    plan.header.body_len += 1;
+    assert_eq!(device.apply(&plan.encode()).unwrap_err(), ApplyError::BodyLength);
+    assert_eq!(device.boot_state(), Ok(BootState::Confirmed));
+}
+
+#[test]
+fn a_step_is_exactly_one_step() {
+    let world = world();
+    let device = booted(&world);
+    let plan = world.plan_for(&device.manifest().unwrap(), &world.new_release);
+    let header: [u8; PLAN_HEADER_LEN] = plan.encode()[..PLAN_HEADER_LEN].try_into().unwrap();
+    let steps: Vec<Vec<u8>> = plan.steps.iter().map(|step| step.encode()).collect();
+
+    // Per step, as delivered one message each: the real steps apply.
+    let all: Vec<&[u8]> = steps.iter().map(Vec::as_slice).collect();
+    booted(&world).apply_steps(&header, &all).unwrap();
+
+    // A trailing byte, two steps in one message, a step cut short and an unknown op are refused.
+    let mut unknown = steps[0].clone();
+    unknown[0] = 4;
+    for (name, bytes) in [
+        ("a trailing byte", [&steps[0][..], &[0]].concat()),
+        ("two steps in one", [&steps[0][..], &steps[1][..]].concat()),
+        ("cut short", steps[0][..steps[0].len() - 1].to_vec()),
+        ("an unknown op", unknown),
+    ] {
+        let mut crafted = all.clone();
+        crafted[0] = &bytes;
+        let error = booted(&world).apply_steps(&header, &crafted).unwrap_err();
+        assert!(
+            matches!(error, ApplyError::BadData | ApplyError::Plan(PlanError::Wire(_))),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_write_announcing_more_than_a_chunk_is_refused_before_its_data() {
+    // A receiver of a stream asks for the step's length from its head: a count that is not one chunk is refused
+    // there, before a buffer for the data is needed.
+    let world = world();
+    let device = booted(&world);
+    let plan = world.plan_for(&device.manifest().unwrap(), &world.new_release);
+    let write = plan
+        .steps
+        .iter()
+        .find(|step| matches!(step, PlanStep::Write { .. }))
+        .expect("the plan writes something")
+        .encode();
+    let mut head = write[..chunky::MAX_STEP_HEAD_LEN].to_vec();
+    let count = chunky_format::WRITE_COUNT_OFFSET;
+    head[count..count + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+    let mut stream = plan.encode()[..PLAN_HEADER_LEN].to_vec();
+    stream.extend_from_slice(&head);
+    assert_eq!(device.apply(&stream).unwrap_err(), ApplyError::BadData);
 }
 
 #[test]
@@ -465,8 +612,8 @@ fn a_copy_source_that_started_faulting_stops_the_plan() {
     let world = world();
     let device = booted(&world);
     let plan = world.plan_for(&device.manifest().unwrap(), &world.new_release);
-    let source = plan.steps.iter().find_map(|(step, _)| match step {
-        Step::Copy { src, .. } => Some(*src as usize),
+    let source = plan.steps.iter().find_map(|step| match step {
+        PlanStep::Copy { src, .. } => Some(*src as usize),
         _ => None,
     });
     let source = source.expect("the plan copies something");

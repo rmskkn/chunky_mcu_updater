@@ -141,7 +141,7 @@ fn release_flow_build_plan_store() {
     assert!(added.contains("new in the store"), "{added}");
     let listed = ok(&["store", "ls", "--store", s(&p("store"))]);
     assert!(
-        listed.lines().all(|l| l.split(' ').next().unwrap().len() == 32),
+        listed.lines().all(|l| l.split(' ').next().unwrap().len() == 16),
         "{listed}"
     );
     assert!(!listed.is_empty());

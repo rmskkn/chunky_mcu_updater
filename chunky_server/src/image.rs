@@ -1,7 +1,10 @@
 //! Building an image: payload, `0xFF` padding up to the partition, sealed descriptor.
 
-use chunky::descriptor::{DESCRIPTOR_LEN, ImageDescriptor, PublicKey, Scheme, Trust, unsigned_seal};
+use chunky::descriptor::{
+    DESCRIPTOR_LEN, ImageDescriptor, ImageError, PublicKey, Scheme, Trust, split_descriptor, unsigned_seal,
+};
 use chunky::geometry::FlashGeometry;
+use chunky_format::{DESCRIPTOR_MAGIC, FORMAT, SignedDescriptor};
 use ed25519_dalek::{Signer as _, SigningKey};
 use sha2::{Digest, Sha256};
 
@@ -84,22 +87,35 @@ pub fn build_image(
     let mut image = vec![0xFF; room];
     image[..payload.len()].copy_from_slice(payload);
 
-    let mut descriptor = ImageDescriptor {
+    let body = ImageDescriptor {
+        magic: DESCRIPTOR_MAGIC,
+        format: FORMAT,
         scheme: signer.scheme(),
+        reserved: [0; 2],
         product_id: meta.product_id,
         version: meta.version,
         security_counter: meta.security_counter,
         image_len: room as u32,
         geometry_id: geometry.id(),
         image_sha256: Sha256::digest(&image).into(),
-        signature: [0; 64],
+        reserved_end: [0; 4],
     };
-    let message = descriptor.signed_message();
-    descriptor.signature = match signer {
-        Signer::Ed25519(key) => key.sign(&message).to_bytes(),
-        Signer::Unsigned => unsigned_seal(&message),
-    };
-    image.extend_from_slice(&descriptor.to_bytes());
+    let sealed = SignedDescriptor::seal(&body, |domain, bytes| match signer {
+        Signer::Ed25519(key) => key.sign(&[domain, bytes].concat()).to_bytes(),
+        Signer::Unsigned => unsigned_seal(domain, bytes),
+    });
+    image.extend_from_slice(&sealed.body);
+    image.extend_from_slice(&sealed.seal);
     debug_assert_eq!(image.len(), room + DESCRIPTOR_LEN);
     Ok(image)
+}
+
+/// The fields of a descriptor, read without checking its seal: for host tools that show an image or plan for a
+/// release they hold. Never a reason to trust anything: the server holds no key, and the device checks the seal
+/// before it reads a field (`chunky::descriptor::open_descriptor`).
+pub fn read_descriptor_unverified(raw: &[u8; DESCRIPTOR_LEN]) -> Result<ImageDescriptor, ImageError> {
+    let signed = split_descriptor(raw);
+    let body = ImageDescriptor::from_fixed(&signed.body).map_err(|_| ImageError::BadFormat)?;
+    body.check()?;
+    Ok(body)
 }

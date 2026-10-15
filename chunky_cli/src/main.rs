@@ -346,7 +346,7 @@ fn descriptor_of(image: &[u8]) -> Result<ImageDescriptor> {
     let raw = image
         .last_chunk::<DESCRIPTOR_LEN>()
         .ok_or("not a chunky image: shorter than a descriptor")?;
-    ImageDescriptor::parse(raw).map_err(|e| format!("not a chunky image: {e:?}").into())
+    chunky_server::image::read_descriptor_unverified(raw).map_err(|e| format!("not a chunky image: {e:?}").into())
 }
 
 fn print_descriptor(d: &ImageDescriptor) {

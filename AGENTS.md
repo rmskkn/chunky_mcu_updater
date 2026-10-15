@@ -52,16 +52,17 @@ adding a dependency.
   table, const-checked), `series.rs` (the flash rules per MCU series behind the `series-*` features, and the
   const fn that lays out a part for a profile; a firmware build without a series feature fails), `chips.rs`
   (worked examples of it, the presets of the host tools), `descriptor.rs`
-  (the signed 128-byte image descriptor, `Trust`), `floor.rs` (the version floor counter), `manifest.rs`,
+  (the sealed 128-byte image descriptor, `Trust` as the seal check, verify before decode), `floor.rs` (the version floor counter), `manifest.rs`,
   `plan.rs` (wire formats), `apply.rs` (the engine that runs an untrusted plan), `ecc.rs` (`EccError`,
   `try_read`, `Masked`), `part.rs` (`Part`, `ReadOnly`), `backend.rs` (`BootBackend`).
 - `chunky_swap/` — the embassy-boot backend, `no_std`: `boot()` is the bootloader's whole decision,
   `SwapUpdater` the application's handle, `Guarded` the state partition as embassy-boot gets it.
 - `chunky_bank/` — the hardware bank swap backend, `no_std`: `boot()` again the whole decision, `BankUpdater`
   the application's handle, `BankSwitch` the SWAP_BANK option bit, `log.rs` the state log of write-once flags.
-- `chunky_format/` — the plan format as fixed-layout shrink_wrap types (format 2, PROTO-3, a spike not yet read by
-  `chunky`): `signed!`, golden `vectors/`, the generated C reader in `c/`, `size_bench/` (own nightly workspace).
-  Needs `../wire_weaver` (SW-44).
+- `chunky_format/` — the wire format as fixed-layout and head+tail shrink_wrap types (format 2, PROTO-3:
+  descriptor, plan header, steps, manifest), what `chunky` reads and `chunky_server` writes: `signed!`, golden
+  `vectors/`, the generated C reader in `c/`, `size_bench/` (own nightly workspace). Needs `../wire_weaver`
+  (SW-44), and so does every crate above it.
 - `chunky_server/` — host side: `image.rs` (build and seal), `store.rs` (blob store), `manifest.rs` (parse),
   `planner.rs`.
 - `chunky_sim/` — `flash.rs` (NOR flash with per-family write rules, torn writes and erases, ECC faults),

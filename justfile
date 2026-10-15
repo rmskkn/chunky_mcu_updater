@@ -86,10 +86,10 @@ bench-measure *ARGS:
 bench-sweep *ARGS:
     {{bench-cargo}} run -q --release --manifest-path bench/host/Cargo.toml -- sweep {{ARGS}}
 
-# Code size of the plan readers (PROTO-3) on Cortex-M0 and RV32IMC: empty floor, format 1 (chunky::plan), format 2
+# Code size of the plan readers (PROTO-3) on Cortex-M0 and RV32IMC: empty floor, format 2
 # through the fixed-layout fast path and through shrink_wrap's BufReader. Text includes a 2048-byte buffer.
 size-bench:
     cd chunky_format/size_bench && cargo build -q --release --target-dir target --target thumbv6m-none-eabi
     cd chunky_format/size_bench && cargo build -q --release --target-dir target --target riscv32imc-unknown-none-elf
-    cd chunky_format/size_bench/target/thumbv6m-none-eabi/release && llvm-size empty v1 fixed sw
-    cd chunky_format/size_bench/target/riscv32imc-unknown-none-elf/release && llvm-size empty v1 fixed sw
+    cd chunky_format/size_bench/target/thumbv6m-none-eabi/release && llvm-size empty fixed sw
+    cd chunky_format/size_bench/target/riscv32imc-unknown-none-elf/release && llvm-size empty fixed sw

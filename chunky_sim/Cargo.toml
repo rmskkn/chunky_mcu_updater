@@ -14,3 +14,5 @@ embedded-storage.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+ed25519-dalek.workspace = true
+chunky_format.workspace = true

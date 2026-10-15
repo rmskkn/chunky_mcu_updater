@@ -346,3 +346,58 @@ fn c_files() {
     writeln!(g, "\n#endif /* CHUNKY_GOLDEN_H */").unwrap();
     golden(dir("c/golden.h"), g.as_bytes());
 }
+
+#[test]
+fn manifest_layout_is_pinned() {
+    assert_eq!(ManifestHeader::FORMAT_OFFSET, 4);
+    assert_eq!(ManifestHeader::BACKEND_OFFSET, 5);
+    assert_eq!(ManifestHeader::SCHEME_OFFSET, 6);
+    assert_eq!(ManifestHeader::GEOMETRY_ID_OFFSET, 7);
+    assert_eq!(ManifestHeader::CHUNKS_OFFSET, 11);
+    assert_eq!(ManifestHeader::ENCODED_LEN, 13);
+    let mut buf = [0; 16];
+    let hash = ChunkEntry::Hash {
+        hash: [1, 2, 3, 4, 5, 6, 7, 8],
+    };
+    assert_eq!(hash.to_head_tail(&mut buf).unwrap(), 9);
+    assert_eq!(&buf[..9], &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(ChunkEntry::Blank.to_head_tail(&mut buf).unwrap(), 1);
+    assert_eq!(buf[0], 1);
+    assert_eq!(ChunkEntry::Unreadable.to_head_tail(&mut buf).unwrap(), 1);
+    assert_eq!(buf[0], 2);
+    // a tag no entry has
+    assert!(ChunkEntry::from_head_tail(&[3]).is_err());
+}
+
+/// The length a stream receiver reads from a step's head is the length the view gives the whole step, for the
+/// vectors and for garbage alike.
+#[test]
+fn step_len_from_head_agrees_with_the_view() {
+    let plan = plan();
+    let mut at = PlanHeader::ENCODED_LEN;
+    while at < plan.len() {
+        let rest = &plan[at..];
+        let len = step_len(&read_step(rest).unwrap());
+        for cut in 0..rest.len().min(1 + Step::WRITE_HEAD_LEN) {
+            let framed = step_len_from_head(&rest[..cut]).unwrap();
+            assert!(framed.is_none() || framed == Some(len), "{cut}");
+        }
+        assert_eq!(
+            step_len_from_head(&rest[..len.min(1 + Step::WRITE_HEAD_LEN)]).unwrap(),
+            Some(len)
+        );
+        at += len;
+    }
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    for _ in 0..20_000 {
+        let len = (rng.next() % 40) as usize;
+        let buf: Vec<u8> = (0..len).map(|_| (rng.next() % 5) as u8).collect();
+        match (step_len_from_head(&buf), read_step(&buf)) {
+            (Ok(Some(n)), Ok(view)) => assert_eq!(n, step_len(&view)),
+            // the head is there but not the data, or not even the head
+            (Ok(Some(n)), Err(_)) => assert!(n > buf.len()),
+            (Ok(None), view) => assert!(view.is_err()),
+            (Err(_), view) => assert!(view.is_err()),
+        }
+    }
+}

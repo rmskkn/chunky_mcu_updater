@@ -2,9 +2,10 @@
 
 mod common;
 
-use chunky::descriptor::ImageDescriptor;
-use chunky::manifest::{ChunkState, ManifestHeader};
-use chunky::plan::{PLAN_HEADER_LEN, PlanHeader, STEP_LEN, Step};
+use chunky::manifest::ChunkState;
+use chunky::plan::{PLAN_HEADER_LEN, Step, read_header_fixed, read_step, step_len};
+use chunky_server::image::read_descriptor_unverified;
+use chunky_server::planner::PlanStep;
 use chunky_server::store::BlobStore;
 use chunky_server::{DirStore, Manifest, Policy, plan};
 use chunky_sim::{Device, FlashModel, G0, H7Mini};
@@ -105,23 +106,30 @@ proptest! {
 
     #[test]
     fn parsers_take_any_bytes(raw in prop::collection::vec(any::<u8>(), 0..400)) {
-        let _ = Manifest::parse(&raw);
-        if let Some(header) = raw.first_chunk::<PLAN_HEADER_LEN>() {
-            let _ = PlanHeader::decode(header);
+        // One encoding each: what a reader accepts, written again, is the bytes it read.
+        if let Ok(manifest) = Manifest::parse(&raw) {
+            prop_assert_eq!(&manifest.encode(), &raw);
         }
-        if let Some(raw) = raw.first_chunk::<STEP_LEN>()
-            && let Ok(step) = Step::decode(raw)
+        if let Some(header) = raw.first_chunk::<PLAN_HEADER_LEN>()
+            && let Ok(parsed) = read_header_fixed(header)
         {
-            // One encoding per step.
-            prop_assert_eq!(&step.encode(), raw);
+            let mut again = [0; PLAN_HEADER_LEN];
+            parsed.to_fixed(&mut again).unwrap();
+            prop_assert_eq!(&again, header);
         }
-        if let Some(raw) = raw.first_chunk::<128>()
-            && let Ok(descriptor) = ImageDescriptor::parse(raw)
+        if let Ok(view) = read_step(&raw) {
+            let len = step_len(&view);
+            let step = Step::from_head_tail(&raw[..len]).unwrap();
+            let mut again = vec![0; step.head_tail_len()];
+            step.to_head_tail(&mut again).unwrap();
+            prop_assert_eq!(&again[..], &raw[..len]);
+        }
+        if let Some(descriptor) = raw.first_chunk::<128>()
+            && let Ok(body) = read_descriptor_unverified(descriptor)
         {
-            prop_assert_eq!(&descriptor.to_bytes(), raw);
-        }
-        if let Some(header) = raw.first_chunk::<16>() {
-            let _ = ManifestHeader::decode(header);
+            let mut again = [0; 64];
+            body.to_fixed(&mut again).unwrap();
+            prop_assert_eq!(&again[..], &descriptor[..64]);
         }
     }
 
@@ -135,30 +143,32 @@ proptest! {
         device.boot().unwrap();
         let chunk = world.geometry.chunk as usize;
         let mut wire = world.plan_for(&device.manifest().unwrap(), &world.new_release);
-        wire.header.step_count = steps.len() as u32;
-        let mut raw = wire.header.encode().to_vec();
+        let mut body = Vec::new();
+        let count = steps.len() as u32;
         for (op, dst, src, honest, seed) in steps {
             let data = bytes(seed, chunk);
             let source = &world.old[(src as usize % 12) * chunk..][..chunk];
             let hash = match (op, honest) {
                 (3, true) => chunky::ChunkHash::of(&data),
                 (2, true) => chunky::ChunkHash::of(source),
-                _ => chunky::ChunkHash([seed as u8; 16]),
+                _ => chunky::ChunkHash([seed as u8; 8]),
             };
-            let mut step = [0; STEP_LEN];
-            step[0] = op;
-            step[2..4].copy_from_slice(&dst.to_le_bytes());
-            if op == 2 {
-                step[4..6].copy_from_slice(&src.to_le_bytes());
-            }
-            if op != 1 {
-                step[8..].copy_from_slice(&hash.0);
-            }
-            raw.extend_from_slice(&step);
-            if op == 3 {
-                raw.extend_from_slice(&data);
-            }
+            let step = match op {
+                1 => PlanStep::Erase { block: dst },
+                2 => PlanStep::Copy { dst, src, hash },
+                3 => PlanStep::Write { dst, hash, data },
+                _ => {
+                    // an op no format has
+                    body.extend_from_slice(&[op, seed as u8, (seed >> 8) as u8]);
+                    continue;
+                }
+            };
+            body.extend_from_slice(&step.encode());
         }
+        wire.header.step_count = count;
+        wire.header.body_len = body.len() as u32;
+        let mut raw = wire.encode()[..PLAN_HEADER_LEN].to_vec();
+        raw.extend_from_slice(&body);
         let before: Vec<_> = protected(&world.geometry).iter().map(|&region| device.dump(region)).collect();
         prop_assert!(device.apply(&raw).is_err());
         let after: Vec<_> = protected(&world.geometry).iter().map(|&region| device.dump(region)).collect();
@@ -189,7 +199,7 @@ fn a_delta_sends_only_new_chunks() {
     assert!(
         plan.steps
             .iter()
-            .any(|(step, _)| matches!(step, Step::Copy { dst: 2, src: 1, .. }))
+            .any(|step| matches!(step, PlanStep::Copy { dst: 2, src: 1, .. }))
     );
     assert!(plan.stats.wire_bytes < plan.stats.image_bytes);
 }
@@ -220,7 +230,7 @@ fn the_directory_store_keeps_and_checks_blobs() {
     let hash = store.put(&data).unwrap();
     assert_eq!(store.put(&data).unwrap(), hash);
     assert_eq!(store.get(&hash).unwrap(), Some(data));
-    assert_eq!(store.get(&chunky::ChunkHash([0; 16])).unwrap(), None);
+    assert_eq!(store.get(&chunky::ChunkHash([0; 8])).unwrap(), None);
 
     // A blob that rotted on disk is not handed out.
     let name: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();

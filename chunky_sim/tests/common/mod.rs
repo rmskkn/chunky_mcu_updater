@@ -282,7 +282,7 @@ pub fn sweep_from<M: FlashModel, B: Backend<M>>(
 
 /// The descriptor of an image.
 pub fn descriptor_of(image: &[u8]) -> ImageDescriptor {
-    ImageDescriptor::parse(image.last_chunk().unwrap()).unwrap()
+    chunky_server::image::read_descriptor_unverified(image.last_chunk().unwrap()).unwrap()
 }
 
 /// The regions a plan must never change.

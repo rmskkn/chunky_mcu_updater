@@ -1,8 +1,9 @@
 //! Reading a device manifest. Untrusted input: lengths and tags are checked, nothing is assumed.
 
 use chunky::geometry::FlashGeometry;
-use chunky::manifest::{ChunkState, ENTRY_LEN, HEADER_LEN, ManifestError, ManifestHeader};
+use chunky::manifest::{ChunkState, HEADER_LEN, ManifestHeader, manifest_header};
 use chunky::{Scheme, Trust};
+use chunky_format::{ChunkEntry, FormatError};
 
 /// A parsed manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,27 +22,50 @@ pub enum ManifestParseError {
     /// Shorter or longer than its header says.
     BadLength,
     /// Header or entry is malformed.
-    Malformed(ManifestError),
+    Malformed(FormatError),
 }
 
 impl Manifest {
-    /// Parses the wire form.
+    /// Parses the wire form: the header, then exactly `2 * chunks` entries and nothing after them.
     pub fn parse(bytes: &[u8]) -> Result<Self, ManifestParseError> {
         let header = bytes.first_chunk::<HEADER_LEN>().ok_or(ManifestParseError::BadLength)?;
-        let header = ManifestHeader::decode(header).map_err(ManifestParseError::Malformed)?;
+        let header = ManifestHeader::from_fixed(header).map_err(|e| ManifestParseError::Malformed(e.into()))?;
+        header.check().map_err(ManifestParseError::Malformed)?;
         let chunks = header.chunks as usize;
-        let body = &bytes[HEADER_LEN..];
-        if body.len() != 2 * chunks * ENTRY_LEN {
+        let mut rest = &bytes[HEADER_LEN..];
+        let mut entries = || -> Result<Vec<ChunkState>, ManifestParseError> {
+            let mut states = Vec::with_capacity(chunks);
+            for _ in 0..chunks {
+                let entry = match ChunkEntry::from_head_tail(rest) {
+                    Ok(entry) => entry,
+                    Err(_) if rest.is_empty() => return Err(ManifestParseError::BadLength),
+                    Err(e) => return Err(ManifestParseError::Malformed(e.into())),
+                };
+                rest = &rest[entry.head_tail_len()..];
+                states.push(ChunkState::from_entry(entry));
+            }
+            Ok(states)
+        };
+        let active = entries()?;
+        let dfu = entries()?;
+        if !rest.is_empty() {
             return Err(ManifestParseError::BadLength);
         }
-        let mut entries = body.as_chunks::<ENTRY_LEN>().0.iter().map(ChunkState::decode);
-        let active = entries.by_ref().take(chunks).collect::<Result<Vec<_>, _>>();
-        let dfu = entries.collect::<Result<Vec<_>, _>>();
-        Ok(Self {
-            header,
-            active: active.map_err(ManifestParseError::Malformed)?,
-            dfu: dfu.map_err(ManifestParseError::Malformed)?,
-        })
+        Ok(Self { header, active, dfu })
+    }
+
+    /// Wire form, as the device sends it.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = vec![0; HEADER_LEN];
+        self.header
+            .to_fixed(&mut out)
+            .expect("the buffer is the header's length");
+        for state in self.active.iter().chain(&self.dfu) {
+            let mut entry = [0; chunky::manifest::MAX_ENTRY_LEN];
+            let len = state.encode(&mut entry);
+            out.extend_from_slice(&entry[..len]);
+        }
+        out
     }
 
     /// The manifest a device with these partition contents would send (for tools and tests).
@@ -56,12 +80,7 @@ impl Manifest {
             states
         };
         Self {
-            header: ManifestHeader {
-                backend: geometry.backend as u8,
-                scheme: trust.scheme() as u8,
-                geometry_id: geometry.id(),
-                chunks: geometry.chunks() as u16,
-            },
+            header: manifest_header(geometry, trust.scheme()),
             active: states(active),
             dfu: states(dfu),
         }
@@ -77,12 +96,7 @@ impl Manifest {
             .collect();
         states.resize(chunks, ChunkState::Blank);
         Self {
-            header: ManifestHeader {
-                backend: geometry.backend as u8,
-                scheme: scheme as u8,
-                geometry_id: geometry.id(),
-                chunks: chunks as u16,
-            },
+            header: manifest_header(geometry, scheme),
             active: states,
             dfu: vec![ChunkState::Blank; chunks],
         }
@@ -90,6 +104,6 @@ impl Manifest {
 
     /// True when the device accepts images without a signature.
     pub fn unsigned(&self) -> bool {
-        self.header.scheme == Scheme::Unsigned as u8
+        self.header.scheme == Scheme::Unsigned
     }
 }

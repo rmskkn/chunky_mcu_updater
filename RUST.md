@@ -41,7 +41,7 @@ survive a failed update.
 | Custom A/B bootloader, two builds (one per slot) | embassy-boot swap, one build at one address | Every unchanged page of the new image equals a page of the running one, so COPY hits all unchanged code |
 | Meta banks, apply journal | None: DFU's own contents are the progress | Nothing to disagree with the flash |
 | Sector = erase page = delta unit, F103 numbers | Separate chunk, erase and write sizes, const-checked per chip | G0, H7 (128 KB sectors), RP2350; an unsupported layout fails the build |
-| MD5 per sector | SHA-256 truncated to 16 bytes | No weak primitive on the device |
+| MD5 per sector | SHA-256 truncated to 8 bytes (MAN-2) | No weak primitive on the device; a collision costs only the update, never integrity |
 | ECDSA P-256, version compared with the running one | Ed25519, security counter against a stored floor that only rises | Pure Rust; a revert does not lower the bar |
 | Hash of the slot checked on boot | Signature checked on every boot | The stored hash sits in the slot it covers |
 | COPY from any slot | COPY from the running image only | It cannot be overwritten by an earlier step |
