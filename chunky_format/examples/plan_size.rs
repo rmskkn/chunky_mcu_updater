@@ -9,6 +9,7 @@ use chunky_server::image::{ImageMeta, Signer, build_image};
 use chunky_server::manifest::Manifest;
 use chunky_server::planner::{Policy, Release, plan};
 use chunky_server::store::MemStore;
+use shrink_wrap::head_tail::List;
 
 fn short(hash: &[u8]) -> [u8; CHUNK_HASH_LEN] {
     hash[..CHUNK_HASH_LEN].try_into().unwrap()
@@ -45,7 +46,6 @@ fn main() {
 
         let (mut erase, mut copy, mut write, mut data) = (0, 0, 0, 0);
         let mut v2 = PlanHeader::ENCODED_LEN;
-        let mut buf = [0; Step::ENCODED_LEN];
         for (step, payload) in &p.steps {
             let step = match *step {
                 Step1::Erase { block } => {
@@ -64,14 +64,13 @@ fn main() {
                     write += 1;
                     Step::Write {
                         dst,
-                        data_len: payload.as_ref().unwrap().len() as u16,
+                        data: List::new(payload.as_deref().unwrap()),
                         hash: short(&hash.0),
                     }
                 }
             };
-            v2 += step.to_fixed(&mut buf).unwrap();
             let n = payload.as_ref().map_or(0, Vec::len);
-            v2 += n;
+            v2 += step.head_tail_len();
             data += n;
         }
         println!(

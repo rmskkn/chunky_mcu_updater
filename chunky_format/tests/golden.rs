@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use chunky_format::*;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
+use shrink_wrap::head_tail::List;
 use shrink_wrap::prelude::*;
 
 fn dir(sub: &str) -> PathBuf {
@@ -78,39 +79,31 @@ const DATA: [u8; 16] = [
     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
 ];
 
-fn steps() -> Vec<(Step, &'static [u8])> {
+fn steps() -> Vec<Step<'static>> {
     vec![
-        (Step::Erase { block: 3 }, &[]),
-        (
-            Step::Copy {
-                dst: 2,
-                src: 5,
-                hash: hash8(b"chunk five"),
-            },
-            &[],
-        ),
-        (
-            Step::Write {
-                dst: 6,
-                data_len: DATA.len() as u16,
-                hash: hash8(&DATA),
-            },
-            &DATA,
-        ),
-        (Step::Erase { block: 0x0102 }, &[]),
+        Step::Erase { block: 3 },
+        Step::Copy {
+            dst: 2,
+            src: 5,
+            hash: hash8(b"chunk five"),
+        },
+        Step::Write {
+            dst: 6,
+            data: List::new(&DATA),
+            hash: hash8(&DATA),
+        },
+        Step::Erase { block: 0x0102 },
     ]
 }
 
 /// The plan: header, then each step and its data. Written with the fast path, checked against shrink_wrap.
 fn plan() -> Vec<u8> {
     let mut body = Vec::new();
-    for (step, data) in steps() {
-        let mut fixed = [0; Step::ENCODED_LEN];
-        let n = step.to_fixed(&mut fixed).unwrap();
-        let mut sw = [0; 64];
-        assert_eq!(step.to_ww_bytes(&mut sw).unwrap(), &fixed[..n]);
-        body.extend_from_slice(&fixed[..n]);
-        body.extend_from_slice(data);
+    for step in steps() {
+        let mut buf = [0; 64];
+        let n = step.to_head_tail(&mut buf).unwrap();
+        assert_eq!(n, step.head_tail_len());
+        body.extend_from_slice(&buf[..n]);
     }
     let header = PlanHeader {
         magic: PLAN_MAGIC,
@@ -152,12 +145,13 @@ fn layout_is_pinned() {
     assert_eq!(PlanHeader::DESCRIPTOR_OFFSET, 17);
     assert_eq!(PlanHeader::ENCODED_LEN, 145);
     // the steps
-    assert_eq!(Step::ERASE_LEN, 3);
-    assert_eq!(Step::COPY_LEN, 13);
-    assert_eq!(Step::COPY_HASH_OFFSET, 5);
-    assert_eq!(Step::WRITE_LEN, 13);
-    assert_eq!(Step::WRITE_DATA_LEN_OFFSET, 3);
-    const { assert!(!Step::SAME_LEN) };
+    assert_eq!(Step::HEAD_LEN, 1);
+    assert_eq!(Step::ERASE_HEAD_LEN, 2);
+    assert_eq!(Step::COPY_HEAD_LEN, 12);
+    assert_eq!(Step::COPY_HASH_OFFSET, 4);
+    assert_eq!(Step::WRITE_HEAD_LEN, 12);
+    assert_eq!(Step::WRITE_DATA_OFFSET, 2);
+    assert_eq!(Step::WRITE_HASH_OFFSET, 4);
     // and shrink_wrap agrees that they have no length of their own on the wire
     assert_eq!(
         <PlanHeader as SerializeShrinkWrap>::ELEMENT_SIZE,
@@ -199,12 +193,18 @@ fn both_readers_read_the_vectors() {
     assert_eq!(body, self::body());
 
     let mut at = PlanHeader::ENCODED_LEN;
-    for (step, data) in steps() {
-        let f = read_step_fixed(&plan[at..]).unwrap();
-        let s = read_step_sw(&plan[at..]).unwrap();
-        assert_eq!(f, s);
-        assert_eq!((f.step, f.data), (step, data));
-        at += f.len;
+    for step in steps() {
+        let view = read_step(&plan[at..]).unwrap();
+        let len = step_len(&view);
+        // the view and the value read the same step, and both are the bytes the vectors hold
+        let value = Step::from_head_tail(&plan[at..at + len]).unwrap();
+        assert_eq!(value, step);
+        if let StepView::Write(w) = &view {
+            assert_eq!(w.dst(), 6);
+            assert_eq!(w.data().as_bytes(), DATA);
+            assert_eq!(w.hash(), hash8(&DATA));
+        }
+        at += len;
     }
     assert_eq!(at, plan.len());
     assert_eq!(at - PlanHeader::ENCODED_LEN, fixed.body_len as usize);
@@ -266,7 +266,7 @@ impl Rng {
 }
 
 #[test]
-fn garbage_never_panics_and_both_readers_agree() {
+fn garbage_never_panics_and_view_and_value_agree() {
     let plan = plan();
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     for round in 0..20_000 {
@@ -286,16 +286,19 @@ fn garbage_never_panics_and_both_readers_agree() {
         assert_eq!(read_header_fixed(&buf).ok(), read_header_sw(&buf).ok());
         let mut at = 0;
         loop {
-            let f = read_step_fixed(&buf[at..]);
-            let s = read_step_sw(&buf[at..]);
-            assert_eq!(f.is_ok(), s.is_ok(), "{:02x?}", &buf[at..]);
-            match (f, s) {
-                (Ok(f), Ok(s)) => {
-                    assert_eq!(f, s);
-                    at += f.len;
-                }
-                _ => break,
+            let rest = &buf[at..];
+            let Ok(view) = read_step(rest) else {
+                // what the view refuses the value reader refuses too
+                assert!(Step::from_head_tail(rest).is_err(), "{rest:02x?}");
+                break;
+            };
+            let len = step_len(&view);
+            assert!(len <= rest.len());
+            let value = Step::from_head_tail(&rest[..len]).unwrap();
+            if let (StepView::Write(w), Step::Write { dst, data, hash }) = (&view, value) {
+                assert_eq!((w.dst(), w.data().as_bytes(), w.hash()), (dst, data.as_bytes(), hash));
             }
+            at += len;
         }
     }
 }

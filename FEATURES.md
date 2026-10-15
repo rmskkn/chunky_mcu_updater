@@ -182,9 +182,15 @@ Design: [SECURITY.md](SECURITY.md).
   code general), format 2 through `BufReader` 1854 / 2130. Bit fields (SW-45) were checked for the steps: packing the
   op into 2 bits next to a 14-bit chunk index saves one byte per step, 0.1 % of the bench plans, and gives up the
   typed `Step` enum; not done.
-  The head+tail encoding (wire_weaver SW-46: fixed fields in a head, lists and payloads in a tail) was built for
-  types with lists in the middle; the plan needs none of it: each record is already a fixed head with its data
-  after it (WRITE's `data_len`), so format 2 stays fixed-layout.
+  Steps are a `head_tail` enum (SW-46, SW-52): op byte, then the variant's head, a WRITE's data a typed
+  `List<'i, u8>` whose `u16` count sits where `data_len` was, the bytes as the tail. The encoded bytes are
+  identical to the earlier fixed-layout steps (`vectors/plan.bin` and `c/golden.h` unchanged, checked by the Rust
+  value and view readers and the C reader). Read with `Step::view(buf)` (`read_step`, `data()` a slice into
+  the plan, no copy), no hand glue. Plan reader code beyond an empty image, Cortex-M0 / RV32IMC: with the view
+  734 / 912 bytes (header fast path), 1486 / 1764 with the header through `BufReader`; the hand glue it replaces
+  was 892 / 1086 and 1854 / 2130, format 1 hand-written 840 / 1252. So the view is smaller than the fast path
+  and kept; on M0 it also beats format 1's hand reader. The C reader walks steps with the generated
+  `chunky_step_tail` (names `chunky_step_write_data_count`, ... changed; `c/test.c` updated).
   Not wired in: `chunky` still reads format 1. Switching takes the apply engine and planner on `chunky_format`,
   8-byte `ChunkHash` and manifest (MAN-2), the descriptor v2 in `chunky_server::image` and in `Trust` (a
   `SealCheck`), the sweeps re-run; ww_dfu needs nothing (it carries the header's octets, 145 < `MAX_HEADER_LEN`).

@@ -44,28 +44,29 @@ int main(void) {
     at = plan + CHUNKY_PLAN_HEADER_LEN;
     end = plan + sizeof golden_plan;
     while (at < end) {
-        uint32_t tag = chunky_step_tag(at);
-        size_t len = chunky_step_len(tag);
-        CHECK(len != 0u);
-        if (len == 0u || (size_t)(end - at) < len) {
+        const uint8_t *t = at + CHUNKY_STEP_TAG_LEN;
+        chunky_step_tail_t tl;
+        int rc = chunky_step_tail(at, &t, end, &tl);
+        CHECK(rc == 0);
+        if (rc != 0) {
             break;
         }
-        switch (tag) {
+        switch (chunky_step_tag(at)) {
         case CHUNKY_STEP_ERASE:
-            last_erase = chunky_step_erase_block(at);
+            last_erase = chunky_step_erase_block(tl.head);
             break;
         case CHUNKY_STEP_COPY:
-            copy_src = chunky_step_copy_src(at);
+            copy_src = chunky_step_copy_src(tl.head);
             break;
         case CHUNKY_STEP_WRITE:
-            write_dst = chunky_step_write_dst(at);
-            write_len = chunky_step_write_data_len(at);
-            len += write_len;
+            write_dst = chunky_step_write_dst(tl.head);
+            write_len = chunky_step_write_data_count(tl.head);
+            CHECK(tl.write_data[0] == 0x00u && tl.write_data[write_len - 1u] == 0xffu);
             break;
         default:
             break;
         }
-        at += len;
+        at = t;
         steps++;
     }
     CHECK(at == end);

@@ -5,6 +5,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `chunky_format`: `Step` is a `head_tail` enum with a typed `List<u8>` for a WRITE's data, read with `Step::view`
+  (`read_step`, `step_len`) instead of `StepRead` and the `read_step_fixed` / `read_step_sw` glue. Wire bytes of
+  format 2 are identical (`vectors/` and `c/golden.h` unchanged); the C reader is regenerated (step accessors take
+  the variant head, `chunky_step_tail` walks the data). Plan reader on Cortex-M0 / RV32IMC: 734 / 912 bytes, was
+  892 / 1086 (format 1 hand-written: 840 / 1252). (PROTO-3)
+
 ## [0.8.0] - 2026-10-14
 
 ### Added

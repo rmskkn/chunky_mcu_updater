@@ -1,8 +1,8 @@
-//! Format 2 through shrink_wrap's `BufReader`: what an app or a bootloader with WireWeaver would link.
+//! Format 2: header through shrink_wrap's `BufReader`, steps through `Step::view`: what an app would link.
 #![no_std]
 #![no_main]
 
-use chunky_format::{PlanHeader, read_header_sw, read_step_sw};
+use chunky_format::{PlanHeader, read_header_sw, read_step, step_len};
 use chunky_format_size_bench::{keep, start};
 
 #[unsafe(no_mangle)]
@@ -14,9 +14,9 @@ extern "C" fn _start() -> ! {
         };
         keep(&header);
         let mut at = PlanHeader::ENCODED_LEN;
-        while let Some(Ok(step)) = rx.get(at..).map(read_step_sw) {
+        while let Some(Ok(step)) = rx.get(at..).map(read_step) {
             keep(&step);
-            at += step.len;
+            at += step_len(&step);
         }
     })
 }

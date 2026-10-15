@@ -1,7 +1,7 @@
 //! The chunky wire format as shrink_wrap types (PROTO-3, a spike): one format, two readers.
 //!
-//! The image descriptor, the plan header and the plan steps are `#[derive_shrink_wrap(.., fixed_layout)]` types:
-//! their shrink_wrap encoding is a fixed little-endian byte layout, so the same bytes are read
+//! The image descriptor and the plan header are `#[derive_shrink_wrap(.., fixed_layout)]` types: their shrink_wrap
+//! encoding is a fixed little-endian byte layout, so the same bytes are read
 //!
 //! - by the generated shrink_wrap path (`des_shrink_wrap` through a `BufReader`), what an app or a full
 //!   bootloader with WireWeaver links anyway, and
@@ -9,7 +9,11 @@
 //!   offsets, no `BufReader`, for a minimal bootloader; and by the C reader generated from the same types
 //!   (`c/chunky_format.h`).
 //!
-//! Golden vectors (`tests/golden.rs`, `c/golden.h`) are checked by all three.
+//! The steps are a `head_tail` enum (SW-46) with a typed `List<u8>` for a WRITE's data, read with `Step::view`
+//! (SW-52: no copy of the data, only the lengths are checked), and the same bytes as the fixed-layout steps of
+//! the first draft of format 2 (the vectors did not change).
+//!
+//! Golden vectors (`tests/golden.rs`, `c/golden.h`) are checked by all readers.
 //!
 //! Format 2, little-endian. This is not yet what `chunky` reads (format 1, `chunky::plan`); see FEATURES.md
 //! PROTO-3 for the numbers and what switching takes.
@@ -35,15 +39,16 @@
 //! Plan header, 145 bytes ([PlanHeader]): magic `CKP2`, format 2, geometry id (u32), step count (u32), body length
 //! (u32: bytes of steps and data after the header), the target's [SignedDescriptor].
 //!
-//! Steps ([Step]), a one-byte op and its fields; a WRITE is followed by its data:
+//! Steps ([Step]), a one-byte op, the fixed head of the variant, and for a WRITE its data as the tail:
 //!
 //! | Op | Bytes | Fields |
 //! |---|---|---|
 //! | 1 ERASE | 3 | erase block (u16) |
 //! | 2 COPY | 13 | chunk of DFU (u16), chunk of ACTIVE (u16), chunk hash (8) |
-//! | 3 WRITE | 13 + data length | chunk of DFU (u16), data length (u16), chunk hash (8), then the data |
+//! | 3 WRITE | 13 + data length | chunk of DFU (u16), data length (u16, the list's count), chunk hash (8), then the data |
 #![no_std]
 
+use shrink_wrap::head_tail::List;
 use shrink_wrap::prelude::*;
 
 /// Format of descriptor and plan.
@@ -218,15 +223,11 @@ impl PlanHeader {
     }
 }
 
-/// One step of a plan.
-#[derive_shrink_wrap(
-    borrowed,
-    self_describing,
-    fixed_layout,
-    ww_repr = u8,
-    derive(Clone, Copy, Debug, PartialEq, Eq)
-)]
-pub enum Step {
+/// One step of a plan, a head+tail enum (SW-46): the op byte, then the variant's fixed head, then for a WRITE its
+/// data as the tail. The bytes are those of the fixed-layout steps of format 2: a list's `u16` count sits where
+/// `data_len` is, and the tail is the data right after the 13-byte head.
+#[derive_shrink_wrap(head_tail, ww_repr = u8, derive(Clone, Copy, Debug, PartialEq))]
+pub enum Step<'i> {
     /// Erase one erase block of DFU.
     Erase {
         /// Erase block index.
@@ -241,56 +242,30 @@ pub enum Step {
         /// Hash the source must have.
         hash: [u8; CHUNK_HASH_LEN],
     } = 2,
-    /// Program one chunk of DFU with the `data_len` bytes that follow the step.
+    /// Program one chunk of DFU with `data`, which follows the step's head.
     Write {
         /// Chunk of DFU.
         dst: u16,
-        /// Bytes of data after the step.
-        data_len: u16,
+        /// The chunk's bytes (count in the head, bytes in the tail).
+        data: List<'i, u8>,
         /// Hash the data must have.
         hash: [u8; CHUNK_HASH_LEN],
     } = 3,
 }
 
-impl Step {
-    /// Bytes of data after the step.
-    pub fn data_len(&self) -> usize {
-        match self {
-            Step::Write { data_len, .. } => *data_len as usize,
-            _ => 0,
-        }
+/// Bytes of a step on the wire: its head, and for a WRITE its data.
+pub fn step_len(step: &StepView<'_>) -> usize {
+    match step {
+        StepView::Erase(_) => 1 + Step::ERASE_HEAD_LEN,
+        StepView::Copy(_) => 1 + Step::COPY_HEAD_LEN,
+        StepView::Write(w) => 1 + Step::WRITE_HEAD_LEN + w.data().len(),
     }
 }
 
-/// A step and its data, and how many bytes they took.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StepRead<'a> {
-    /// The step.
-    pub step: Step,
-    /// Data of a WRITE, empty otherwise.
-    pub data: &'a [u8],
-    /// Bytes of step and data.
-    pub len: usize,
-}
-
-/// Reads the step at the start of `buf` with the fixed-layout fast path.
-pub fn read_step_fixed(buf: &[u8]) -> Result<StepRead<'_>, FormatError> {
-    let step = Step::from_fixed(buf)?;
-    let at = step.fixed_len();
-    let len = at + step.data_len();
-    let data = buf
-        .get(at..len)
-        .ok_or(FormatError::Wire(ShrinkWrapError::OutOfBoundsReadRawSlice))?;
-    Ok(StepRead { step, data, len })
-}
-
-/// Reads the step at the start of `buf` through shrink_wrap's `BufReader`.
-pub fn read_step_sw(buf: &[u8]) -> Result<StepRead<'_>, FormatError> {
-    let mut rd = BufReader::new(buf);
-    let step = Step::des_shrink_wrap(&mut rd)?;
-    let data = rd.read_raw_slice(step.data_len())?;
-    let len = buf.len() - rd.bytes_left();
-    Ok(StepRead { step, data, len })
+/// Reads the step at the start of `buf`: `Step::view` checks the lengths and gives the step's fields at their
+/// offsets, `data()` of a WRITE a `List<u8>` over the bytes in `buf` (no copy; `as_bytes()` is the slice).
+pub fn read_step(buf: &[u8]) -> Result<StepView<'_>, FormatError> {
+    Step::view(buf).map_err(FormatError::Wire)
 }
 
 /// Reads a plan header with the fast path and checks magic and format (not the seal: see [SignedDescriptor::open]).
@@ -309,16 +284,17 @@ pub fn read_header_sw(buf: &[u8]) -> Result<PlanHeader, FormatError> {
 
 /// The C readers of these types, as `c/chunky_format.h` holds them.
 pub fn write_c_header(out: &mut dyn core::fmt::Write) -> core::fmt::Result {
-    shrink_wrap::fixed_layout::write_c_header(
+    use shrink_wrap::head_tail::HeadTail;
+    shrink_wrap::head_tail::write_c_header(
         out,
         "CHUNKY_FORMAT_H",
         "chunky_",
         &[
-            <Scheme as FixedLayout>::write_c,
-            <DescriptorBody as FixedLayout>::write_c,
-            <SignedDescriptor as FixedLayout>::write_c,
-            <PlanHeader as FixedLayout>::write_c,
-            <Step as FixedLayout>::write_c,
+            <Scheme as HeadTail>::write_c_ht,
+            <DescriptorBody as HeadTail>::write_c_ht,
+            <SignedDescriptor as HeadTail>::write_c_ht,
+            <PlanHeader as HeadTail>::write_c_ht,
+            <Step as HeadTail>::write_c_ht,
         ],
     )
 }
