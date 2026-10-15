@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-15
+
 ### Added
 
 - `just fuzz`: proptest fuzzing of every format 2 parser (descriptor with both trusts, plan header, steps and

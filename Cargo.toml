@@ -3,7 +3,7 @@ resolver = "3"
 members = ["chunky", "chunky_format", "chunky_swap", "chunky_bank", "chunky_server", "chunky_sim", "embassy_torn", "chunky_cli", "bench/bench_layout", "bench/fw_image"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 repository = "https://github.com/romixlab/chunky_mcu_updater"
 
