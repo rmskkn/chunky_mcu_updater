@@ -119,7 +119,15 @@ Design: [SECURITY.md](SECURITY.md).
   revert), several ways of tearing each, per family, with chunk equal to and smaller than the erase unit; property
   test with up to four cuts per update. One update loop for every backend (`Device<M, B>`, `tests/common`): the
   swap and the bank backend run through the same checks.
-- 📋 **SIM-3 parser-fuzz-proptests** — garbage into every parser and the apply engine at scale; fuzz targets.
+- ✅ **SIM-3 parser-fuzz-proptests** — `chunky_sim/tests/fuzz.rs`, proptest, `just fuzz [CASES]` (20000 per property;
+  `CHUNKY_FUZZ_CASES`, a small default in `just test`). Garbage and mutated real input into `open_descriptor` (both
+  `Trust` kinds; a mutated sealed descriptor is never accepted), the plan header (fixed and shrink_wrap readers
+  agree), `Step::view` and the stream framing, the server's manifest parser (what parses encodes back to the same
+  bytes). The apply engine gets 1 to 4 rounds of hostile plans (steps dropped, duplicated, swapped, retargeted, WRITEs
+  of junk with their right hash, wrong sizes, byte edits, junk bodies, header edits, counts fixed up or not), each
+  round with a power cut, on every family and both backends, signed and unsigned. Checked after each round:
+  nothing outside DFU's image area and the state region changed, staged only when DFU holds the release, and an
+  honest update then settles. Programming a non-blank unit panics in the simulator.
 
 ## SRV — server
 
@@ -228,7 +236,7 @@ Design: [SECURITY.md](SECURITY.md).
   file is stale. `chunky_sim/tests/vectors.rs` applies the checked-in plans to a simulated device (its manifest
   equals the vector, DFU ends as the target, boot, confirm, floor); `chunky_format/tests/golden.rs` reads them with
   both Rust readers; `c/test.c` walks every step and manifest entry. Not covered: an Unreadable manifest entry (the
-  C reader reads the tag, the Rust parser has its own test). Still to do: fuzzing at scale (SIM-3), SPEC.md (PROTO-1).
+  C reader reads the tag, the Rust parser has its own test). Still to do: SPEC.md (PROTO-1).
   Open: `chunky_format` depends on wire_weaver by path (../wire_weaver), until shrink_wrap 0.2 with SW-44 is
   published.
 

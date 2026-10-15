@@ -8,6 +8,10 @@ test:
     cargo test --workspace
     just test-c
 
+# Parser fuzzing at scale (SIM-3): every untrusted parser of format 2 and the apply engine on hostile plans with power cuts
+fuzz cases="20000":
+    CHUNKY_FUZZ_CASES={{cases}} cargo test --release -p chunky_sim --test fuzz
+
 # The C reader generated from chunky_format's types against its golden vectors (PROTO-3)
 test-c:
     mkdir -p target

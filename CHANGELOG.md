@@ -5,6 +5,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `just fuzz`: proptest fuzzing of every format 2 parser (descriptor with both trusts, plan header, steps and
+  their framing, the server's manifest) and of the apply engine on mutated real plans with power cuts inside them,
+  on every flash family and both backends (`chunky_sim/tests/fuzz.rs`, `CHUNKY_FUZZ_CASES`). (SIM-3)
+
 ## [0.10.0] - 2026-10-15
 
 ### Added
