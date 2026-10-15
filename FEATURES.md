@@ -188,13 +188,22 @@ Design: [SECURITY.md](SECURITY.md).
 
 ## PROTO — shared protocol spec
 
-- 📋 **PROTO-1 protocol-spec** — SPEC.md drafted for upstream (rmskkn/chunky_mcu_updater, agreed with Roman Skakun
+- 🚧 **PROTO-1 protocol-spec** — SPEC.md drafted for upstream (rmskkn/chunky_mcu_updater, agreed with Roman Skakun
   on PR #1, 13 Oct 2026): layer 0 (manifest, plan, steps, state machine) in octets with explicit byte order,
   versioned, generic over erase unit, write unit and chunk size; integrity, signing, A/B and in-place profiles and
   transport framing as layers on top; three delivery modes (A/B live, in place from a stored plan, in place live),
   per-step and bulk delivery, stored form = wire form, resume rules, the in-place planner rule; vectors/ folder with
   firmware pairs; open points: hash length, Ed25519, release-time signing, version floor and seq. The WireWeaver
   carrier is `ww_dfu` (wire_weaver STD-12). Segmentation is the transport's: CAN and Modbus do not aggregate.
+  Drafted for format 2 ([SPEC.md](SPEC.md), local only, nothing posted upstream): descriptor 64 + 64, plan
+  header 145, ERASE 3 / COPY 13 / WRITE 13 + one chunk, manifest v2, little-endian; the receiver's checks in the
+  landed order (refusals that need no key on the header and the raw descriptor bytes, then the seal over the
+  exact body bytes, then decode and product, geometry, floor); stream framing with the WRITE count bound, the
+  position order, three delivery modes with the in-place planner rules (no COPY from a block at or before the
+  destination's, every programmed block erased), resume (re-plan from the manifest; session resume by the header
+  bytes, APPLY-2; in place restart at the ERASE of the block in flight), segmentation left to the carrier (CAN
+  8 B, Modbus 253 B, `ww_dfu` pieces), the planner-made vectors annotated. Next: Roman reviews; the in-place
+  session record and journal formats (BOOT-6).
 
 - 🧪 **PROTO-3 typed-plan-format** — spike: plan header, signed descriptor and steps as shrink_wrap types with a
   fixed little-endian layout (`chunky_format`, format 2): one schema, read by the shrink_wrap path (app, full
@@ -236,7 +245,7 @@ Design: [SECURITY.md](SECURITY.md).
   file is stale. `chunky_sim/tests/vectors.rs` applies the checked-in plans to a simulated device (its manifest
   equals the vector, DFU ends as the target, boot, confirm, floor); `chunky_format/tests/golden.rs` reads them with
   both Rust readers; `c/test.c` walks every step and manifest entry. Not covered: an Unreadable manifest entry (the
-  C reader reads the tag, the Rust parser has its own test). Still to do: SPEC.md (PROTO-1).
+  C reader reads the tag, the Rust parser has its own test). SPEC.md (PROTO-1) is drafted.
   Open: `chunky_format` depends on wire_weaver by path (../wire_weaver), until shrink_wrap 0.2 with SW-44 is
   published.
 
