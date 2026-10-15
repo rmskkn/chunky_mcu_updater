@@ -5,6 +5,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-15
+
 ### Changed
 
 - `chunky_format`: `Step` is a `head_tail` enum with a typed `List<u8>` for a WRITE's data, read with `Step::view`
