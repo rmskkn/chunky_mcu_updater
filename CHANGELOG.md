@@ -5,6 +5,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-15
+
+### Added
+
+- `chunky_format`: `ManifestHeader`, `ChunkEntry`, `step_len_from_head`, `WRITE_COUNT_OFFSET`; the C header has
+  the manifest readers. (MAN-2, PROTO-3)
+- `chunky_sim`: `Device::apply_steps` (one message per step); security cases for a lying body length, a step that
+  is not exactly one step, a WRITE count beyond a chunk, a key-signed body naming another scheme, a signed image
+  on an unsigned device. (SIM-2)
+
 ### Changed
 
 - Wire format 2 everywhere: `chunky` reads and `chunky_server` writes the descriptor, plan and manifest of
@@ -28,14 +38,6 @@ and the project uses [Semantic Versioning](https://semver.org/).
   length. (SRV-1)
 - `plan_size` is an example of `chunky_server` and prints format 2 only; `just size-bench` drops format 1.
   (PROTO-3)
-
-### Added
-
-- `chunky_format`: `ManifestHeader`, `ChunkEntry`, `step_len_from_head`, `WRITE_COUNT_OFFSET`; the C header has
-  the manifest readers. (MAN-2, PROTO-3)
-- `chunky_sim`: `Device::apply_steps` (one message per step); security cases for a lying body length, a step that
-  is not exactly one step, a WRITE count beyond a chunk, a key-signed body naming another scheme, a signed image
-  on an unsigned device. (SIM-2)
 
 ## [0.9.0] - 2026-10-15
 
