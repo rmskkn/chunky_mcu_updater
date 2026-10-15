@@ -91,9 +91,9 @@ Design: [SECURITY.md](SECURITY.md).
 - ✅ **SEC-1 signed-descriptor** — 128-byte descriptor at the end of ACTIVE (product, version, security counter,
   geometry, SHA-256), Ed25519 with a domain string, strict verification. Format 2 (PROTO-3): a 64-byte body and a
   64-byte seal over `chunky image descriptor v2` and exactly the body's bytes; `Trust` is the `SealCheck`, and
-  the seal is checked before any field is decoded (`open_descriptor`), then scheme, product, geometry, length,
-  floor. An unsigned seal on a signed device now fails as `BadSignature`; `WrongScheme` is a sealed body naming
-  another scheme.
+  the seal is checked before the body is decoded and used (`open_descriptor`), then product, geometry, floor.
+  Before the seal, refusals that need no key on the raw bytes (magic, format, scheme, reserved, image length),
+  so junk never costs a signature verification (a counting `SealCheck` test).
 - ✅ **SEC-2 version-floor** — unary write-once counter in its own partition, raised only by the bootloader when an
   image is confirmed, enforced on every path that picks an image; robust against a single flipped bit.
 - 📋 **SEC-3 release-key-handling** — private key on a hardware key, signing apart from building; two key slots

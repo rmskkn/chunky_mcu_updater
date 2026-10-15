@@ -5,15 +5,17 @@
 //! body (product, version, security counter, image length, geometry, the SHA-256 of everything before the
 //! descriptor) and a 64-byte seal over a domain string and exactly those 64 bytes. Nothing in ACTIVE is unsealed.
 //!
-//! Verify, then decode: [`open_descriptor`] checks the seal over the body's bytes before a single field of the
-//! body is read, and there is no other way to get an [`ImageDescriptor`] out of untrusted bytes on a device.
+//! Verify, then decode: [`open_descriptor`] checks the seal over the body's bytes before the body is decoded and a
+//! field of it used, and there is no other way to get an [`ImageDescriptor`] out of untrusted bytes on a device.
+//! Before the seal it refuses what is plainly not a descriptor for this device (magic, format, scheme, reserved
+//! bytes, length, read from the raw bytes), so junk never costs a signature verification; those checks only refuse.
 //!
 //! Small-flash builds may opt out of the signature with the `unsigned` feature ([`Trust::Unsigned`]): the seal
 //! is then a SHA-256 over the same bytes. That keeps integrity (bad luck, broken transfers) and the version
 //! floor, and protects against nobody who can talk to the device. The scheme is a field of the sealed body,
 //! and a device that trusts a key refuses every other seal, so a signed device cannot be talked down.
 
-use chunky_format::{FormatError, SEAL_LEN, SealCheck, SignedDescriptor};
+use chunky_format::{DESCRIPTOR_MAGIC, FORMAT, FormatError, SEAL_LEN, SealCheck, SignedDescriptor};
 use embedded_storage::nor_flash::ReadNorFlash;
 use sha2::{Digest, Sha256};
 
@@ -147,16 +149,29 @@ impl From<FormatError> for ImageError {
     }
 }
 
-/// Opens a descriptor: the seal over the body's exact bytes first, then the body is decoded and its framing
-/// checked, then scheme, product, geometry, length and floor against this device. Nothing of the body is read
-/// before its seal checked.
+/// Opens a descriptor. First the cheap checks on the raw bytes that need no key: magic, format, scheme, reserved
+/// bytes and image length, read at their offsets. They can only refuse: a junk descriptor is turned away
+/// without costing a signature verification. Then the seal over the body's exact bytes, and only then is the
+/// body decoded and its fields used: product, geometry, floor (and again framing, scheme and length, now from
+/// the sealed decode).
 pub fn open_descriptor(
     signed: &SignedDescriptor,
     trust: &Trust,
     expect: &Expect,
 ) -> Result<ImageDescriptor, ImageError> {
-    let body = signed.open(trust)?;
-    if body.scheme != trust.scheme() {
+    open_with(signed, trust, trust.scheme(), expect)
+}
+
+/// [`open_descriptor`] with any seal check, so tests can count the verifications.
+fn open_with(
+    signed: &SignedDescriptor,
+    check: &impl SealCheck,
+    scheme: Scheme,
+    expect: &Expect,
+) -> Result<ImageDescriptor, ImageError> {
+    precheck(&signed.body, scheme, expect)?;
+    let body = signed.open(check)?;
+    if body.scheme != scheme {
         return Err(ImageError::WrongScheme);
     }
     if body.product_id != expect.product_id {
@@ -172,6 +187,29 @@ pub fn open_descriptor(
         return Err(ImageError::RolledBack);
     }
     Ok(body)
+}
+
+/// The refusals that need no key, on the unsealed bytes. Never a reason to accept anything or to skip the seal.
+fn precheck(raw: &[u8; ImageDescriptor::ENCODED_LEN], scheme: Scheme, expect: &Expect) -> Result<(), ImageError> {
+    let at = |offset: usize, len: usize| &raw[offset..offset + len];
+    if at(ImageDescriptor::MAGIC_OFFSET, 4) != DESCRIPTOR_MAGIC {
+        return Err(ImageError::BadMagic);
+    }
+    if raw[ImageDescriptor::FORMAT_OFFSET] != FORMAT {
+        return Err(ImageError::BadFormat);
+    }
+    match raw[ImageDescriptor::SCHEME_OFFSET] {
+        s if s == scheme as u8 => {}
+        s if s == Scheme::Ed25519 as u8 || s == Scheme::Unsigned as u8 => return Err(ImageError::WrongScheme),
+        _ => return Err(ImageError::BadFormat),
+    }
+    if at(ImageDescriptor::RESERVED_OFFSET, 2) != [0; 2] || at(ImageDescriptor::RESERVED_END_OFFSET, 4) != [0; 4] {
+        return Err(ImageError::Reserved);
+    }
+    if at(ImageDescriptor::IMAGE_LEN_OFFSET, 4) != expect.image_len.to_le_bytes() {
+        return Err(ImageError::BadLength);
+    }
+    Ok(())
 }
 
 /// The descriptor's two parts as they lie in flash. Splitting the bytes reads nothing of them.
@@ -221,4 +259,108 @@ where
         return Err(ImageError::HashMismatch);
     }
     Ok(descriptor)
+}
+
+#[cfg(test)]
+mod tests {
+    use core::cell::Cell;
+
+    use super::*;
+
+    /// A seal check that counts how often it is asked, and says yes to an unsigned seal.
+    struct Counting(Cell<u32>);
+
+    impl SealCheck for Counting {
+        fn check(&self, domain: &[u8], body: &[u8], seal: &[u8; SEAL_LEN]) -> bool {
+            self.0.set(self.0.get() + 1);
+            *seal == unsigned_seal(domain, body)
+        }
+    }
+
+    const EXPECT: Expect = Expect {
+        product_id: 7,
+        geometry_id: 0x1234,
+        image_len: 0x1_ff80,
+        floor: 1,
+    };
+
+    fn sealed(scheme: Scheme) -> SignedDescriptor {
+        let body = ImageDescriptor {
+            magic: DESCRIPTOR_MAGIC,
+            format: FORMAT,
+            scheme,
+            reserved: [0; 2],
+            product_id: EXPECT.product_id,
+            version: 3,
+            security_counter: 2,
+            image_len: EXPECT.image_len,
+            geometry_id: EXPECT.geometry_id,
+            image_sha256: [9; 32],
+            reserved_end: [0; 4],
+        };
+        SignedDescriptor::seal(&body, unsigned_seal)
+    }
+
+    #[test]
+    fn junk_is_refused_without_a_seal_check() {
+        let good = sealed(Scheme::Unsigned);
+        let cases: [(&str, usize, u8, ImageError); 6] = [
+            ("magic", ImageDescriptor::MAGIC_OFFSET, b'X', ImageError::BadMagic),
+            ("format", ImageDescriptor::FORMAT_OFFSET, 1, ImageError::BadFormat),
+            (
+                "scheme of another trust",
+                ImageDescriptor::SCHEME_OFFSET,
+                Scheme::Ed25519 as u8,
+                ImageError::WrongScheme,
+            ),
+            (
+                "unknown scheme",
+                ImageDescriptor::SCHEME_OFFSET,
+                9,
+                ImageError::BadFormat,
+            ),
+            (
+                "reserved",
+                ImageDescriptor::RESERVED_END_OFFSET + 3,
+                1,
+                ImageError::Reserved,
+            ),
+            ("length", ImageDescriptor::IMAGE_LEN_OFFSET, 0, ImageError::BadLength),
+        ];
+        for (name, offset, value, expected) in cases {
+            let mut junk = good;
+            junk.body[offset] = value;
+            let check = Counting(Cell::new(0));
+            assert_eq!(
+                open_with(&junk, &check, Scheme::Unsigned, &EXPECT),
+                Err(expected),
+                "{name}"
+            );
+            assert_eq!(check.0.get(), 0, "{name}: the seal was checked");
+        }
+        // all-erased flash and all-zero bytes
+        for fill in [0xFF, 0x00] {
+            let junk = split_descriptor(&[fill; DESCRIPTOR_LEN]);
+            let check = Counting(Cell::new(0));
+            assert!(open_with(&junk, &check, Scheme::Unsigned, &EXPECT).is_err());
+            assert_eq!(check.0.get(), 0);
+        }
+    }
+
+    #[test]
+    fn what_passes_the_cheap_checks_is_still_sealed() {
+        let check = Counting(Cell::new(0));
+        assert!(open_with(&sealed(Scheme::Unsigned), &check, Scheme::Unsigned, &EXPECT).is_ok());
+        assert_eq!(check.0.get(), 1);
+
+        // product and floor are fields of the body: only read after the seal
+        let mut forged = sealed(Scheme::Unsigned);
+        forged.body[ImageDescriptor::PRODUCT_ID_OFFSET] ^= 1;
+        let check = Counting(Cell::new(0));
+        assert_eq!(
+            open_with(&forged, &check, Scheme::Unsigned, &EXPECT),
+            Err(ImageError::BadSignature)
+        );
+        assert_eq!(check.0.get(), 1);
+    }
 }

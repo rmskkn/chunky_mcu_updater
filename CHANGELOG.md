@@ -11,9 +11,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `chunky_format` (descriptor `CKY2`, plan `CKP2`, manifest `CKM2`); format 1 is gone, and images built before
   are not read any more. `chunky` now depends on wire_weaver checked out next to this repository. (PROTO-3)
 - Descriptor format 2: a 64-byte body and a 64-byte seal over `chunky image descriptor v2` and exactly the body's
-  bytes. `Trust` implements `chunky_format::SealCheck`; `open_descriptor` checks the seal before it decodes a field,
-  then scheme, product, geometry, length, floor. An unsigned image on a signed device is now refused as
-  `BadSignature` (the seal fails first), `WrongScheme` means a sealed body that names another scheme.
+  bytes. `Trust` implements `chunky_format::SealCheck`; `open_descriptor` first refuses on the raw bytes what needs
+  no key (magic, format, scheme, reserved, image length: junk never costs a signature verification), then checks
+  the seal, then decodes the body and checks product, geometry, floor.
   `ImageDescriptor` is `chunky_format::DescriptorBody`; `ImageDescriptor::parse` is gone (hosts:
   `chunky_server::image::read_descriptor_unverified`). (SEC-1, PROTO-3)
 - Chunk hashes are SHA-256 truncated to 8 bytes (`ChunkHash`, the manifest, COPY and WRITE, the blob store's

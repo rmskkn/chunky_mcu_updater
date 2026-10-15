@@ -43,10 +43,14 @@ Nothing in ACTIVE is unsealed, padding included.
 before a single field of the body is read (`SignedDescriptor::open`, `chunky::descriptor::open_descriptor`); the
 fields are then decoded from those same bytes, not from a copy. On a device there is no other way to get the
 fields of a descriptor. So a seal is never checked over one set of bytes while the decision is made on
-another, and no field of an unverified body steers anything, not even which error is reported. Then, in this
-order: framing (magic, format, reserved bytes), scheme, product, geometry, length, floor. The price: a garbage
-descriptor costs one Ed25519 verification before it is refused, which someone on the transport can make the
-device spend; they can waste its time anyway. Host tools read descriptors without a key
+another, and no field of an unverified body is trusted or used. Then: product, geometry, floor.
+
+**Cheap refusals come first.** So that junk never costs a signature verification, the device first refuses
+what needs no key: the plan's magic and format, its header bounds (geometry id, step count and body length
+against the geometry), and on the raw bytes of the descriptor body magic, format, scheme, reserved bytes and
+image length. These checks can only refuse; nothing passes them that is not then sealed, and the sealed decode
+checks the same fields again. A descriptor that passes them costs one verification, and to pass them it has to
+be a well-formed descriptor of this device's scheme and image length. Host tools read descriptors without a key
 (`chunky_server::image::read_descriptor_unverified`) only to show and plan, never to trust.
 
 - **Product id** stops a validly signed image for another board from being installed.
@@ -66,7 +70,7 @@ after such a failure.
 
 | When | By | What | A failure means |
 |---|---|---|---|
-| A plan begins | application | descriptor from the plan header: seal first, then scheme, product, geometry, length, floor | the plan is refused before any flash is touched |
+| A plan begins | application | header bounds and the descriptor's framing, scheme and length (no key needed), then the seal, then product, geometry, floor | the plan is refused before any flash is touched |
 | A plan ends | application | the whole staged image against that descriptor | no swap is requested |
 | Before a swap starts | bootloader | the whole staged image again, floor included | the swap is cancelled, ACTIVE untouched |
 | Every boot | bootloader | the whole of ACTIVE, floor included | a trial image is reverted on the spot; otherwise recovery, no jump |
@@ -189,9 +193,9 @@ Small-flash builds can leave the verifier out. It is a build option with a name,
 - An unsigned image carries the same descriptor with scheme 2 and, in place of the signature, the SHA-256 of
   the domain string and the body, then 32 zero bytes. Image SHA-256, product, geometry and the version floor
   are checked exactly as before.
-- The scheme is inside the sealed body, and each `Trust` checks the seal its own way first: on a signed device
-  an unsigned seal fails as a signature, on an unsigned device a signature fails as a hash, and a body that
-  passes and names another scheme is refused (`WrongScheme`). A signed device cannot be talked down to
+- The scheme is inside the sealed body. A body naming another scheme is refused (`WrongScheme`) by the cheap
+  check before any seal is checked, and again after the seal from the sealed decode; a body that lies about its
+  scheme fails its seal. A signed device cannot be talked down to
   unsigned, and an unsigned build has no way to accept "signed" images it cannot check.
 - The device says so in its manifest header; the planner returns `Warning::UnsignedDevice` for every such
   device and refuses to plan a release sealed the other way.

@@ -95,19 +95,19 @@ fn image_for_another_product_is_refused() {
 
 #[test]
 fn unsigned_image_is_refused_by_a_signed_device() {
-    // The seal is checked before the body is read, so the hash an unsigned image carries fails as a signature.
+    // Refused by the cheap check on the raw scheme byte, before a signature verification.
     let world = world();
     let device = booted(&world);
     let image = build_image(&bytes(5, 4096), &world.geometry, &meta(2, 2), &Signer::Unsigned).unwrap();
     assert_eq!(
         refused_untouched(&world, &device, &image),
-        ApplyError::Image(ImageError::BadSignature)
+        ApplyError::Image(ImageError::WrongScheme)
     );
 }
 
 #[test]
 fn a_signed_body_that_names_another_scheme_is_refused() {
-    // The release key signed a body that says "unsigned": the seal checks, the scheme does not.
+    // The release key signed a body that says "unsigned": refused for its scheme, signature or not.
     let world = world();
     let device = booted(&world);
     let mut image = world.new.clone();
@@ -136,7 +136,7 @@ fn a_signed_image_is_refused_by_an_unsigned_device() {
     let plan = plan(&world.geometry, &manifest, &target, &store, &Policy::default()).unwrap();
     assert_eq!(
         device.apply(&plan.encode()).unwrap_err(),
-        ApplyError::Image(ImageError::BadSignature)
+        ApplyError::Image(ImageError::WrongScheme)
     );
 }
 
@@ -355,7 +355,7 @@ fn hostile_steps_are_stopped_and_touch_nothing_but_dfu() {
         (
             "a plan that stops short of the image",
             vec![erase(0), write(0)],
-            ApplyError::Image(ImageError::BadSignature),
+            ApplyError::Image(ImageError::BadMagic),
         ),
     ];
     for (name, steps, expected) in cases {
