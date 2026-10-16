@@ -66,12 +66,16 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
     if (off + len > FLASH_SIZE)
         die("flash: program past end of flash");
 
-    /* Two rules, both per half-word, both from PM0075. Bits may only go
-     * 1 -> 0, and a half-word may be programmed only once after an erase --
-     * unless the value is 0x0000, which the part always accepts. Clearing
-     * bits in two steps (0xFFF0 -> 0xFF00) obeys the first rule and still
-     * raises PGERR on silicon, so modelling only the first would let a
-     * journal encoding pass here and fail on the device. */
+    /* Two rules, both per half-word, both configured in flash.h for the
+     * part this build targets (STM32F103CB by default, PM0075). Bits may
+     * only go 1 -> 0, always. Whether a half-word may be programmed only
+     * once after an erase, and whether 0x0000 is exempt from that, are
+     * build-time choices (CB_FLASH_PROGRAM_ONCE, CB_FLASH_ZERO_EXEMPT), not
+     * hardcoded here: on the F103, clearing bits in two steps
+     * (0xFFF0 -> 0xFF00) obeys the first rule and still raises PGERR on
+     * silicon, so modelling only the first would let a journal encoding
+     * pass here and fail on that device; a part built with the limit off
+     * does not need or get that second check. */
     const uint8_t *cur = plat_flash_read(&f->io, off);
     for (size_t i = 0; i < len; i += 2) {
         uint16_t c, s;
@@ -80,10 +84,12 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
         if ((c & s) != s)
             die("flash: program at 0x%zx would set bits (0x%04x -> 0x%04x); "
                 "erase the unit first", off + i, c, s);
-        if (c != 0xFFFFu && s != 0x0000u)
+#if CB_FLASH_PROGRAM_ONCE
+        if (c != 0xFFFFu && !(CB_FLASH_ZERO_EXEMPT && s == 0x0000u))
             die("flash: program at 0x%zx reprograms a programmed half-word "
-                "(0x%04x -> 0x%04x); PGERR on an F103, only 0x0000 is allowed",
+                "(0x%04x -> 0x%04x); this part allows one program per erase",
                 off + i, c, s);
+#endif
     }
     plat_flash_write(&f->io, off, src, len);
     f->n_prog++;
