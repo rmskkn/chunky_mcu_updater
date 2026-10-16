@@ -109,7 +109,7 @@ void flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[S
 
 void sector_hash(const void *sector, uint8_t out[SECTOR_HASH_LEN])
 {
-    sha128(sector, SECTOR_SIZE, out);
+    sha256(sector, SECTOR_SIZE, out);
 }
 
 void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN])

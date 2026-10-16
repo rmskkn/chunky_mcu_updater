@@ -4,7 +4,6 @@
 #include <stddef.h>
 
 #define SHA256_LEN 32
-#define SHA128_LEN 16
 
 typedef struct {
     uint32_t h[8];
@@ -18,14 +17,6 @@ void sha256_update(sha256_t *s, const void *data, size_t len);
 void sha256_final(sha256_t *s, uint8_t out[SHA256_LEN]);
 void sha256(const void *data, size_t len, uint8_t out[SHA256_LEN]);
 
-/* SHA-256 truncated to its first 128 bits. Per-sector hashes (DESIGN.md
- * section 10): equality and transport integrity only, never a trust
- * boundary, so the full digest is unnecessary and the truncation does not
- * weaken anything the whole-image hash and signature already gate. */
-void sha128(const void *data, size_t len, uint8_t out[SHA128_LEN]);
-
-/* PoC stand-in for the release and device signatures. Production uses
- * ECDSA P-256 with RFC 6979 deterministic k (DESIGN.md section 10.2). */
 void hmac_sha256(const uint8_t *key, size_t keylen,
                  const void *data, size_t len, uint8_t out[SHA256_LEN]);
 
