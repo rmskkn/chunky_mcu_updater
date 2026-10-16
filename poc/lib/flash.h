@@ -5,7 +5,9 @@
 #include "sha256.h"
 #include "platform.h"
 
-/* Flash geometry, STM32F103CB as in DESIGN.md section 2 / 10.2 / 18.
+/* Flash geometry, as in DESIGN.md section 2 / 10.2 / 18. The numbers below
+ * are a worked reference part's; every one of them is a build-time choice,
+ * overridable for a different part, and none is assumed elsewhere in lib/.
  *
  * One application partition, updated in place. There is no second slot, so
  * there is nothing to fall back to: an update that fails to verify leaves the
@@ -20,14 +22,17 @@
 #ifndef CB_SECTOR_SIZE
 #define CB_SECTOR_SIZE CB_ERASE_SIZE  /* delta unit */
 #endif
+#ifndef CB_FLASH_SIZE
+#define CB_FLASH_SIZE  (128 * 1024)   /* total flash on the part */
+#endif
 #define ERASE_SIZE   CB_ERASE_SIZE
 #define SECTOR_SIZE  CB_SECTOR_SIZE
-#define FLASH_SIZE   (128 * 1024)     /* STM32F103CB, fixed */
+#define FLASH_SIZE   CB_FLASH_SIZE
 
 /* Whether a half-word may be programmed only once between erases, and
  * whether 0x0000 is exempt from that limit -- both properties of the part,
  * not a universal rule; this check can express "once or unlimited", not an
- * arbitrary count. STM32F103CB is the example modelled here: PM0075 allows
+ * arbitrary count. The default below models one real part's flash (PM0075):
  * one program per half-word after an erase, except that 0x0000 may always
  * be written regardless of the half-word's current content. A part that
  * allows more than one program per word (so the limit does not apply), or
@@ -97,8 +102,8 @@ void sector_hash(const void *sector, uint8_t out[SECTOR_HASH_LEN]);
 _Static_assert(SECTORS_SLOT <= (1 << (8 * sizeof(sector_idx_t))) - 1,
                "sector index type too narrow for this partition size");
 
-/* Journal states. With the STM32F103CB profile above (one program per
- * erase, 0x0000 exempt) a half-word that is never erased while a plan is
+/* Journal states. With the default profile above (one program per erase,
+ * 0x0000 exempt) a half-word that is never erased while a plan is
  * live has three states: erased, one arbitrary program, zero. A fourth
  * state between them (0xFFF0 -> 0xFF00) only clears bits and would still
  * violate the one-program limit; flash_program() rejects it. A part built
@@ -169,41 +174,54 @@ typedef struct {
     const char *path;
 } flash_t;
 
-/* STM32F103 flash timings, datasheet DS5319 Table 23 "Flash memory
- * characteristics", TA = -40 to +105 C:
+/* Flash timing model, every figure a build-time default for the reference
+ * part and overridable for another. Defaults below are datasheet DS5319
+ * Table 23 "Flash memory characteristics", TA = -40 to +105 C:
  *
  *   tprog   Word programming time    min 20 us   max 40 us
  *   tERASE  Page (1kB) erase time    min 20 ms   max 40 ms
  *   tME     Mass erase time          min 20 ms   max 40 ms
  *
- * The Typ column is empty in that table: ST gives only a min and a max, so
- * every figure below is a range and not a typical. The part programs 16 bits
- * per operation (PM0075), so "word" here is one half-word and a 1 KB page is
- * 512 programming operations.
+ * The Typ column is empty in that table: the datasheet gives only a min and
+ * a max, so every figure below is a range and not a typical. That part
+ * programs 16 bits per operation (PM0075), so "word" here is one half-word
+ * and a 1 KB page is 512 programming operations.
  *
  * Endurance is 1 kcycle min (DS5319 Rev 1; later revisions state 10 kcycles),
  * which is why anything rewritten per boot should clear bits instead of
  * erasing a page. */
-#define F103_ERASE_MS_MIN  20.0
-#define F103_ERASE_MS_MAX  40.0
-#define F103_PROG_US_MIN   20.0
-#define F103_PROG_US_MAX   40.0
-#define F103_MHZ           72.0
-#define F103_SHA256_CYC_B  25.0   /* also costs sha128: same compression function */
+#ifndef CB_FLASH_ERASE_MS_MIN
+#define CB_FLASH_ERASE_MS_MIN  20.0
+#endif
+#ifndef CB_FLASH_ERASE_MS_MAX
+#define CB_FLASH_ERASE_MS_MAX  40.0
+#endif
+#ifndef CB_FLASH_PROG_US_MIN
+#define CB_FLASH_PROG_US_MIN   20.0
+#endif
+#ifndef CB_FLASH_PROG_US_MAX
+#define CB_FLASH_PROG_US_MAX   40.0
+#endif
+#ifndef CB_FLASH_MHZ
+#define CB_FLASH_MHZ           72.0
+#endif
+#ifndef CB_FLASH_SHA256_CYC_B
+#define CB_FLASH_SHA256_CYC_B  25.0   /* also costs sha128: same compression function */
+#endif
 
-/* worst = 0 uses the datasheet minimums, worst = 1 the maximums. */
-static inline double f103_flash_ms(long erases, size_t prog_bytes, int worst)
+/* worst = 0 uses the minimums, worst = 1 the maximums. */
+static inline double flash_timing_ms(long erases, size_t prog_bytes, int worst)
 {
-    double e = worst ? F103_ERASE_MS_MAX : F103_ERASE_MS_MIN;
-    double p = worst ? F103_PROG_US_MAX  : F103_PROG_US_MIN;
+    double e = worst ? CB_FLASH_ERASE_MS_MAX : CB_FLASH_ERASE_MS_MIN;
+    double p = worst ? CB_FLASH_PROG_US_MAX  : CB_FLASH_PROG_US_MIN;
     return (double)erases * e + (double)(prog_bytes / 2) * p / 1000.0;
 }
 
-/* One sector: erase its units, then program it. Assumes 1 KB-class erase time
- * per unit, which is the datasheet's figure. */
-static inline double f103_sector_ms(int worst)
+/* One sector: erase its units, then program it. Assumes the erase time above
+ * applies per unit regardless of unit size. */
+static inline double flash_sector_timing_ms(int worst)
 {
-    return f103_flash_ms(SECTOR_SIZE / ERASE_SIZE, SECTOR_SIZE, worst);
+    return flash_timing_ms(SECTOR_SIZE / ERASE_SIZE, SECTOR_SIZE, worst);
 }
 
 int  flash_create(const char *path);

@@ -67,13 +67,13 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
         die("flash: program past end of flash");
 
     /* Two rules, both per half-word, both configured in flash.h for the
-     * part this build targets (STM32F103CB by default, PM0075). Bits may
-     * only go 1 -> 0, always. Whether a half-word may be programmed only
-     * once after an erase, and whether 0x0000 is exempt from that, are
-     * build-time choices (CB_FLASH_PROGRAM_ONCE, CB_FLASH_ZERO_EXEMPT), not
-     * hardcoded here: on the F103, clearing bits in two steps
-     * (0xFFF0 -> 0xFF00) obeys the first rule and still raises PGERR on
-     * silicon, so modelling only the first would let a journal encoding
+     * part this build targets. Bits may only go 1 -> 0, always. Whether a
+     * half-word may be programmed only once after an erase, and whether
+     * 0x0000 is exempt from that, are build-time choices
+     * (CB_FLASH_PROGRAM_ONCE, CB_FLASH_ZERO_EXEMPT), not hardcoded here: on
+     * a part with that limit, clearing bits in two steps (0xFFF0 -> 0xFF00)
+     * obeys the first rule and still reprograms an already-programmed
+     * half-word, so modelling only the first would let a journal encoding
      * pass here and fail on that device; a part built with the limit off
      * does not need or get that second check. */
     const uint8_t *cur = plat_flash_read(&f->io, off);

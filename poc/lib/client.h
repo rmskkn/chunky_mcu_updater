@@ -2,6 +2,7 @@
 #define CB_UPDATE_CLIENT_H
 #include "flash.h"
 #include "util.h"
+#include "platform_io.h"
 
 /* ECDSA costs are the figures DESIGN.md section 10 budgets, not measurements;
  * the host models a real signature it never actually computes. */
@@ -34,7 +35,7 @@ uint32_t client_app_version(flash_t *f);
  * manifest, takes whatever plan the server offers, applies and stages it.
  * stats may be NULL. Returns 0 if a plan was staged, 1 if there was nothing
  * to do (no update offered, or the manifest was rejected). */
-int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
+int client_update_session(flash_t *f, plat_io_t *io, const uint8_t dev_key[32],
                           log_fn log, void *log_ctx, client_update_stats_t *stats);
 
 /* Applies whatever the session staged, then checks whether the partition is
