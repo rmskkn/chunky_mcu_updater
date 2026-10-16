@@ -66,11 +66,24 @@ void flash_program(flash_t *f, size_t off, const void *buf, size_t len)
     if (off + len > FLASH_SIZE)
         die("flash: program past end of flash");
 
+    /* Two rules, both per half-word, both from PM0075. Bits may only go
+     * 1 -> 0, and a half-word may be programmed only once after an erase --
+     * unless the value is 0x0000, which the part always accepts. Clearing
+     * bits in two steps (0xFFF0 -> 0xFF00) obeys the first rule and still
+     * raises PGERR on silicon, so modelling only the first would let a
+     * journal encoding pass here and fail on the device. */
     const uint8_t *cur = plat_flash_read(&f->io, off);
-    for (size_t i = 0; i < len; i++) {
-        if ((cur[i] & src[i]) != src[i])
-            die("flash: program at 0x%zx would set bits (0x%02x -> 0x%02x); "
-                "erase the unit first", off + i, cur[i], src[i]);
+    for (size_t i = 0; i < len; i += 2) {
+        uint16_t c, s;
+        memcpy(&c, cur + i, 2);
+        memcpy(&s, src + i, 2);
+        if ((c & s) != s)
+            die("flash: program at 0x%zx would set bits (0x%04x -> 0x%04x); "
+                "erase the unit first", off + i, c, s);
+        if (c != 0xFFFFu && s != 0x0000u)
+            die("flash: program at 0x%zx reprograms a programmed half-word "
+                "(0x%04x -> 0x%04x); PGERR on an F103, only 0x0000 is allowed",
+                off + i, c, s);
     }
     plat_flash_write(&f->io, off, src, len);
     f->n_prog++;

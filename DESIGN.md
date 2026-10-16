@@ -94,16 +94,22 @@ bootloader, the root public key, or the device identity.
 Two banks ping-pong. The valid bank is the one with a correct CRC and the higher
 `generation`. A torn write therefore never loses the previous consistent state.
 
-F103 flash programs in 16-bit half-words and erases per page, so every field
-written incrementally (journal state, attempt tokens) is a half-word whose bits
-only ever go from 1 to 0:
+F103 flash programs in 16-bit half-words and erases per page. Two rules bound
+what a field written incrementally (journal state, attempt tokens) can encode,
+both from PM0075: bits only ever go from 1 to 0, and a half-word may be
+programmed only once after an erase, unless the value is `0x0000`, which the
+part always accepts. The second rule is the tighter one -- clearing bits in two
+steps obeys the first and still raises `PGERR` -- so an unerased half-word has
+three states, not four:
 
 ```
 0xFFFF  empty
-0xFFF0  sector written to flash
 0xFF00  sector written and hash-verified
 0x0000  step complete (for COPY: source read and destination verified)
 ```
+
+Parts with ECC (G0, H7) allow one program per word with no zero exception, so
+a port there spends one word per state rather than one word per sector.
 
 ---
 
