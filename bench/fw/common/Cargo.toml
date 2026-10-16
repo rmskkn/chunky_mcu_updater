@@ -1,0 +1,13 @@
+[package]
+name = "bench_fw_common"
+description = "Power-cut bench firmware on B129A: flash regions with the G0 ECC NMI reader, the PA6 trigger, the report"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bench_layout.workspace = true
+chunky.workspace = true
+embassy-stm32.workspace = true
+embedded-storage.workspace = true
+cortex-m.workspace = true

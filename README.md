@@ -149,3 +149,12 @@ row. It exits with the shell that started it, so background it from your own
 shell rather than from a script that then exits. `scripts/lab.sh reset` forgets
 the device so it ships fresh again.
 
+
+## Rust implementation
+
+[`RUST.md`](RUST.md) describes the Rust workspace in this repository: a `no_std` device core (`chunky`), boot
+backends on embassy-boot (`chunky_swap`) and hardware bank swap (`chunky_bank`), the server-side planner and
+chunk store (`chunky_server`), a flash simulator with per-family write rules and power-cut injection
+(`chunky_sim`), the `chunky` CLI, and a reproduction of an embassy-boot power-loss bug (`embassy_torn`,
+[embassy#7235](https://github.com/embassy-rs/embassy/issues/7235)). Feature status: [`FEATURES.md`](FEATURES.md);
+security design: [`SECURITY.md`](SECURITY.md); the wire format in octets (format 2): [`SPEC.md`](SPEC.md).

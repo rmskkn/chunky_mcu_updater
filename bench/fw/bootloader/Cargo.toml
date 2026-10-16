@@ -1,0 +1,23 @@
+[package]
+name = "bench_bootloader"
+description = "Power-cut bench bootloader: embassy-boot 0.7.0, STATE plain (stock) or behind chunky_swap::Guarded (guarded)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# Exactly one: the only difference is the STATE partition (and the NMI handler that comes with Guarded).
+stock = []
+guarded = ["dep:chunky_swap"]
+
+[dependencies]
+bench_fw_common.workspace = true
+bench_layout.workspace = true
+chunky_swap = { workspace = true, optional = true }
+embassy-boot.workspace = true
+embassy-stm32.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+
+[build-dependencies]
+bench_layout.workspace = true

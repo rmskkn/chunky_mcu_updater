@@ -1,0 +1,24 @@
+cargo-features = ["panic-immediate-abort"]
+
+[package]
+name = "chunky_format_size_bench"
+version = "0.1.0"
+edition = "2024"
+description = "Bare images that read a plan, one reader each, for measuring the code size of the readers (PROTO-3)"
+publish = false
+
+# Built for bare-metal targets with a nightly toolchain (build-std), so not a member of the repo workspace.
+[workspace]
+
+[dependencies]
+chunky_format = { path = ".." }
+
+# As wire_weaver's shrink_wrap/size_bench (docs/serdes/code_size.md), so the numbers compare
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "immediate-abort"
+debug = 0
+strip = false
+overflow-checks = false

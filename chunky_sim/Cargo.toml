@@ -1,0 +1,18 @@
+[package]
+name = "chunky_sim"
+description = "chunky host simulator: NOR flash with per-family write rules, power cuts and ECC faults, and a whole simulated device"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+chunky = { workspace = true, features = ["ed25519", "unsigned"] }
+chunky_swap = { workspace = true, features = ["ed25519", "unsigned"] }
+chunky_bank = { workspace = true, features = ["ed25519", "unsigned"] }
+chunky_server.workspace = true
+embedded-storage.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+ed25519-dalek.workspace = true
+chunky_format.workspace = true

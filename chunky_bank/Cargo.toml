@@ -1,0 +1,15 @@
+[package]
+name = "chunky_bank"
+description = "chunky boot backend on hardware bank swap (dual-bank STM32): verified switch, one trial boot, revert by flipping the bit back (no_std)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[features]
+# Passed on to chunky: one of them must be chosen.
+ed25519 = ["chunky/ed25519"]
+unsigned = ["chunky/unsigned"]
+
+[dependencies]
+chunky.workspace = true
+embedded-storage.workspace = true

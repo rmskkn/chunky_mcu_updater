@@ -1,0 +1,7 @@
+[package]
+name = "bench_layout"
+description = "Power-cut bench on B129A (STM32G0B1CE): flash and RAM layout, config and report records shared by the bench firmware and the harness (no_std)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false

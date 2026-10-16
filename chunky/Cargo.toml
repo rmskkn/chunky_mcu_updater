@@ -1,0 +1,32 @@
+[package]
+name = "chunky"
+description = "Delta firmware updates for MCUs: flash geometry, chunk manifest, plan format and apply engine (no_std)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[features]
+# How images are verified. One of the two must be chosen, by name: there is no default.
+# Signed releases: the bootloader carries an Ed25519 verifier and a release public key.
+ed25519 = ["dep:ed25519-dalek"]
+# Explicit opt-out for small flash: no verifier, integrity by SHA-256 only. See SECURITY.md before using it.
+unsigned = []
+# The MCU series of a firmware target (target_os = "none"): exactly one, or `chip-custom`, or the build fails.
+# It carries the flash rules of the series; the part and the profile are given in code: see src/series.rs.
+series-stm32f1 = []
+series-stm32g0 = []
+series-stm32g4 = []
+series-stm32l4 = []
+series-stm32h7 = []
+series-rp235x = []
+# Your own FlashGeometry, const-checked with `checked_on`.
+chip-custom = []
+
+[dependencies]
+chunky_format.workspace = true
+embedded-storage.workspace = true
+sha2.workspace = true
+ed25519-dalek = { workspace = true, optional = true }
+
+[dev-dependencies]
+chunky = { path = ".", features = ["ed25519", "unsigned"] }

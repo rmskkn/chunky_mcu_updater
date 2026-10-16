@@ -33,3 +33,9 @@ for the PoC's own map of the demo flow):
 
 Build/run/test commands: see the `build` skill
 (`.claude/skills/build/SKILL.md`).
+
+## Rust workspace
+
+The Rust crates at the top level (`chunky`, `chunky_format`, `chunky_swap`, `chunky_bank`, `chunky_server`,
+`chunky_cli`, `chunky_sim`) implement the same protocol side by side with `poc/`; neither links the other. Their
+rules (FEATURES.md, CHANGELOG.md, SECURITY.md, SPEC.md, the justfile) are in [`AGENTS_RUST.md`](AGENTS_RUST.md).

@@ -1,0 +1,16 @@
+[package]
+name = "chunky_swap"
+description = "chunky boot backend on embassy-boot: verified swap, one trial boot, revert (no_std)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[features]
+# Passed on to chunky: one of them must be chosen.
+ed25519 = ["chunky/ed25519"]
+unsigned = ["chunky/unsigned"]
+
+[dependencies]
+chunky.workspace = true
+embedded-storage.workspace = true
+embassy-boot.workspace = true
