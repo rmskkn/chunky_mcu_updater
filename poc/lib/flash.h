@@ -81,10 +81,13 @@ void sector_hash(const void *sector, uint8_t out[SECTOR_HASH_LEN]);
 _Static_assert(SECTORS_SLOT <= (1 << (8 * sizeof(sector_idx_t))) - 1,
                "sector index type too narrow for this partition size");
 
-/* Journal states. Every transition only clears bits, which is what an
- * STM32F103 half-word program can do without erasing the unit first. */
+/* Journal states. An F103 half-word may be programmed once after an erase,
+ * and after that only with 0x0000 (PM0075), so a word that is never erased
+ * while a plan is live has three states: erased, one arbitrary program,
+ * zero. A fourth state between them (0xFFF0 -> 0xFF00) only clears bits and
+ * would still PGERR; flash_program() rejects it. Parts with ECC (G0, H7)
+ * have no zero exception and need a word per state instead. */
 #define JRN_EMPTY     0xFFFFu
-#define JRN_WRITTEN   0xFFF0u
 #define JRN_VERIFIED  0xFF00u
 #define JRN_DONE      0x0000u
 

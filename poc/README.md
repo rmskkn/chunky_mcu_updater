@@ -5,7 +5,8 @@ and run on the host. The device reports what is in its flash, the server sends
 only the sectors that differ, and the bootloader applies them.
 
 The device side owns a 128 KB file treated as STM32F103CB flash: page erase,
-half-word programming, and the rule that a program may only clear bits. The
+half-word programming, and the rules that a program may only clear bits and
+may not reprogram a half-word except with zero. The
 firmware under test is a real binary, `klipper.bin` (45 772 B), split into
 sectors and wrapped in an image descriptor.
 
@@ -206,7 +207,7 @@ stable link order are what keep a one-line fix from costing a full transfer.
 
 | Source | Covers |
 |---|---|
-| `flash.c` | Page erase, half-word program with the bits-only-clear rule, meta bank ping-pong, journal |
+| `flash.c` | Page erase, half-word program with the bits-only-clear and one-program-per-erase rules, meta bank ping-pong, journal |
 | `manifest.c` | Canonical manifest body, digest, MAC, structural checks |
 | `plan.c` | The three planner rules of `DESIGN.md` section 5 |
 | `image.c` | Image descriptor at partition offset `0x200`, `image_sha256` with the descriptor hole, installing an image |
@@ -260,8 +261,12 @@ Writing it turned up three mistakes in `DESIGN.md`, all fixed there:
 1. **The journal encoding could not work.** Section 2 specified
    `0xFFFF -> 0xAAAA -> 0x5555 -> 0x0000` while claiming bits only ever go from
    1 to 0. `0xAAAA -> 0x5555` sets every other bit, so it needs a page erase.
-   Now `0xFFFF -> 0xFFF0 -> 0xFF00 -> 0x0000`, and the emulated flash rejects
-   any program that sets a bit, so it is enforced rather than asserted.
+   Bits-only-clear turned out not to be the binding rule either: an F103 also
+   refuses to reprogram a half-word that is not `0xFFFF`, except with `0x0000`,
+   so the replacement `0xFFFF -> 0xFFF0 -> 0xFF00 -> 0x0000` would have raised
+   `PGERR` on its middle step. The encoding is now the three states a half-word
+   really has, `0xFFFF -> 0xFF00 -> 0x0000`, and the emulated flash enforces
+   both rules rather than asserting them.
 2. **The manifest nonce broke manifest elision.** Section 4 put the server
    nonce inside the manifest body and hashed the body, so `manifest_sha256`
    changed every session and the cache in 17.1 could never hit. The body is now
