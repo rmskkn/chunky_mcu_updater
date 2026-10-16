@@ -11,9 +11,9 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 
 ### Goals
 
-* The device reports a manifest of *every* flash sector it holds (`sector, md5`).
+* The device reports a manifest of *every* flash sector it holds (`sector, hash`).
 * The server computes the difference against the target image and sends only the
-  sectors the device does not already have, as `sector N, blob, md5`.
+  sectors the device does not already have, as `sector N, blob, hash`.
 * Received sectors are staged durably. The bootloader applies the staged plan,
   verifies it, and switches partitions.
 * The bootloader can **unroll** a plan at any point and return to the partition
@@ -25,8 +25,8 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 ### Non-goals
 
 * No in-place single-partition update. The A/B layout is what makes unroll cheap.
-* No compression or binary-diff inside a sector. The delta unit is one flash
-  page. (Section 11 explains why.)
+* No binary diff inside a sector. A sector is sent whole, optionally LZ4
+  compressed against its old content (Section 17.2).
 * No multi-generation rollback. Exactly one previous image is recoverable.
 * No bootloader networking. The bootloader has no transport stack at all.
 * No OTA of the bootloader itself in v1.
@@ -35,18 +35,45 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 
 ## 2. Memory map (STM32F103CB, 1 KB pages)
 
+> Sections 2 to 8 describe the A/B layout. The host PoC implements the
+> single-partition variant instead; Section 18 has the differences and the
+> trade.
+
 | Region       | Pages   | Address range             | Size  | Purpose |
 |--------------|---------|---------------------------|-------|---------|
-| Bootloader   | 0–14    | `0x08000000`–`0x08003BFF` | 15 KB | Apply engine, MD5, SHA-256, ECDSA sign/verify, flash driver, root public key |
+| Bootloader   | 0–14    | `0x08000000`–`0x08003BFF` | 15 KB | Apply engine, SHA-256, ECDSA sign/verify, flash driver, root public key |
 | Device identity | 15   | `0x08003C00`–`0x08003FFF` | 1 KB  | Device id, device keypair, factory certificate (Section 10.2) |
 | Meta bank 0  | 16–19   | `0x08004000`–`0x08004FFF` | 4 KB  | Boot state + plan (ping-pong copy A) |
 | Meta bank 1  | 20–23   | `0x08005000`–`0x08005FFF` | 4 KB  | Boot state + plan (ping-pong copy B) |
 | Slot A       | 24–75   | `0x08006000`–`0x08012FFF` | 52 KB | Application image |
 | Slot B       | 76–127  | `0x08013000`–`0x0801FFFF` | 52 KB | Application image |
 
-`SECTOR_SIZE` equals the flash page size and is a build-time constant: 1 KB on
-medium-density F103, 2 KB on high-density parts. Slot size is 52 sectors.
-Sector indices are **slot-relative** (0–51) and always travel with a slot id.
+The **erase unit** (`ERASE_SIZE`) is what the part can erase: 1 KB on
+medium-density F103, 2 KB on high-density parts. The **sector** (`SECTOR_SIZE`)
+is the delta unit: what the manifest hashes, the planner diffs, the wire
+carries and the compressor sees. Both are build-time constants, powers of two,
+and a sector is a whole number of erase units. A smaller one would need
+read-modify-write of its neighbours in the same unit and would break the
+per-sector journal's atomicity. They default to equal; a larger sector
+compresses better (Section 17.2) and shrinks the manifest and plan, at the cost
+of a coarser diff. `SECTOR_SIZE` is capped at 32 KB (`STEP_WRITE` offsets are
+16 bits), and a geometry mismatch is rejected at `HELLO`.
+
+The layout is derived from the two sizes, in erase units, and only the
+application is rounded up to a sector boundary:
+
+```
+BL_UNITS       = ceil(15 KB / ERASE_SIZE)
+ID_UNIT        = BL_UNITS
+META_HDR_UNITS = ceil(4 KB / ERASE_SIZE)     meta_t area
+META_UNITS     = META_HDR_UNITS + 1          + the journal's own unit
+META0_UNIT     = ID_UNIT + 1,  META1_UNIT = META0_UNIT + META_UNITS
+APP_BASE       = round_up((META1_UNIT + META_UNITS) * ERASE_SIZE, SECTOR_SIZE)
+```
+
+At 1 KB / 1 KB this is the single-partition layout of Section 18 byte for byte.
+The A/B tables in this section show the same scheme with two slots.
+Sector indices are **slot-relative** and always travel with a slot id.
 
 The bootloader is never erased by the update path. It is the only code that can
 modify the meta banks or the inactive slot during apply.
@@ -60,23 +87,35 @@ bootloader, the root public key, or the device identity.
 | Page | Contents |
 |------|----------|
 | 0    | `MetaHeader`: magic, generation, `active_slot`, `pending_slot`, `plan_state`, `target_version`, target image SHA-256, signature (64 B), `step_count`, and the per-step op/source table (52 × 2 B) |
-| 1    | Target sector manifest: 52 × MD5 (16 B), indexed by slot-relative sector |
+| 1    | Target sector manifest: 52 × SHA-256 (32 B), indexed by slot-relative sector |
 | 2    | Progress journal: 52 × 16-bit state word, advanced by clearing bits (no erase) |
 | 3    | Boot attempt log: 16-bit tokens cleared one per trial boot, plus the last 8 boot outcomes |
 
 Two banks ping-pong. The valid bank is the one with a correct CRC and the higher
 `generation`. A torn write therefore never loses the previous consistent state.
 
-F103 flash programs in 16-bit half-words and erases per page, so every field
-written incrementally (journal state, attempt tokens) is a half-word whose bits
-only ever go from 1 to 0:
+The reference part, STM32F103CB, programs flash in 16-bit half-words and
+erases per page. Two rules bound what a field written incrementally (journal
+state, attempt tokens) can encode on it, both from PM0075: bits only ever go
+from 1 to 0, and a half-word may be programmed only once after an erase,
+unless the value is `0x0000`, which the part always accepts. The second rule
+is the tighter one -- clearing bits in two steps obeys the first and still
+raises `PGERR` -- so an unerased half-word has three states, not four:
 
 ```
 0xFFFF  empty
-0xAAAA  sector written to flash
-0x5555  sector written and MD5-verified
+0xFF00  sector written and hash-verified
 0x0000  step complete (for COPY: source read and destination verified)
 ```
+
+Neither rule is universal; they are F103CB as the worked example, not a law
+of flash in general. `CB_FLASH_PROGRAM_ONCE` and `CB_FLASH_ZERO_EXEMPT`
+(`lib/flash.h`) make both a build-time choice, and `flash_program()` enforces
+whichever pair a port sets. Parts with ECC (G0, H7) allow one program per
+word with no zero exception (`CB_FLASH_ZERO_EXEMPT=0`), so a port there
+spends one journal word per state rather than one word per sector; a part
+allowing several programs per word before erase turns the limit off
+(`CB_FLASH_PROGRAM_ONCE=0`) and loses nothing by it.
 
 ---
 
@@ -87,6 +126,10 @@ only ever go from 1 to 0:
 | **Server** | Cloud/LAN host | Holds every released image, its per-slot sector manifest, and a content-addressed blob store. Diffs a device manifest against a target and emits a step list. |
 | **Update client** | Application firmware | Owns the transport. Computes the device manifest, receives steps, writes blob sectors into the inactive slot, fills the meta bank, reboots. |
 | **Bootloader** | Pages 0–15 | Executes COPY steps, verifies the whole image, flips slots, runs trial boots, reverts, unrolls. No network. |
+
+The host PoC in `poc/` implements exactly this split, and
+[`poc/README.md`](poc/README.md) draws it: which process owns what, how the
+flash regions relate, and the whole message exchange of one request.
 
 The transport lives in the application because that is where the UART/CAN/
 Ethernet/modem driver already is. Keeping it out of the bootloader is the single
@@ -107,20 +150,33 @@ The device hashes **both** slots and reports all of it, as requested:
 
 ```
 MANIFEST                                 // fragmented over several frames
-  nonce         : u8[16]   // echoed from CHALLENGE
   sector_size   : u16      (1024)
-  slot_count    : u8       (2)
-  sectors_slot  : u8       (52)
-  active_slot   : u8
-  entries[]     : { slot:u8, index:u8, md5:u8[16] }     // 104 entries
+  sectors       : u16      (104)
+  hashes[]      : u8[16]   // one per sector, order implicit
 
 MANIFEST_END                             // one frame, closes the manifest
   manifest_sha256 : u8[32] // over the reassembled MANIFEST body above
   signature       : u8[64] // device ECDSA P-256 over the struct below
 ```
 
-The signed structure is explicit, so neither side has to agree on how the
-fragments were cut:
+Two things are deliberately absent from an entry. There is **no index**: the
+manifest always describes every sector in ascending order, so sector `i` is at
+`hashes[i]`, and a manifest that repeats or omits a sector cannot be expressed
+-- which deletes that whole class of malformed input rather than validating
+against it. And the hash is the **full, untruncated SHA-256 (32 B)**: a
+per-sector hash answers one question, "does this sector already hold the
+bytes the target needs", and today is not a trust boundary, since
+`image_sha256` and the release signature gate the result, so a collision
+costs a retried update, not a corrupt device. The full digest (over a
+truncation) is kept so a per-sector hash can later be wrapped in
+HMAC-SHA256 without changing the field width or the wire format. Dropping
+the index takes the body from 34 bytes per sector to 32.
+
+The body carries **no nonce**. It is a pure function of what is in flash, so
+`manifest_sha256` is stable across sessions and the server can cache it, which
+is what makes the elision in Section 17.1 possible. Freshness lives in the
+signed structure instead, which is explicit so neither side has to agree on how
+the fragments were cut:
 
 ```c
 typedef struct {                /* 72 bytes, hashed then signed            */
@@ -131,16 +187,28 @@ typedef struct {                /* 72 bytes, hashed then signed            */
 } ManifestAuth;
 ```
 
-104 entries × 18 B = 1872 B of body, fragmented across protocol frames, plus a
+104 sectors × 16 B = 1664 B of body, fragmented across protocol frames, plus a
 96-byte `MANIFEST_END`. One hash and one signature for the whole manifest —
 never one per fragment, which would let an attacker splice fragments from two
 sessions.
 
-Hashing 104 KB with software MD5 at 72 MHz costs roughly 1.1 M cycles — about
-15 ms. The manifest is therefore computed fresh at the start of every session
+**Compressing the body is not worth it.** Measured on the PoC, `zstd -19` takes
+the old 1876-byte form to 928 B, which looks like a 50 % win and is not: it
+comes entirely from a partially used partition, where 59 of 104 sectors were an
+erased page and hashed identically. On a full partition the same experiment
+*grows* — 1664 B of distinct hashes becomes 1678 B — because hash output is
+uniformly random and has nothing to compress. Encoding beat compression here:
+implicit order and a truncated hash gave 55 % with no decompressor on the
+device, and Section 17.1's digest gives 95 % more when the server's cache is
+warm. A bitmap marking erased sectors would take the measured case to 373 B,
+below anything a general compressor achieved, and is held in reserve for a link
+slow enough to justify it.
+
+Hashing 104 KB with SHA-256 at 72 MHz costs roughly 2.7 M cycles — about
+37 ms. The manifest is therefore computed fresh at the start of every session
 and never cached, which removes a whole class of staleness bugs.
 
-An erased sector (all `0xFF`) still gets a real MD5. The server recognises the
+An erased sector (all `0xFF`) still gets a real hash. The server recognises the
 constant hash of an erased page and treats it as "absent", so no special case is
 needed in the wire format.
 
@@ -150,7 +218,7 @@ needed in the wire format.
 
 The server keeps, for each released version and each slot, a precomputed
 manifest and the 1 KB blob behind every sector hash. The blob store is
-content-addressed by MD5, so identical sectors across versions and slots are
+content-addressed by SHA-256, so identical sectors across versions and slots are
 stored once.
 
 **Baseline for the diff.** The comparison is per destination sector, against
@@ -173,7 +241,7 @@ For target version `V` into destination slot `D`, for each destination sector
 2. Else if the device reports `H` anywhere — any slot, any index → emit
    **`STEP_COPY(dst=i, src_slot, src_index)`**. Zero bytes on the wire; the
    bootloader copies flash to flash.
-3. Else → emit **`STEP_WRITE(dst=i, blob, md5=H)`**.
+3. Else → emit **`STEP_WRITE(dst=i, blob, hash=H)`**.
 
 Rules 2 and 3 split the *differing* sectors by where the correct bytes can be
 found. Rule 2 is a content-addressed local lookup, not a positional one: the
@@ -213,20 +281,28 @@ always emitted **last**. The slot header is the commit marker — if a transfer
 dies halfway, sector 0 is still erased, the slot is unmistakably invalid, and
 unroll has nothing to think about.
 
+Section 17 quantifies what this saves, where the break-even against
+sending a whole image lies, and the manifest elision that removes the fixed
+manifest cost from small updates.
+
 ---
 
 ## 6. Protocol
 
-A thin framing layer over any reliable-enough byte stream (UART, RS-485, CAN-TP,
+The protocol is defined once, as messages. How those messages reach the device
+is a **link adapter** (Section 16), and the message layer does not care which
+one is in use.
+
+The default adapter is a thin framing layer over a byte stream (UART, RS-485,
 TCP, MQTT payloads):
 
 ```
 | 0xA5 0x5A | len:u16 | type:u8 | seq:u8 | payload | crc32:u32 |
 ```
 
-Payload is capped at 256 B so a 1 KB sector blob arrives as four fragments.
-That keeps the client's RAM need to one sector buffer (1 KB) plus one frame
-buffer (~300 B).
+Payload is capped at 256 B so a sector blob arrives as `SECTOR_SIZE / 256`
+fragments at most. That keeps the client's RAM need to a sector buffer, an
+encoded-sector buffer and one frame buffer (~300 B).
 
 | Direction | Message | Payload |
 |-----------|---------|---------|
@@ -235,24 +311,35 @@ buffer (~300 B).
 | → server | `MANIFEST` / `MANIFEST_END` | manifest body, `manifest_sha256`, device signature (Section 4) |
 | → device | `MANIFEST_REJECT` | reason (`BAD_SIGNATURE`, `BAD_NONCE`, `UNKNOWN_DEVICE`, `GEOMETRY_MISMATCH`, `MALFORMED`) |
 | → device | `PLAN_BEGIN` | target version, destination slot, step count, target SHA-256, signature |
-| → device | `STEP_COPY` | `dst`, `src_slot`, `src_index`, expected md5 |
-| → device | `STEP_WRITE` | `dst`, `offset`, `len`, bytes, expected md5 of the full sector |
-| → server | `STEP_ACK` / `STEP_NAK` | `dst`, reason (`MD5_MISMATCH`, `FLASH_FAIL`, `BAD_INDEX`) |
+| → device | `STEP_COPY` | `dst`, `src_slot`, `src_index`, expected hash |
+| → device | `STEP_WRITE` | `dst`, `offset`, `len`, bytes of the *encoded* sector (offset and len index the encoded stream) |
+| → device | `STEP_WRITE_END` | `dst`, `compress` (u8 id: 0 raw, 1 LZ4, 2 LZ4 with the old sector as dictionary), `enc_len` (u16), hash of the *decoded* sector |
+| → server | `STEP_ACK` / `STEP_NAK` | `dst`, reason (`HASH_MISMATCH`, `FLASH_FAIL`, `BAD_INDEX`, `DECOMPRESS`) |
 | → device | `PLAN_END` | — |
 | → server | `PLAN_READY` | journal digest, count of steps still pending |
 | → device | `COMMIT` | arm the reboot |
 | → server | `STATUS` | plan state, booted version, trial result |
 | → device | `ABORT` | drop the plan and unroll |
 
-Every session runs over TLS (Section 10.3), and every manifest is signed by the
-device and verified by the server before a plan is generated (Section 10.2). A
-session that fails either check never reaches the planner.
+There is no `STEP_FILL`: LZ4 encodes a uniform sector in about 14 B, so a
+separate message for it saved nothing. A `NAK(DECOMPRESS)` is logged and the
+plan fails at the boot-time verify like any other NAK; the next session retries.
+
+Every session is protected as described in Section 10.3, and every manifest is
+signed by the device and verified by the server before a plan is generated
+(Section 10.2). A session that fails either check never reaches the planner.
+
+[`poc/README.md`](poc/README.md) has the same exchange as a sequence diagram,
+drawn from the working implementation.
 
 **Resume.** On reconnect the client repeats `HELLO`/`CHALLENGE` with the stored
 `target_version`, then re-sends only the journal: a 52-entry bitmap of verified
 sectors, inside the same signed `MANIFEST_END` structure. The server replays the missing steps. Nothing already in flash is sent
-twice, and because every sector carries its own MD5 the device never has to
+twice, and because every sector carries its own hash the device never has to
 trust that a resumed stream is consistent with the earlier one.
+
+Section 16 defines the link adapters — byte stream, Modbus, CAN with ISO-TP,
+and UDS — and what each one has to provide.
 
 ---
 
@@ -282,7 +369,7 @@ NONE ──PLAN_BEGIN──> STAGING ──all steps verified──> READY
    * `STEP_COPY`: copy `SECTOR_SIZE` bytes from `(src_slot, src_index)` to
      `(pending_slot, dst)` using a RAM-resident program routine, re-hash the
      destination, mark `0x0000`.
-   * `STEP_WRITE`: the application already wrote it; re-verify its MD5 and mark
+   * `STEP_WRITE`: the application already wrote it; re-verify its hash and mark
      `0x0000`. A mismatch means the staged data is bad → **unroll**.
 3. Verify the full pending image against `image_sha256` and the ECDSA
    signature. Failure → **unroll**.
@@ -319,7 +406,7 @@ Two distinct operations. Both are cheap because of one invariant:
 > slot is read-only for the entire update.
 
 **Unroll** — abandon a plan that has not booted yet (verify failed, `ABORT`,
-staged MD5 mismatch, signature mismatch):
+staged hash mismatch, signature mismatch):
 
 1. Erase sector 0 of the pending slot. The slot header disappears, so the slot
    is unambiguously invalid.
@@ -349,10 +436,10 @@ idempotent, so a power cut during unroll just means unroll runs again.
 | Failure point | Result |
 |---|---|
 | Power loss mid-download | Journal survives; resume sends only unverified sectors |
-| Power loss mid flash program | That sector's journal word is not `0x5555`; it is re-sent or re-copied |
+| Power loss mid flash program | That sector's journal word is not `0xFF00`; it is re-sent or re-copied |
 | Power loss during apply | `plan_state == APPLYING`; the bootloader resumes the journal from where it stopped |
 | Power loss during meta write | The other bank with the lower generation is still consistent |
-| Corrupt blob in transit | Per-sector MD5 fails → `STEP_NAK` → re-sent |
+| Corrupt blob in transit | Per-sector hash fails → `STEP_NAK` → re-sent |
 | Server sends a wrong target | `image_sha256` or release signature fails → unroll |
 | TLS handshake fails or the pin does not match | No session; link fault reported, retry with backoff |
 | Manifest signature or nonce is wrong | `MANIFEST_REJECT`; no plan is generated |
@@ -367,9 +454,11 @@ idempotent, so a power cut during unroll just means unroll runs again.
 
 ## 10. Security
 
-MD5 is used **only** for per-sector equality and transport integrity, exactly as
-specified. It is not a trust boundary: a collision would let an attacker who
-already controls the server substitute a sector.
+The full, untruncated SHA-256 (see below) is used **only** for per-sector
+equality and transport integrity. It is not a trust boundary: a collision
+would let an attacker who already controls the server substitute a sector,
+and the full digest width does not change that — what gates the result is
+the whole-image hash and the signature below.
 
 Authenticity comes from one signature per image, checked by the bootloader
 before the slot is ever made bootable:
@@ -436,17 +525,19 @@ nothing new, since a slot's bytes cannot change without `image_sha256` changing.
 **It does not replace the per-sector hashes.** The whole-image hash is a
 pass/fail gate; it cannot say *which* sector differs, so there is no delta
 without the per-sector manifest. The two hashes answer different questions:
-per-sector MD5 answers "what must I transfer", `image_sha256` answers "is the
-result exactly the released image". The design needs both.
+the per-sector hash answers "what must I transfer", `image_sha256` answers
+"is the result exactly the released image". The design needs both.
 
-**Optional: drop MD5 entirely.** Per-sector hashes could be SHA-256 truncated
-to 16 bytes instead, keeping the manifest the same 1872 B and removing the weak
-primitive from the device altogether. Cost: manifest generation goes from ~15 ms
-to ~35 ms for 104 KB, and the bootloader drops the MD5 implementation (~1.5 KB)
-in exchange for reusing SHA-256 it already carries — a net flash *saving*. The
-wire format stays `sector, hash, blob`. MD5 is kept here only because it was
-specified; if the `sector,md5` format is not an external constraint, truncated
-SHA-256 is the better default.
+**Per-sector hashes reuse SHA-256.** Each is the full, untruncated SHA-256
+output (32 B), stored as-is in the manifest and plan — kept full rather than
+truncated so a per-sector hash can later be wrapped in HMAC-SHA256 without
+changing the field width or the wire format. Two costs, two savings:
+manifest generation goes from ~15 ms to ~35 ms for the 102 KB PoC partition,
+and the manifest body grows (section 18, needs re-measuring at the 32 B
+width); against that, the bootloader drops a second hash primitive
+(~1.5 KB of flash) in favor of the SHA-256 implementation it already
+carries for `image_sha256` and the signature. The wire format is
+unaffected: `sector, hash, blob` either way, just a wider `hash`.
 
 ### 10.2 Manifest authentication
 
@@ -495,15 +586,18 @@ only and rejects any manifest whose nonce does not match the one it issued.
    `domain` field exactly `"CBMAN"`-padded — domain separation prevents a
    signature made for one message type from being replayed as another.
 4. `nonce` equals the nonce issued in this session.
-5. Structure: `sector_size` and slot geometry match what is registered for this
-   `device_id`'s hardware revision; exactly `slot_count × sectors_slot` entries;
-   every `(slot, index)` present exactly once; no index out of range.
+5. Structure: `sector_size` and the sector count match what is registered for
+   this `device_id`'s hardware revision. With the order implicit there is
+   nothing else left to check: a duplicated or missing sector is
+   unrepresentable.
 6. `active_slot` is a valid slot and is consistent with the `HELLO` report.
 
-Check 5 is not ceremony. A manifest with a duplicated or missing `(slot, index)`
-would make the planner emit a plan that does not cover the destination slot, and
-the device would then stage an image that fails `image_sha256` — a wasted
-transfer that is far cheaper to reject up front.
+Check 5 used to carry more weight: when entries carried their own index, a
+manifest with a duplicated or missing one would make the planner emit a plan
+that does not cover the partition, and the device would stage an image that
+fails `image_sha256` — a wasted transfer. Making the order implicit removed the
+failure instead of validating for it, which is the better trade whenever it is
+available.
 
 **Why sign at all when the link is TLS.** TLS authenticates the *connection*;
 the signature authenticates the *statement*. They fail differently, and on this
@@ -533,9 +627,16 @@ transport, which is the one thing Section 3 deliberately refuses.
 
 ### 10.3 Transport
 
-**TLS is mandatory for every session.** No plaintext fallback exists in the
-protocol; a device that cannot establish TLS reports a link fault and retries
-with backoff.
+**TLS is mandatory on every IP hop.** No plaintext fallback exists in the
+protocol; a device or gateway that cannot establish TLS reports a link fault and
+retries with backoff. Where the device sits behind a gateway on a field bus
+(Section 16), TLS covers server-to-gateway, and the bus segment is covered by
+the end-to-end signatures instead — the same split as the MCU-to-module UART on
+the reference platform. If a bus segment also needs confidentiality, wrap the
+message payloads in an AEAD under a per-device pre-shared key; the device
+already has a provisioned identity to derive it from. That is the only case
+where the design adds a second cipher, and it is not needed for integrity or
+authenticity, only for secrecy on the wire.
 
 * TLS 1.3, ECDHE with AES-128-GCM or ChaCha20-Poly1305.
 * The server is authenticated against a **pinned** root public key held in the
@@ -643,15 +744,14 @@ self-healing rather than a field visit.
 
 | Item | Size |
 |---|---|
-| Bootloader code (flash driver, MD5, SHA-256, micro-ecc, journal, apply) | ~11–14 KB of the 15 KB region |
+| Bootloader code (flash driver, SHA-256, micro-ecc, journal, apply) | ~11–14 KB of the 15 KB region |
 | Device identity page | 1 KB (page 15, `WRP` protected) |
 | Update client in the application | ~3–4 KB, plus micro-ecc sign + HMAC-SHA256 (~3 KB), plus the AT driver |
 | Manifest signing time | ~250 ms, once per session |
 | TLS stack on the MCU | 0 — terminated in the network module |
 | Application RAM: sector buffer | 1024 B |
 | Application RAM: frame buffer | ~300 B |
-| MD5 context | 92 B |
-| SHA-256 context | 108 B |
+| SHA-256 context (shared: manifest hashing, image hash, signature) | 108 B |
 | Manifest on the wire | 1872 B |
 
 ---
@@ -662,7 +762,7 @@ self-healing rather than a field visit.
   the full image SHA-256, and the signature. Produced at build time by a
   `mkmanifest` tool that splits the ELF-derived binary on page boundaries and
   pads the tail with `0xFF`.
-* **Blob store.** Content-addressed by MD5, one 1 KB object per unique sector.
+* **Blob store.** Content-addressed by SHA-256, one 1 KB object per unique sector.
 * **Device table.** Per device: last `HELLO`, running version, active slot,
   current plan, journal bitmap, last result, and the set of versions known bad
   for that device.
@@ -677,8 +777,8 @@ self-healing rather than a field visit.
 
 ## 14. Build order
 
-1. Flash driver with a RAM-resident program/erase routine; MD5; the meta bank
-   ping-pong with CRC and generation.
+1. Flash driver with a RAM-resident program/erase routine; SHA-256; the meta
+   bank ping-pong with CRC and generation.
 2. Bootloader boot path: bank selection, slot header validation, `VTOR` jump.
    No plans yet.
 3. `mkmanifest`, the blob store, and the planner, with a host-side simulator
@@ -843,3 +943,418 @@ reimplementation of something that is audited, fuzzed, and widely deployed.
 
 Either way the manifest protocol, the planner, the device manifest signature,
 and TLS are unaffected. They are the part of this design MCUboot does not have.
+
+---
+
+## 16. Transport
+
+A device on a field bus is reached through a **gateway**: the server speaks TLS
+to the gateway over IP, and the gateway relays the same messages onto the bus.
+This is not a new trust model — Section 10.3 already accepts a non-TLS last hop,
+because on the reference platform TLS terminates in the network module and the
+MCU-to-module UART is unprotected. A Modbus or CAN segment is the same shape
+with a longer last hop, and it is safe for the same reason: the manifest
+signature and the release signature are end to end, so a gateway can read and
+reorder traffic but cannot forge what the device reports or what it installs.
+
+An adapter must provide four things, and nothing more:
+
+1. Deliver one message, in order, to one addressed device.
+2. Declare its maximum payload per transaction.
+3. Declare whether it already provides per-transaction integrity and
+   sequencing.
+4. Declare which side initiates.
+
+Point 3 earns its place: on a link that already checksums and sequences every
+transaction, the framing `crc32` is redundant and is omitted, saving 4 B per
+frame. Reassembly errors are still caught, because the per-sector hash is the
+only end-to-end integrity check that actually matters.
+
+Point 4 matters more than it looks. The message layer is request/response in
+both directions, but a polled bus has no device-initiated path at all, so on
+those adapters the gateway drives every exchange and the device only answers.
+
+| Adapter | Max payload | Frames per 1 KB sector | Integrity | Initiator |
+|---|---|---|---|---|
+| TCP + TLS | 256 B (RAM-bound, not link-bound) | 4 | TLS AEAD | either |
+| UART / RS-485 | 256 B | 4 | framing `crc32` | either |
+| Modbus RTU / TCP | 246 B (FC 16, 123 registers) | 5 | Modbus CRC16 / TCP | master only |
+| CAN 2.0 + ISO-TP | 4095 B per message | 147 CAN frames | CAN CRC + ISO-TP sequence | either |
+| CAN FD + ISO-TP | 4095 B per message | 18 CAN FD frames | CAN CRC + ISO-TP sequence | either |
+
+### 16.1 Modbus
+
+The device is a slave and exposes a mailbox in its holding-register space: a
+data window, a command register, and a status register. The master writes a
+chunk with `Write Multiple Registers` (FC 16, 123 registers = 246 B maximum per
+transaction), then writes the command register to commit it. A 1 KB sector is
+five transactions, roughly 5 % ADU overhead — cheaper than the byte-stream
+framing it replaces.
+
+The flow inverts. Modbus has no server push, so the device cannot announce
+itself; instead it raises an "update wanted" bit in its status register, the
+master polls for it, and the master then **reads** the manifest out of the
+device with `Read Holding Registers` rather than receiving it. 1872 B of
+manifest is 8 reads. Everything else is unchanged, because the message layer was
+already request/response.
+
+Modbus is also where the round-trip cost bites hardest: it is strictly one
+transaction at a time, so a 1 KB sector is five round trips. At 19200 baud a
+sector takes about 1.5 s, which makes a 7-sector delta ~11 s against ~80 s for
+a full image. This is the transport where delta pays for itself most obviously,
+and where the manifest elision of Section 17.1 is worth the most.
+
+`Read/Write File Record` (FC 20/21) is the more semantically honest mapping and
+is a reasonable alternative, but register mailboxes are what field tooling and
+existing Modbus masters actually support without special cases.
+
+### 16.2 CAN
+
+Use **ISO-TP (ISO 15765-2)** for segmentation: a 1 KB sector is one multi-frame
+message, with a per-device RX/TX identifier pair for addressing. On classic CAN
+at 500 kbit/s a sector is 147 frames and about 33 ms; CAN FD cuts that to 18
+frames. Bandwidth is not the constraint on CAN — **coexistence is**.
+
+Two rules keep an update from disturbing the machine it is running on:
+
+* Give update traffic a **high numeric CAN identifier**, so arbitration makes
+  control and safety frames win automatically. This is free and it is the whole
+  reason CAN prioritisation exists.
+* Cap bus utilisation with ISO-TP `STmin`, sized so update traffic stays under a
+  budget (20 % is a reasonable default) rather than filling whatever is idle.
+
+**If the product already speaks UDS, reuse it.** `RequestDownload` (0x34),
+`TransferData` (0x36) and `RequestTransferExit` (0x37) carry a delta plan
+directly: the sector index goes in the address field of `RequestDownload`, one
+`TransferData` sequence per sector. The manifest is read with `ReadDataByIdentifier`
+(0x22) against a dedicated DID, or `ReadMemoryByAddress` (0x23). That reuses an
+audited, already-certified stack instead of adding a second protocol to the same
+bus, and it keeps diagnostic tooling working. The planner, the manifest, and
+both signatures are unaffected — only the framing changes.
+
+### 16.3 Very low rate links
+
+On LoRaWAN or a similar sub-kbit/s link the manifest alone is minutes of
+airtime. Manifest elision (Section 17.1) stops being an optimisation and becomes
+a requirement, and the ACK window should be the whole plan: one ACK bitmap at
+`PLAN_END`, never per sector.
+
+---
+
+## 17. Overhead analysis
+
+Delta is not free. It adds a manifest, a signature, and two round trips to
+every session, and those costs are paid whether one sector changed or all of
+them did. The honest question is where the crossover sits.
+
+Framing costs 10 B per frame (2 magic + 2 length + 1 type + 1 sequence +
+4 CRC), and each sector fragment also carries a 5-byte step header, so at a
+256 B data chunk a 1024 B sector costs 1024 + 4×15 = 1084 B, plus a
+`STEP_WRITE_END` and a `STEP_ACK`: **1123 B measured**. Fixed session cost is
+`HELLO` + `CHALLENGE` + manifest (1872 B of body) + `MANIFEST_END` +
+`PLAN_BEGIN` + the closing messages: **2328 B measured**.
+
+The numbers below are **measured**, not modelled: they come from the host PoC
+in `poc/`, which runs the real protocol over a real socket against a 128 KB
+emulated flash and a 45 772 B reference binary. The PoC prints the same
+figures, one row per update request, for whatever release it is given.
+
+Steady state, destination slot holding the previous release:
+
+| Sectors changed | Delta on the wire | Fraction of a full image |
+|---|---|---|
+| 2 | 4 574 B | 7.5 % |
+| 5 | 7 943 B | 13.1 % |
+| 12 | 15 804 B | 26.0 % |
+| 26 | 31 526 B | 51.9 % |
+| 52 (everything) | 60 724 B | 100.0 % |
+
+The full-image baseline is 60 724 B: the same protocol with every sector forced
+to a write. Three things in that table are worth more than the ratios.
+
+**Delta is never worse, and the worst case is a tie.** When every sector has
+changed, a delta plan is exactly a full transfer plus the manifest, and the
+manifest is itself elided or amortised. The earlier estimate in this document
+put break-even at 50 of 52 sectors and the worst case at 103.7 %; that assumed
+the full transfer was a raw stream with no per-sector protocol of its own. Any
+real full-image transfer needs its own framing, acknowledgements and integrity
+checks, so measured against a like-for-like baseline there is no crossover at
+all. The design therefore needs no "send it all instead" escape hatch.
+
+**A two-sector change costs 4 574 B**, of which 2 048 B is payload: the fixed
+manifest cost dominates small updates. With a warm server-side manifest cache
+(Section 17.1) the same update measures **2 498 B, 4.1 %** — the elision is
+worth 2 076 B, and more than a third of the session.
+
+**Rule 2 earns nothing in steady state and a great deal on a first update.**
+Measured with the destination holding the previous release, turning rule 2 off
+changes nothing at all (13.1 % either way): the sectors that differ there are
+genuinely new bytes that exist nowhere on the device. But updating into an
+**erased** slot, rule 2 finds 40 of 45 sectors in the active slot and drops the
+session from 87.1 % to 15.8 %. That is where content-addressed local copies pay,
+and it is also the case a naive implementation gets worst.
+
+**Sector-delta efficiency is hostage to code layout.** This is the real risk,
+and it is not visible in the table. Inserting one function near the start of
+the image shifts every byte after it, so every following sector's hash changes
+and a one-line fix turns into a near-full transfer. Mitigations, in order of
+value:
+
+* Build reproducibly — same toolchain, same flags, sorted link order, no
+  timestamps or paths baked into the binary. Without this the whole scheme
+  degrades toward full transfers for reasons unrelated to the actual change.
+* Compile with `-ffunction-sections -fdata-sections` and keep an explicit,
+  stable symbol order in the linker script, so unrelated edits do not permute
+  layout.
+* Place volatile, frequently-tuned data (calibration tables, strings, limits)
+  in their own sector-aligned section at the **end** of the image, so changing
+  them cannot shift code.
+* Accept the rest. Code churn genuinely spread across the image is a genuinely
+  large update, and no sector-granular scheme can fix that.
+
+**Against a compressed full image.** LZ-class compression on ARM Thumb code
+reaches roughly 60–70 % of the original, so a compressed full transfer is
+around 35 KB — better than delta once churn exceeds about 60 % of sectors, and
+much worse below it. Compressing each 1 KB blob independently gains little,
+because a 1 KB window has almost no history to exploit; compressing the blob
+*stream* compresses well but couples the sectors together and destroys
+per-sector resume. The two techniques are complementary rather than
+alternatives: if the link is expensive enough to justify both, compress each
+blob with a shared pre-trained dictionary, which keeps sectors independent and
+recovers most of the ratio. Not in v1.
+
+**Round trips, not just bytes.** On a high-latency link — NB-IoT with a 1–2 s
+RTT, or a polled field bus — the ACK-per-sector pattern dominates the transfer
+time. Delta already wins here (7 round trips instead of 52), but the protocol
+should allow a window of several outstanding sectors and a single ACK bitmap at
+`PLAN_END` rather than one ACK per sector. With a window of 8 the 7-sector case
+becomes 2 round trips.
+
+**Cryptography is cheap; flash programming is not.** The cryptography is
+roughly what it looks like: manifest hashing ~15 ms, manifest signing ~250 ms,
+`image_sha256` ~18 ms, release-signature verify ~300 ms. Under 0.6 s, and
+invisible next to a transfer that takes ~10 s at 9600 baud.
+
+Writing the flash is the part that is easy to forget. Datasheet DS5319
+Table 23, "Flash memory characteristics", gives for this part:
+
+| Symbol | Parameter | Min | Max | Unit |
+|---|---|---|---|---|
+| `tprog` | Word programming time | 20 | 40 | µs |
+| `tERASE` | Page (1 kB) erase time | 20 | 40 | ms |
+| `tME` | Mass erase time | 20 | 40 | ms |
+
+The **Typ column of that table is empty**: ST publishes a minimum and a
+maximum and no typical, so every device-time figure here is a range, and a
+schedule should be built on the maximum. The part programs 16 bits per
+operation, so one 1 KB page is one erase plus 512 programming operations:
+
+* one sector: **30.2 ms best case, 60.5 ms worst case**
+* a full 52 KB slot: **1.57 s to 3.14 s**
+
+Endurance is the other half of the same budget: 1 kcycle minimum in DS5319
+Rev 1, 10 kcycles in later revisions. Anything rewritten on every boot must
+therefore clear bits rather than erase a page, which is what the journal
+encoding and the attempt-token log in Section 2 are for.
+
+Measured from the PoC, which counts the operations and models the device time:
+
+| Attempt | Device time | of which flash |
+|---|---|---|
+| 2-sector update, whole session | 417–569 ms | 151–303 ms |
+| 5-sector update, whole session | 509–751 ms | 242–484 ms |
+| 12-sector update, whole session | 723–1177 ms | 454–908 ms |
+| Bootloader apply plus verify | 410–504 ms | 91–182 ms |
+| Each further trial boot | 91–182 ms | 91–182 ms |
+| Revert after the last trial | 220–422 ms | 202–403 ms |
+| Ordinary boot, nothing pending | 18 ms | 0 ms |
+
+### Savings, both currencies
+
+Measured end to end for a 5-sector change in steady state, against the same
+protocol sending every sector:
+
+| | Delta | Full image | Saved |
+|---|---|---|---|
+| Wire | 7 943 B | 60 724 B | **52 781 B, 86.9 %** |
+| Sectors written | 5 | 52 | 47 |
+| Flash time | 151–302 ms | 1 572–3 145 ms | **1.4–2.8 s** |
+| Link at 9600 baud | 8.3 s | 63.2 s | 54.9 s |
+| Link at 115200 baud | 0.7 s | 5.3 s | 4.6 s |
+| Total at 9600 baud | 8.4–8.6 s | 64.8–66.4 s | **56.2–57.8 s** |
+| Total at 115200 baud | 0.8–1.0 s | 6.8–8.4 s | **6.0–7.4 s** |
+
+**Copies save bytes but not flash time, and that changes where rule 2 is
+worth having.** A `STEP_COPY` still erases and programs the destination page,
+so it costs the device exactly what a `STEP_WRITE` costs: the only thing it
+saves is airtime. Measured on a first update into an erased slot, rule 2 takes
+the wire cost from 87.1 % to 15.8 % of a full image while the flash cost stays
+at 1.36–2.72 s either way. Two consequences:
+
+* On a slow or metered link, rule 2 is close to free money.
+* On a fast link, rule 2 buys almost nothing, because flash programming is the
+  floor. What matters there is rule 1 — the sector that is **already correct**
+  and so is neither sent nor written.
+
+Rule 1 is the only rule that saves both currencies, and it is also the rule
+that makes resume cheap, which is the strongest argument for diffing against
+the destination slot rather than against the running image.
+
+### 17.1 Manifest elision
+
+The manifest is a flat 1.9 KB per session, and on a metered or very slow link
+that is the dominant cost of a small update. It is also redundant: the server
+already knows what the device's flash contains, because the server is the only
+thing that ever changes it.
+
+So the device may send a digest instead of the full manifest:
+
+```
+MANIFEST_DIGEST
+  nonce         : u8[16]     // from CHALLENGE, so this is not replayable
+  manifest_sha256 : u8[32]   // over the canonical manifest body
+  signature     : u8[64]     // same ManifestAuth struct as Section 4
+```
+
+The server compares the digest with the manifest it has cached for this
+`device_id`. A match means its cached copy is byte-identical and planning
+proceeds immediately. A mismatch — first contact, a cache eviction, a device
+whose flash was changed by a debugger or a factory tool — gets
+`MANIFEST_NEEDED`, and the device sends the full manifest as in Section 4. The
+canonical body is defined bit-for-bit (Section 4) precisely so this digest is
+reproducible on both sides.
+
+Measured: the fixed session cost drops by 2 076 B, which moves the two-sector
+case from 4 574 B to **2 498 B**, 4.1 % of a full image, and the five-sector
+case from 7 943 B to 5 867 B. The saving is flat, so it matters most exactly
+where it should: on the smallest updates.
+
+The digest is signed and carries the nonce for the same reason the manifest
+does: it is a statement about device state, and the server must not plan against
+an unauthenticated or replayed one.
+
+### 17.2 Sector blob compression candidates
+
+Survey of general-purpose compressors for the sector payload itself (not the
+manifest), measured against real sector content and a Cortex-M3 `-Os` decoder
+build:
+
+| Algorithm | Real-sector ratio | Uniform-sector size | Decoder code (M3, -Os) | Extra RAM |
+|---|---|---|---|---|
+| zlib-9 (ceiling, not embeddable) | −21.6% | 17 B | n/a | n/a |
+| brotli-q11 (ceiling) | −23.3% | 11 B | n/a (~60-100 KB) | n/a |
+| tinf (raw deflate, zlib-compatible) | ≈−21.6% | 17 B | 1294 B | window buf, bound to 1 KB |
+| LZO-1x | −18.2% | 12 B | not measured (fetch failed), commonly ~1-2 KB; GPL | small window |
+| heatshrink | −17.4% | 104-106 B | 708 B | window buf, 256 B-1 KB, choosable |
+| LZ4 | −14.9% | 14 B | 604 B | ~0 — decodes straight into output, no window struct |
+| FastLZ | −13.0% | 15 B | 384 B | ~0, same in-place decode |
+| BriefLZ | −11.6% | 6 B | 236 B | ~0, same in-place decode |
+
+Against the 15 KB bootloader budget, smallest decoder and weakest ratio go
+together: BriefLZ (236 B / 11.6%) and FastLZ (384 B / 13.0%) are tiny enough
+that adding either barely dents the budget. LZ4 (604 B / 14.9%) gets a real
+ratio for barely more code, and is unique among these in having zero RAM
+overhead — no window state at all. heatshrink (708 B / 17.4%) is the best
+ratio-for-code tradeoff if a small window buffer is acceptable. tinf stands
+out structurally, not size-wise: it is real deflate, so a standard
+`zlib.compress()` on the server produces bytes this bootloader can decode
+with no custom encoder — but it costs roughly 2x the code of the LZ4-class
+decoders for the same ratio class.
+
+**What shipped.** LZ4, because its decoder needs no RAM and a few hundred
+bytes. Each written sector travels as `STEP_WRITE` fragments of an encoded
+stream plus a `compress` byte in `STEP_WRITE_END`: 0 raw, 1 LZ4, 2 LZ4 with
+the destination's old content as dictionary. The server compresses at LZ4-HC
+maximum level and keeps the smallest of the three; raw wins unless a
+compressed form is strictly smaller.
+
+The dictionary is the device's *current* content of the destination sector.
+It stays in flash until that sector's own erase, so the decoder reads it in
+place (no RAM), and the server knows exactly what it is from the manifest
+hash, via a content-addressed sector store of every sector it has served. A
+release that shifts code by a few bytes leaves each sector a displaced copy of
+its old self, so the old sector is the best possible dictionary. Measured on
+`klipper.bin` (45 772 B), compressed size as a share of the raw sector:
+
+| sector | LZ4-HC alone | LZ4-HC, old same-index sector as dictionary (4 B code shift) |
+|---|---|---|
+| 1 KB | 86.8 % | 1.7 % |
+| 2 KB | 82.5 % | 1.0 % |
+| 4 KB | 77.8 % | 0.7 % |
+
+The first session after factory install has no stored history and sends plain
+LZ4. The device must decode with the bounds-checked variants only
+(`LZ4_decompress_safe`, `_usingDict`): the stream is decoded before its hash is
+checked. The device ships the decoder alone; the compressor and its match
+finder stay on the server. The PoC's compressors sit behind a small API
+(`lib/compress.h`: a wire id plus compress and decompress functions), so
+another library can be registered under a free id; the host build links
+system `liblz4`.
+
+---
+
+## 18. Single-partition variant
+
+Everything above assumes A/B: two application partitions, the inactive one
+rewritten and the active one untouched, which is what makes unroll O(1) and
+revert possible at all. The host PoC in `poc/` implements a **different
+layout**, chosen deliberately: one application partition, updated in place.
+
+| | A/B (Sections 2-8) | Single partition (`poc/`) |
+|---|---|---|
+| Application space | 2 x 52 KB | 102 KB |
+| Sectors in the manifest | 104, both slots | 102, the one partition |
+| Manifest body | 2088 B | 1636 B |
+| Rule 1, already correct | fires on every update | fires on every update |
+| Rule 2, local copy | finds sectors in the other slot | almost never fires |
+| Unroll | one page erase | not possible |
+| Trial boot and revert | yes, one generation back | not possible |
+| Resume after a power cut | yes | yes |
+| Who owns the transport | the application | **the bootloader** |
+
+Three consequences are worth stating plainly, because they are not obvious
+from "drop the second slot".
+
+**The running image cannot do the writing.** An in-place update overwrites the
+code that is executing, so the download and the programming have to move into
+the bootloader. That reverses the decision in Section 3, and it is the largest
+structural difference between the two layouts: the bootloader now needs a
+transport, which is exactly the surface Section 3 was keeping out of it.
+
+**A failed update is not a failed update, it is a device with no firmware.**
+There is no previous image to fall back to, so the recovery path is the update
+itself: the bootloader reports that it has no bootable image and asks for
+another release. The device is recoverable as long as the server is reachable,
+and bricked if it is not. Rollback is traded for 52 KB of application space and
+nothing else.
+
+**Resume survives, rollback does not.** The partition's own sector hashes are
+the progress record, so a power cut mid-update costs only the sectors not yet
+written: the next request re-manifests and the server re-diffs. That is the
+same property as Section 15.4, and it is what keeps in-place updating viable
+at all.
+
+**Rule 2 stops paying.** A copy needs its bytes to already exist in the flash
+the manifest covers. With one partition that means elsewhere in the same image,
+which for real firmware is almost never true -- measured on the PoC, both
+requests in its demo copy nothing. The content-addressed lookup of Section 5
+is cheap enough to keep, but it is A/B that makes it valuable, because the
+other slot holds a related release.
+
+Measured on the PoC, 102 KB partition, 45 772 B reference binary:
+
+```
+case                       skip copy write     wire of full   saved B   saved      flash ms
+-------------------------- ---- ---- ----- -------- ------- --------- ------- -------------
+v2                           97    0     5     7752    6.6%    109610   93.4%       151-302
+v3                           87    0    15    19052   16.2%     98310   83.8%       454-907
+```
+
+The ratios look better than Section 17's only because the image is twice as
+large while the change is the same size: a fixed-size change against a bigger
+image is a smaller fraction of it. The absolute numbers are what matter, and
+they are unchanged -- 5 changed sectors still cost about 8 KB and 151-302 ms.
+
+Choose A/B when a failed update must not strand the device. Choose one
+partition when the application needs the space and the link is reliable enough
+that "ask again" is an acceptable recovery path.

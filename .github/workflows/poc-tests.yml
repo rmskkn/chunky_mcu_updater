@@ -1,0 +1,28 @@
+name: poc tests
+
+on:
+  push:
+    paths:
+      - 'poc/**'
+      - '.github/workflows/poc-tests.yml'
+  pull_request:
+    paths:
+      - 'poc/**'
+      - '.github/workflows/poc-tests.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install liblz4
+        run: sudo apt-get update && sudo apt-get install -y liblz4-dev
+
+      - name: compress unit tests (ASan/UBSan)
+        working-directory: poc
+        run: make test-compress
+
+      - name: end-to-end tests, all geometries
+        working-directory: poc
+        run: tests/run_matrix.sh
