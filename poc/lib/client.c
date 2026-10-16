@@ -239,7 +239,8 @@ int client_update_session(flash_t *f, plat_io_t *io, const uint8_t dev_key[32],
         if (t == MSG_STEP_COPY) {
             msg_step_copy_t c;
             memcpy(&c, pay, sizeof c);
-            if (c.dst >= SECTORS_SLOT) die("bad sector index %u", c.dst);
+            if (c.dst >= SECTORS_SLOT || c.src_index >= SECTORS_SLOT)
+                die("bad sector index dst=%u src=%u", c.dst, c.src_index);
             /* Recorded only. The bootloader does flash-to-flash copies
              * (DESIGN.md section 7 step 2). */
             np.op[c.dst]        = OP_COPY;
@@ -347,6 +348,18 @@ void client_update_boot(flash_t *f, const uint8_t root_key[32],
 
             uint8_t got[SECTOR_HASH_LEN];
             if (m.op[i] == OP_COPY) {
+                /* src_index came off the wire a session ago and lives in
+                 * flash across the reboot; a bounds check at send time
+                 * (client_update_session) does not protect this read, which
+                 * runs on every boot regardless of how the stored value got
+                 * there. Treat an out-of-range index as a bad plan, same as
+                 * a copy source that no longer matches -- this path must
+                 * never read outside the partition. */
+                if (m.src_index[i] >= SECTORS_SLOT) {
+                    log_fmt(log, log_ctx, "boot: copy source for sector %d is out of range", i);
+                    m.plan_state = PLAN_BAD;
+                    break;
+                }
                 /* Flash to flash inside the partition, through RAM. */
                 uint8_t tmp[SECTOR_SIZE];
                 memcpy(tmp, flash_at(f, APP_BASE +
