@@ -83,16 +83,16 @@ _Static_assert(BL_UNITS == 15 && ID_UNIT == 15 && META0_UNIT == 16 &&
  * the plan the bootloader reads back. */
 typedef uint16_t sector_idx_t;
 
-/* Per-sector hashes are the full, untruncated sha128 output (128 bits -
- * sha128 is itself SHA-256 truncated once, at the algorithm's own output
- * stage; sector_hash takes all of it, no second truncation on top). They
+/* Per-sector hashes are the full SHA-256 output (32 B), not truncated: they
  * answer one question -- does this sector already hold the bytes the
- * target needs -- and they are not a trust boundary: image_sha256 and the
- * release signature gate the result, so a collision costs a retried update
- * rather than a corrupt device; at 128 bits the chance of one is negligible
- * regardless. Reusing SHA-256 drops a second hash primitive from the
- * bootloader image (DESIGN.md section 10). */
-#define SECTOR_HASH_LEN SHA128_LEN
+ * target needs -- and today are not a trust boundary, since image_sha256
+ * and the release signature gate the result, so a collision costs a retried
+ * update rather than a corrupt device. The full digest is kept (over a
+ * truncation) so a per-sector hash can later be wrapped in HMAC-SHA256
+ * without changing SECTOR_HASH_LEN or the wire format (DESIGN.md section
+ * 10). Reusing SHA-256 also drops a second hash primitive from the
+ * bootloader image. */
+#define SECTOR_HASH_LEN SHA256_LEN
 
 void sector_hash(const void *sector, uint8_t out[SECTOR_HASH_LEN]);
 
@@ -206,7 +206,7 @@ typedef struct {
 #define CB_FLASH_MHZ           72.0
 #endif
 #ifndef CB_FLASH_SHA256_CYC_B
-#define CB_FLASH_SHA256_CYC_B  25.0   /* also costs sha128: same compression function */
+#define CB_FLASH_SHA256_CYC_B  25.0
 #endif
 
 /* worst = 0 uses the minimums, worst = 1 the maximums. */

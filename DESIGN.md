@@ -87,7 +87,7 @@ bootloader, the root public key, or the device identity.
 | Page | Contents |
 |------|----------|
 | 0    | `MetaHeader`: magic, generation, `active_slot`, `pending_slot`, `plan_state`, `target_version`, target image SHA-256, signature (64 B), `step_count`, and the per-step op/source table (52 × 2 B) |
-| 1    | Target sector manifest: 52 × sha128 (16 B), indexed by slot-relative sector |
+| 1    | Target sector manifest: 52 × SHA-256 (32 B), indexed by slot-relative sector |
 | 2    | Progress journal: 52 × 16-bit state word, advanced by clearing bits (no erase) |
 | 3    | Boot attempt log: 16-bit tokens cleared one per trial boot, plus the last 8 boot outcomes |
 
@@ -152,7 +152,7 @@ The device hashes **both** slots and reports all of it, as requested:
 MANIFEST                                 // fragmented over several frames
   sector_size   : u16      (1024)
   sectors       : u16      (104)
-  hashes[]      : u8[8]    // one per sector, order implicit
+  hashes[]      : u8[16]   // one per sector, order implicit
 
 MANIFEST_END                             // one frame, closes the manifest
   manifest_sha256 : u8[32] // over the reassembled MANIFEST body above
@@ -163,12 +163,14 @@ Two things are deliberately absent from an entry. There is **no index**: the
 manifest always describes every sector in ascending order, so sector `i` is at
 `hashes[i]`, and a manifest that repeats or omits a sector cannot be expressed
 -- which deletes that whole class of malformed input rather than validating
-against it. And the hash is **SHA-256 truncated to 8 bytes**, because a per-sector
-hash answers one question, "does this sector already hold the bytes the target
-needs", and is not a trust boundary: `image_sha256` and the release signature
-gate the result, so a collision costs a retried update, not a corrupt device.
-At 64 bits a false match runs at about 3e-16 for 104 sectors and 3e-14 for
-1000. Those two choices take the body from 18 bytes per sector to 8.
+against it. And the hash is the **full, untruncated SHA-256 (32 B)**: a
+per-sector hash answers one question, "does this sector already hold the
+bytes the target needs", and today is not a trust boundary, since
+`image_sha256` and the release signature gate the result, so a collision
+costs a retried update, not a corrupt device. The full digest (over a
+truncation) is kept so a per-sector hash can later be wrapped in
+HMAC-SHA256 without changing the field width or the wire format. Dropping
+the index takes the body from 34 bytes per sector to 32.
 
 The body carries **no nonce**. It is a pure function of what is in flash, so
 `manifest_sha256` is stable across sessions and the server can cache it, which
@@ -185,7 +187,7 @@ typedef struct {                /* 72 bytes, hashed then signed            */
 } ManifestAuth;
 ```
 
-104 sectors × 8 B = 832 B of body, fragmented across protocol frames, plus a
+104 sectors × 16 B = 1664 B of body, fragmented across protocol frames, plus a
 96-byte `MANIFEST_END`. One hash and one signature for the whole manifest —
 never one per fragment, which would let an attacker splice fragments from two
 sessions.
@@ -452,11 +454,11 @@ idempotent, so a power cut during unroll just means unroll runs again.
 
 ## 10. Security
 
-SHA-256 truncated to 128 bits (`sha128`, see below) is used **only** for per-sector
+The full, untruncated SHA-256 (see below) is used **only** for per-sector
 equality and transport integrity. It is not a trust boundary: a collision
 would let an attacker who already controls the server substitute a sector,
-and the truncation does not change that — what gates the result is the
-whole-image hash and the signature below.
+and the full digest width does not change that — what gates the result is
+the whole-image hash and the signature below.
 
 Authenticity comes from one signature per image, checked by the bootloader
 before the slot is ever made bootable:
@@ -526,13 +528,15 @@ without the per-sector manifest. The two hashes answer different questions:
 the per-sector hash answers "what must I transfer", `image_sha256` answers
 "is the result exactly the released image". The design needs both.
 
-**Per-sector hashes reuse SHA-256.** Each is the full `sha128`
-output — SHA-256 truncated to 128 bits (16 B), stored as-is in the manifest
-and plan. Two costs, two savings: manifest generation goes from ~15 ms to
-~35 ms for the 102 KB PoC partition, and the manifest body grows to 1636 B
-(measured, section 18); against that, the bootloader drops a second hash
-primitive (~1.5 KB of flash) in favor of the SHA-256 implementation it
-already carries for `image_sha256` and the signature. The wire format is
+**Per-sector hashes reuse SHA-256.** Each is the full, untruncated SHA-256
+output (32 B), stored as-is in the manifest and plan — kept full rather than
+truncated so a per-sector hash can later be wrapped in HMAC-SHA256 without
+changing the field width or the wire format. Two costs, two savings:
+manifest generation goes from ~15 ms to ~35 ms for the 102 KB PoC partition,
+and the manifest body grows (section 18, needs re-measuring at the 32 B
+width); against that, the bootloader drops a second hash primitive
+(~1.5 KB of flash) in favor of the SHA-256 implementation it already
+carries for `image_sha256` and the signature. The wire format is
 unaffected: `sector, hash, blob` either way, just a wider `hash`.
 
 ### 10.2 Manifest authentication

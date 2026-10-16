@@ -60,8 +60,8 @@ flash and is the only thing that writes it. Nothing else is shared.
 ```
   cb-server --image release.bin                     cb-client --flash flash.bin
   +-----------------------------------+             +-----------------------------------+
-  | release.bin   raw firmware        |             | manifest.c  sha128 of all 102     |
-  |                                   |             |             sectors, 16 B each    |
+  | release.bin   raw firmware        |             | manifest.c  sha256 of all 102     |
+  |                                   |             |             sectors, 32 B each    |
   |                                   |             |             order implicit        |
   | image.c   wrap into an image:     |             | client.c    receive blobs, write  |
   |           descriptor at 0x200,    |             |             them straight into    |
@@ -117,10 +117,10 @@ the progress record, so the next request re-diffs and sends only the gap.
     |-- HELLO  id, geometry, version + image hash --------------->|
     |<-- CHALLENGE  16-byte nonce --------------------------------|
     |                                                             |
-    |   sha128 every sector of the partition (102 x 1 KB)         |
+    |   sha256 every sector of the partition (102 x 1 KB)         |
     |-- MANIFEST_DIGEST  sha256 of the body, MAC over the nonce ->|
     |<-- MANIFEST_NEEDED  only on a cache miss -------------------|
-    |-- MANIFEST  1636 B of body, fragmented -------------------->|
+    |-- MANIFEST  body, fragmented (size: see DESIGN.md sec. 18) >|
     |-- MANIFEST_END  digest + MAC ------------------------------>|
     |                              verify MAC, nonce, structure   |
     |                      build the target, diff it per sector   |

@@ -20,39 +20,49 @@ LIBCB   := $(BUILD)/libcb.a
 
 PLAT_OBJ := $(OBJ)/platform_posix.o
 
+# src/ objects live under their own subdir: src/client.c and lib/client.c
+# would otherwise both map to $(OBJ)/client.o
+BINOBJ   := $(OBJ)/bin
+SRV_OBJ  := $(BINOBJ)/server.o
+CLI_OBJ  := $(BINOBJ)/client.o
+FLS_OBJ  := $(BINOBJ)/cbflash.o
+
 BINS    := $(BUILD)/cb-server $(BUILD)/cb-client $(BUILD)/cb-flash
+
+DEPFLAGS = -MMD -MP
+ALL_OBJ  := $(LIB_OBJ) $(PLAT_OBJ) $(SRV_OBJ) $(CLI_OBJ) $(FLS_OBJ)
 
 # geometry is baked in by -D; the stamp changes only when it does, forcing a rebuild
 STAMP := $(BUILD)/geometry.stamp
 
 all: $(BINS)
 
-$(BUILD) $(OBJ):
+$(BUILD) $(OBJ) $(BINOBJ):
 	mkdir -p $@
 
 $(STAMP): FORCE | $(BUILD)
 	@echo '$(ERASE_SIZE) $(SECTOR_SIZE)' | cmp -s - $@ || echo '$(ERASE_SIZE) $(SECTOR_SIZE)' >$@
 
-$(OBJ)/%.o: $(LIB)/%.c $(STAMP) | $(OBJ)
-	$(CC) $(CFLAGS) -iquote $(LIB) -c -o $@ $<
+$(OBJ)/%.o: $(LIB)/%.c $(STAMP) Makefile | $(OBJ)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ)/$*.d -iquote $(LIB) -c -o $@ $<
 
-$(OBJ)/%.o: $(SRC)/%.c $(STAMP) | $(OBJ)
-	$(CC) $(CFLAGS) -iquote $(LIB) -iquote $(PLAT) -c -o $@ $<
+$(BINOBJ)/%.o: $(SRC)/%.c $(STAMP) Makefile | $(BINOBJ)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(BINOBJ)/$*.d -iquote $(LIB) -iquote $(PLAT) -c -o $@ $<
 
-$(OBJ)/%.o: $(PLAT)/%.c $(STAMP) | $(OBJ)
-	$(CC) $(CFLAGS) -iquote $(LIB) -c -o $@ $<
+$(OBJ)/%.o: $(PLAT)/%.c $(STAMP) Makefile | $(OBJ)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ)/$*.d -iquote $(LIB) -c -o $@ $<
 
 $(LIBCB): $(LIB_OBJ) | $(BUILD)
 	$(AR) rcs $@ $^
 
-$(BUILD)/cb-server: $(SRC)/server.c $(PLAT_OBJ) $(LIBCB) $(STAMP) | $(BUILD)
-	$(CC) $(CFLAGS) -iquote $(LIB) -iquote $(PLAT) -o $@ $(SRC)/server.c $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
+$(BUILD)/cb-server: $(SRV_OBJ) $(PLAT_OBJ) $(LIBCB) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $(SRV_OBJ) $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
 
-$(BUILD)/cb-client: $(SRC)/client.c $(PLAT_OBJ) $(LIBCB) $(STAMP) | $(BUILD)
-	$(CC) $(CFLAGS) -iquote $(LIB) -iquote $(PLAT) -o $@ $(SRC)/client.c $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
+$(BUILD)/cb-client: $(CLI_OBJ) $(PLAT_OBJ) $(LIBCB) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $(CLI_OBJ) $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
 
-$(BUILD)/cb-flash: $(SRC)/cbflash.c $(PLAT_OBJ) $(LIBCB) $(STAMP) | $(BUILD)
-	$(CC) $(CFLAGS) -iquote $(LIB) -iquote $(PLAT) -o $@ $(SRC)/cbflash.c $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
+$(BUILD)/cb-flash: $(FLS_OBJ) $(PLAT_OBJ) $(LIBCB) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $(FLS_OBJ) $(PLAT_OBJ) $(LIBCB) -llz4 -pthread
 
 # the decoder eats unchecked bytes: test it under ASan/UBSan
 $(BUILD)/compress_test: tests/compress_test.c $(LIB)/compress.c $(LIB)/lz4.c $(STAMP) | $(BUILD)
@@ -68,3 +78,7 @@ clean:
 
 .PHONY: all clean test-compress FORCE
 FORCE:
+
+# must come after every explicit rule: an included .d file's first target
+# would otherwise become the default goal instead of 'all'
+-include $(ALL_OBJ:.o=.d)
