@@ -135,7 +135,7 @@ static void stage_sector(link_t *l, meta_t *np, uint8_t *done, flash_job_t *job,
     *cur = 1 - *cur;
 }
 
-int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
+int client_update_session(flash_t *f, plat_io_t *io, const uint8_t dev_key[32],
                           log_fn log, void *log_ctx, client_update_stats_t *stats)
 {
     client_update_stats_t dummy = { 0 };
@@ -152,7 +152,7 @@ int client_update_session(flash_t *f, int fd, const uint8_t dev_key[32],
     identity_t *id = identity_get(f);
     meta_load(f, &m);
 
-    link_init(&l, fd);
+    link_init(&l, io);
 
     msg_hello_t h;
     memset(&h, 0, sizeof h);

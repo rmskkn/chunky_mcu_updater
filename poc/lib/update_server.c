@@ -63,7 +63,7 @@ static int store_get(const char *cache_dir, const uint8_t h[SECTOR_HASH_LEN],
     return memcmp(got, h, SECTOR_HASH_LEN) ? -1 : 0;
 }
 
-int server_update_session(int fd, const char *image_path, const char *cache_dir,
+int server_update_session(plat_io_t *io, const char *image_path, const char *cache_dir,
                           const uint8_t dev_key[32], const uint8_t root_key[32],
                           log_fn log, void *log_ctx, server_session_result_t *out)
 {
@@ -75,7 +75,7 @@ int server_update_session(int fd, const char *image_path, const char *cache_dir,
     manifest_t dev;
     char cpath[512];
 
-    link_init(&l, fd);
+    link_init(&l, io);
     memset(out, 0, sizeof *out);
 
     if (frame_expect(&l, MSG_HELLO, pay, &n) < 0) return 0;

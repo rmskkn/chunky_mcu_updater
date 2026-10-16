@@ -7,17 +7,16 @@
 #include "plan.h"
 #include "keys.h"
 #include "util.h"
+#include "platform_posix.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
 #include <signal.h>
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
 #include <sys/stat.h>
-#include <sys/socket.h>
 
 static const char *opt_image = NULL;   /* the release to serve */
 static const char *opt_cache  = "cache";
@@ -85,7 +84,7 @@ static void report(const char *label, const server_session_result_t *r)
     int sectors = p->n_copy + p->n_write;
     char flash[32];
     snprintf(flash, sizeof flash, "%.0f-%.0f",
-             sectors * f103_sector_ms(0), sectors * f103_sector_ms(1));
+             sectors * flash_sector_timing_ms(0), sectors * flash_sector_timing_ms(1));
 
     char wl[320], cl[320];
     sector_list(p, OP_WRITE, wl, sizeof wl);
@@ -111,10 +110,10 @@ static void report(const char *label, const server_session_result_t *r)
     fflush(stdout);
 }
 
-static void session(int fd)
+static void session(plat_io_t *io)
 {
     server_session_result_t res;
-    if (server_update_session(fd, opt_image, opt_cache, dev_key, root_key,
+    if (server_update_session(io, opt_image, opt_cache, dev_key, root_key,
                               cli_log, NULL, &res)) {
         char label[32];
         snprintf(label, sizeof label, "v%u", res.ver);
@@ -150,23 +149,23 @@ int main(int argc, char **argv)
         die("no image to serve\n"
             "  usage: cb-server --image FILE [--port N] [--cache DIR]");
 
-    int srv = tcp_listen(opt_port);
-    if (srv < 0)
+    plat_io_t *srv = plat_io_tcp_listen(opt_port);
+    if (!srv)
         die("cannot listen on port %d: %s\n"
             "  another server is probably still running: pkill cb-server\n"
             "  or pick a free port on both sides: --port N",
             opt_port, strerror(errno));
     printf("server: listening on 127.0.0.1:%d, serving %s\n", opt_port, opt_image);
     printf("server: a full image is %d sectors, %.0f-%.0f ms of flash on the device\n",
-           SECTORS_SLOT, SECTORS_SLOT * f103_sector_ms(0), SECTORS_SLOT * f103_sector_ms(1));
+           SECTORS_SLOT, SECTORS_SLOT * flash_sector_timing_ms(0), SECTORS_SLOT * flash_sector_timing_ms(1));
     fflush(stdout);
 
     for (;;) {
-        int fd = accept(srv, NULL, NULL);
-        if (fd < 0) continue;
-        session(fd);
-        close(fd);
+        plat_io_t *io = plat_io_tcp_accept(srv);
+        if (!io) continue;
+        session(io);
+        plat_io_close(io);
     }
-    close(srv);
+    plat_io_close(srv);
     return 0;
 }

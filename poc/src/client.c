@@ -2,16 +2,15 @@
  * actual work - manifest generation, the update session, the bootloader's
  * apply/verify step - lives in lib/client.c; DESIGN.md sections 4, 6, 7, 8. */
 #include "client.h"
-#include "frame.h"
 #include "manifest.h"
 #include "image.h"
 #include "keys.h"
 #include "util.h"
+#include "platform_posix.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <unistd.h>
 
 static const char *opt_flash = "flash.bin";
 static const char *opt_host  = "127.0.0.1";
@@ -32,9 +31,9 @@ static void cli_log(void *ctx, const char *line)
  * at the cycles/byte in flash.h, plus RM0008 flash erase and program times. */
 static double model_ms(const flash_t *f, int worst, const client_update_stats_t *s)
 {
-    double cyc_per_ms = F103_MHZ * 1000.0;
-    return (double)s->sha_bytes * F103_SHA256_CYC_B / cyc_per_ms +
-           f103_flash_ms(f->n_erase, f->prog_bytes, worst) + s->ecdsa_ms;
+    double cyc_per_ms = CB_FLASH_MHZ * 1000.0;
+    return (double)s->sha_bytes * CB_FLASH_SHA256_CYC_B / cyc_per_ms +
+           flash_timing_ms(f->n_erase, f->prog_bytes, worst) + s->ecdsa_ms;
 }
 
 static void time_report(const char *phase, double host_ms, const flash_t *f,
@@ -43,16 +42,16 @@ static void time_report(const char *phase, double host_ms, const flash_t *f,
     printf("time: %-10s host %8.2f ms   F103 %8.1f - %.1f ms"
            "  (flash %.1f - %.1f ms: %ld erase, %zu B prog)\n",
            phase, host_ms, model_ms(f, 0, s), model_ms(f, 1, s),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 0),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 1),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 0),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 1),
            f->n_erase, f->prog_bytes);
     if (!machine_output()) { fflush(stdout); return; }
     printf("TIME phase=%s host_ms=%.3f model_min_ms=%.1f model_max_ms=%.1f "
            "flash_min_ms=%.1f flash_max_ms=%.1f erases=%ld "
            "prog_bytes=%zu sha_bytes=%zu ecdsa_ms=%.0f\n",
            phase, host_ms, model_ms(f, 0, s), model_ms(f, 1, s),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 0),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 1),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 0),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 1),
            f->n_erase, f->prog_bytes,
            s->sha_bytes, s->ecdsa_ms);
     fflush(stdout);
@@ -76,29 +75,29 @@ static int cmd_session(void)
 
     device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL);
 
-    int fd = tcp_connect(opt_host, opt_port);
-    if (fd < 0)
+    plat_io_t *io = plat_io_tcp_connect(opt_host, opt_port);
+    if (!io)
         die("cannot connect to %s:%d: %s\n"
             "  no server is listening there; start one in another terminal:\n"
             "    scripts/lab.sh server",
             opt_host, opt_port, strerror(errno));
 
     double t_start = now_ms();
-    int rc = client_update_session(&f, fd, dev_key, cli_log, NULL, &g_stats);
+    int rc = client_update_session(&f, io, dev_key, cli_log, NULL, &g_stats);
     double session_ms = now_ms() - t_start;
 
     printf("time: manifest   host %8.2f ms   F103 model %8.1f ms  (%d sectors hashed)\n",
-           g_stats.t_manifest, (double)MANIFEST_ENTRIES * SECTOR_SIZE * F103_SHA256_CYC_B / (F103_MHZ * 1000.0),
+           g_stats.t_manifest, (double)MANIFEST_ENTRIES * SECTOR_SIZE * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0),
            MANIFEST_ENTRIES);
     printf("time: sign       host %8.2f ms   F103 model %8.1f ms  (ECDSA P-256, budgeted)\n",
            g_stats.t_auth, ECDSA_SIGN_MS);
     printf("time: stage      host %8.2f ms   F103 %8.1f - %.1f ms  (receive, verify, program)\n",
-           g_stats.t_stage, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
-           f103_flash_ms(f.n_erase, f.prog_bytes, 1));
+           g_stats.t_stage, flash_timing_ms(f.n_erase, f.prog_bytes, 0),
+           flash_timing_ms(f.n_erase, f.prog_bytes, 1));
     printf("time: persist    host %8.2f ms\n", g_stats.t_persist);
     time_report("session", session_ms, &f, &g_stats);
 
-    close(fd);
+    plat_io_close(io);
     flash_close(&f);
     return rc;
 }
@@ -119,12 +118,12 @@ static int cmd_boot(void)
 
     if (g_stats.t_apply > 0)
         printf("time: apply      host %8.2f ms   F103 %8.1f - %.1f ms  (copies)\n",
-               g_stats.t_apply, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
-               f103_flash_ms(f.n_erase, f.prog_bytes, 1));
+               g_stats.t_apply, flash_timing_ms(f.n_erase, f.prog_bytes, 0),
+               flash_timing_ms(f.n_erase, f.prog_bytes, 1));
     if (g_stats.t_verify > 0)
         printf("time: verify     host %8.2f ms   F103 %8.1f ms  "
                "(image_sha256 + signature)\n", g_stats.t_verify,
-               (double)(SLOT_SIZE - DESC_LEN) * F103_SHA256_CYC_B / (F103_MHZ * 1000.0)
+               (double)(SLOT_SIZE - DESC_LEN) * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0)
                + ECDSA_VERIFY_MS);
     time_report("boot", boot_ms, &f, &g_stats);
     flash_close(&f);

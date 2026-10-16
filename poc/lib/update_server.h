@@ -2,6 +2,7 @@
 #define CB_UPDATE_SERVER_H
 #include "plan.h"
 #include "util.h"
+#include "platform_io.h"
 #include <stdint.h>
 
 typedef struct {
@@ -19,7 +20,7 @@ typedef struct {
  * streamed - the caller should report it - or 0 if the session ended before
  * that (geometry mismatch, bad auth, a rejected manifest, or nothing to
  * update). */
-int server_update_session(int fd, const char *image_path, const char *cache_dir,
+int server_update_session(plat_io_t *io, const char *image_path, const char *cache_dir,
                           const uint8_t dev_key[32], const uint8_t root_key[32],
                           log_fn log, void *log_ctx, server_session_result_t *out);
 
