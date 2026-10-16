@@ -94,13 +94,13 @@ bootloader, the root public key, or the device identity.
 Two banks ping-pong. The valid bank is the one with a correct CRC and the higher
 `generation`. A torn write therefore never loses the previous consistent state.
 
-F103 flash programs in 16-bit half-words and erases per page. Two rules bound
-what a field written incrementally (journal state, attempt tokens) can encode,
-both from PM0075: bits only ever go from 1 to 0, and a half-word may be
-programmed only once after an erase, unless the value is `0x0000`, which the
-part always accepts. The second rule is the tighter one -- clearing bits in two
-steps obeys the first and still raises `PGERR` -- so an unerased half-word has
-three states, not four:
+The reference part, STM32F103CB, programs flash in 16-bit half-words and
+erases per page. Two rules bound what a field written incrementally (journal
+state, attempt tokens) can encode on it, both from PM0075: bits only ever go
+from 1 to 0, and a half-word may be programmed only once after an erase,
+unless the value is `0x0000`, which the part always accepts. The second rule
+is the tighter one -- clearing bits in two steps obeys the first and still
+raises `PGERR` -- so an unerased half-word has three states, not four:
 
 ```
 0xFFFF  empty
@@ -108,8 +108,14 @@ three states, not four:
 0x0000  step complete (for COPY: source read and destination verified)
 ```
 
-Parts with ECC (G0, H7) allow one program per word with no zero exception, so
-a port there spends one word per state rather than one word per sector.
+Neither rule is universal; they are F103CB as the worked example, not a law
+of flash in general. `CB_FLASH_PROGRAM_ONCE` and `CB_FLASH_ZERO_EXEMPT`
+(`lib/flash.h`) make both a build-time choice, and `flash_program()` enforces
+whichever pair a port sets. Parts with ECC (G0, H7) allow one program per
+word with no zero exception (`CB_FLASH_ZERO_EXEMPT=0`), so a port there
+spends one journal word per state rather than one word per sector; a part
+allowing several programs per word before erase turns the limit off
+(`CB_FLASH_PROGRAM_ONCE=0`) and loses nothing by it.
 
 ---
 

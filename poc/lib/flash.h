@@ -24,6 +24,22 @@
 #define SECTOR_SIZE  CB_SECTOR_SIZE
 #define FLASH_SIZE   (128 * 1024)     /* STM32F103CB, fixed */
 
+/* Whether a half-word may be programmed only once between erases, and
+ * whether 0x0000 is exempt from that limit -- both properties of the part,
+ * not a universal rule; this check can express "once or unlimited", not an
+ * arbitrary count. STM32F103CB is the example modelled here: PM0075 allows
+ * one program per half-word after an erase, except that 0x0000 may always
+ * be written regardless of the half-word's current content. A part that
+ * allows more than one program per word (so the limit does not apply), or
+ * one with ECC and no zero exception, overrides these at build time;
+ * flash_program() in flash.c enforces whatever is set. */
+#ifndef CB_FLASH_PROGRAM_ONCE
+#define CB_FLASH_PROGRAM_ONCE 1      /* 0 disables the limit entirely */
+#endif
+#ifndef CB_FLASH_ZERO_EXEMPT
+#define CB_FLASH_ZERO_EXEMPT 1       /* 0x0000 does not count against the limit */
+#endif
+
 #define IS_POW2(x)   ((x) > 0 && ((x) & ((x) - 1)) == 0)
 #define DIV_CEIL(a, b)   (((a) + (b) - 1) / (b))
 #define ROUND_UP(a, b)   (DIV_CEIL(a, b) * (b))
@@ -81,15 +97,20 @@ void sector_hash(const void *sector, uint8_t out[SECTOR_HASH_LEN]);
 _Static_assert(SECTORS_SLOT <= (1 << (8 * sizeof(sector_idx_t))) - 1,
                "sector index type too narrow for this partition size");
 
-/* Journal states. An F103 half-word may be programmed once after an erase,
- * and after that only with 0x0000 (PM0075), so a word that is never erased
- * while a plan is live has three states: erased, one arbitrary program,
- * zero. A fourth state between them (0xFFF0 -> 0xFF00) only clears bits and
- * would still PGERR; flash_program() rejects it. Parts with ECC (G0, H7)
- * have no zero exception and need a word per state instead. */
+/* Journal states. With the STM32F103CB profile above (one program per
+ * erase, 0x0000 exempt) a half-word that is never erased while a plan is
+ * live has three states: erased, one arbitrary program, zero. A fourth
+ * state between them (0xFFF0 -> 0xFF00) only clears bits and would still
+ * violate the one-program limit; flash_program() rejects it. A part built
+ * with CB_FLASH_ZERO_EXEMPT=0 (e.g. an ECC part with no such exception)
+ * cannot reach JRN_DONE after JRN_VERIFIED this way and needs a journal
+ * word per state instead -- the assert below catches that build. */
 #define JRN_EMPTY     0xFFFFu
 #define JRN_VERIFIED  0xFF00u
 #define JRN_DONE      0x0000u
+_Static_assert(!(CB_FLASH_PROGRAM_ONCE && !CB_FLASH_ZERO_EXEMPT),
+               "this journal relies on 0x0000 being exempt from the "
+               "one-program-per-erase limit; give it a word per state instead");
 
 /* plan_state. Without a second partition there is no trial boot and no
  * revert: the image either verifies or the device asks for another one. */
