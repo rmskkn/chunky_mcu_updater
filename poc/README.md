@@ -52,7 +52,36 @@ answer is `no update offered` — the comparison is on content, so re-running
 `update` is free and idempotent. `scripts/lab.sh reset` forgets the device so it
 ships fresh again.
 
-## Architecture
+## Benchmarks
+
+`tests/run_all.sh` output, one row per `tests/case_*.sh`, default geometry
+(`ERASE_SIZE=1024 SECTOR_SIZE=1024`, 104 448 B raw image = 102 sectors).
+`wire_stats` in `tests/common.sh` derives these numbers from the client's own
+`device: wire tx=.. rx=.. bytes (framing overhead ..)` log line (`lib/client.c`),
+which counts real frame bytes, not an estimate. Reproduce with
+`bash tests/run_all.sh`.
+
+| Case | What it exercises | tx | rx | rx framing overhead | rx vs raw image |
+|---|---|--:|--:|--:|--:|
+| `case_copy_dedup` | `OP_COPY` plus one interleaved write | 3722 B | 2418 B | 160 B (6.6%) | 2.3% |
+| `case_lz4_compressible` | a repetitive (16-byte motif) sector | 3708 B | 1330 B | 120 B (9.0%) | 1.3% |
+| `case_lz4_dict` (step 2: insertion shifts 63 sectors) | LZ4 with the old sector as dictionary | 4562 B | 6105 B | 1310 B (21.5%) | 5.8% |
+| `case_lz4_uniform_00` | a uniform `0x00` sector | 3708 B | 1314 B | 120 B (9.1%) | 1.3% |
+| `case_lz4_uniform_ff` | a uniform `0xFF` sector | 3708 B | 1314 B | 120 B (9.1%) | 1.3% |
+| `case_many_writes` | 23 ordinary `STEP_WRITE`s, no dedup/compression available | 4002 B | 26228 B | 1200 B (4.6%) | 25.1% |
+| `case_noop_rerun` (2nd request) | device already matches the release: bare handshake | 3668 B | 46 B | 30 B (65.2%) | 0.0% |
+
+**Grand total, every `update()` request this run made (11, including
+`case_lz4_dict`'s other three):** tx = 41 910 B (2890 B framing, 6.9%),
+rx = 44 215 B (3530 B framing, 8.0%) — **3.8%** of 1 148 928 B of
+raw-image-equivalent traffic (11 requests × the 104 448 B raw image).
+
+Framing overhead (the `| 0xA5 0x5A | len | type | seq | payload | crc32 |`
+wrapper, `DESIGN.md` section 6) is a *larger* share of rx the smaller the
+payload is — it's fixed per frame, so a near-empty response (`noop_rerun`,
+65.2%) pays proportionally more than a 63-sector plan (`lz4_dict`, 21.5%).
+The number that matters for link cost is the last column: how much of a full
+raw image a request actually cost.
 
 Two processes and one file. The server owns the releases; the device owns the
 flash and is the only thing that writes it. Nothing else is shared.

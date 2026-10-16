@@ -18,6 +18,7 @@ server_start
 
 out="$(update 2>&1)"
 echo "$out" | grep -E 'plan v|device: wire|booting'
+wire_stats "$out"
 
 steps="$(sed -n 's/.*plan v[0-9]*, \([0-9]*\) steps.*/\1/p' <<<"$out")"
 # larger sectors make the 25 runs collide more
@@ -33,4 +34,4 @@ assert_contains "$out" "verified" "image verifies"
 assert_not_contains "$out" "does not match the plan" "every sector matched its planned hash"
 assert_not_contains "$out" "does not verify" "the staged image verified"
 
-ok "many_writes ($steps steps)"
+ok "many_writes ($steps steps, rx=$WIRE_RX B)"

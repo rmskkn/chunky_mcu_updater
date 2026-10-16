@@ -19,6 +19,7 @@ server_start
 cp "$BASE" "$R1"; scramble_sector "$R1" $((SECTORS / 10)) 4242
 cp "$R1" "$IMAGE"
 out="$(update 2>&1)"
+wire_stats "$out"
 assert_contains "$out" "booting version 2" "step 1 boots v2"
 
 # 2. insertion: the tail shifts by 16 B
@@ -26,12 +27,13 @@ cp "$R1" "$R2"; insert_bytes "$R2" $S_INS 16
 cp "$R2" "$IMAGE"
 out="$(update 2>&1)"
 echo "$out" | grep -E 'plan v|device: wire|booting'
+wire_stats "$out"
 assert_contains "$out" "booting version 3" "step 2 boots v3"
 assert_contains "$out" "verified" "step 2 image verifies"
 steps="$(sed -n 's/.*plan v[0-9]*, \([0-9]*\) steps.*/\1/p' <<<"$out")"
 dict="$(compress_count lz4_dict)"
 [ $((dict * 10)) -ge $((steps * 9)) ] || fail "dictionary use" "lz4_dict=$dict of $steps written sectors, expected at least 90%"
-rx="$(sed -n 's/.*rx=\([0-9]*\) bytes/\1/p' <<<"$out")"
+rx="$WIRE_RX"
 [ $((rx * 100)) -lt $((steps * SECTOR_SIZE * 15)) ] || fail "wire size" "rx=$rx B for $steps sectors, expected under 15% of $((steps * SECTOR_SIZE)) B"
 RAW_COST=$((steps * RAW_WIRE))
 
@@ -39,6 +41,7 @@ RAW_COST=$((steps * RAW_WIRE))
 cp "$R2" "$R3"; tweak_sector "$R3" $S_TWEAK
 cp "$R3" "$IMAGE"
 out="$(update 2>&1)"
+wire_stats "$out"
 assert_contains "$out" "booting version 4" "step 3 boots v4"
 [ "$(compress_count raw)" -eq 0 ] || fail "control" "sector sent raw although the store is intact"
 
@@ -49,6 +52,7 @@ gen_random_bin "$CACHE/sectors/$h" $SECTOR_SIZE 9
 cp "$R3" "$R4"; tweak_sector "$R4" $S_TWEAK 0x33
 cp "$R4" "$IMAGE"
 out="$(update 2>&1)"
+wire_stats "$out"
 assert_contains "$out" "booting version 5" "step 4 boots v5"
 assert_contains "$out" "verified" "step 4 image verifies"
 [ "$(compress_count raw)" -eq 1 ] || fail "store tamper" "the corrupted store entry was still used as a dictionary"

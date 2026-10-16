@@ -55,6 +55,29 @@ server_stop() {
 
 update() { "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --port "$PORT" "$@"; }
 
+# wire_stats TEXT: parses the client's "device: wire tx=.. rx=.. bytes
+# (framing overhead tx=.. rx=.. B over ../.. frames)" line out of TEXT (as
+# captured by `out="$(update 2>&1)"`). Sets WIRE_TX/WIRE_RX/WIRE_OVH_TX/
+# WIRE_OVH_RX for the caller, prints a verbose per-request stats line, and
+# appends to the run's shared log so run_all.sh can print a grand total.
+# No-op (and leaves the WIRE_* vars unset) if TEXT has no such line, e.g. a
+# captured block that never reached the server.
+wire_stats() {
+    local text="$1" raw pct_raw pct_ovh
+    WIRE_TX="$(sed -n 's/.*wire tx=\([0-9]*\).*/\1/p' <<<"$text" | tail -1)"
+    WIRE_RX="$(sed -n 's/.*rx=\([0-9]*\) bytes.*/\1/p' <<<"$text" | tail -1)"
+    WIRE_OVH_TX="$(sed -n 's/.*overhead tx=\([0-9]*\).*/\1/p' <<<"$text" | tail -1)"
+    WIRE_OVH_RX="$(sed -n 's/.*overhead tx=[0-9]* rx=\([0-9]*\) B.*/\1/p' <<<"$text" | tail -1)"
+    [ -n "${WIRE_RX:-}" ] || return 0
+    raw=$((SECTORS * SECTOR_SIZE))
+    pct_raw="$(awk -v rx="$WIRE_RX" -v raw="$raw" 'BEGIN{printf "%.1f", 100*rx/raw}')"
+    pct_ovh="$(awk -v o="${WIRE_OVH_RX:-0}" -v rx="$WIRE_RX" 'BEGIN{printf "%.1f", (rx>0) ? 100*o/rx : 0}')"
+    printf '      wire: tx=%s B (%s B framing)  rx=%s B (%s B framing, %s%% of rx)  -- %s%% of a %d B raw image\n' \
+        "$WIRE_TX" "${WIRE_OVH_TX:-0}" "$WIRE_RX" "${WIRE_OVH_RX:-0}" "$pct_ovh" "$pct_raw" "$raw"
+    mkdir -p "$TESTS/run"
+    echo "$WIRE_TX $WIRE_RX ${WIRE_OVH_TX:-0} ${WIRE_OVH_RX:-0} $raw" >>"$TESTS/run/.wire.log"
+}
+
 # gen_random_bin OUT SIZE SEED: a deterministic, non-uniform firmware payload.
 # Self-contained (no external reference binary), so a test's content is
 # reproducible from the test alone, and plain enough that no sector-sized window
