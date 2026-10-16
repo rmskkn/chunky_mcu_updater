@@ -25,6 +25,11 @@ shopt -u nullglob
 
 pass=0 fail=0
 
+# Shared wire-stats log (tests/common.sh's wire_stats appends to it): clear it
+# so this run's grand total doesn't include a previous invocation's requests.
+mkdir -p run
+: >run/.wire.log
+
 # compress test first, at the geometry of the existing build (so no rebuild flip)
 if [ "$pattern" = "case_*.sh" ]; then
     [ -x ../build/cb-flash ] || make -C .. >/dev/null
@@ -50,4 +55,21 @@ done
 
 echo
 echo "$pass passed, $fail failed"
+
+# Grand total across every update() request this run made: wire bytes,
+# framing overhead folded into them, and what was sent against what a full
+# raw image transfer per request would have cost.
+if [ -s run/.wire.log ]; then
+    echo
+    awk '
+        { tx+=$1; rx+=$2; otx+=$3; orx+=$4; raw+=$5; n++ }
+        END {
+            printf "wire totals over %d request(s):\n", n
+            printf "  tx=%d B (%d B framing, %.1f%%)\n", tx, otx, (tx>0)?100*otx/tx:0
+            printf "  rx=%d B (%d B framing, %.1f%%) -- %.1f%% of %d B of raw-image-equivalent traffic\n", \
+                rx, orx, (rx>0)?100*orx/rx:0, (raw>0)?100*rx/raw:0, raw
+        }
+    ' run/.wire.log
+fi
+
 [ "$fail" -eq 0 ]

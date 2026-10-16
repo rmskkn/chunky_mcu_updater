@@ -315,8 +315,12 @@ int client_update_session(flash_t *f, plat_io_t *io, const uint8_t dev_key[32],
     }
 
 done:
-    log_fmt(log, log_ctx, "device: wire tx=%llu rx=%llu bytes",
-           (unsigned long long)l.tx_bytes, (unsigned long long)l.rx_bytes);
+    log_fmt(log, log_ctx,
+           "device: wire tx=%llu rx=%llu bytes (framing overhead tx=%llu rx=%llu B over %llu/%llu frames)",
+           (unsigned long long)l.tx_bytes, (unsigned long long)l.rx_bytes,
+           (unsigned long long)l.tx_frames * FRAME_OVERHEAD,
+           (unsigned long long)l.rx_frames * FRAME_OVERHEAD,
+           (unsigned long long)l.tx_frames, (unsigned long long)l.rx_frames);
     return rc;
 }
 

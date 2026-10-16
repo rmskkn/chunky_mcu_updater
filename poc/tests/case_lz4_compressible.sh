@@ -13,14 +13,14 @@ server_start
 
 out="$(update 2>&1)"
 echo "$out" | grep -E 'plan v|device: wire|booting'
+wire_stats "$out"
 
 assert_contains "$out" "plan v2, 2 steps" "sector 0 (the version stamp) plus the motif sector"
 assert_contains "$out" "booting version 2" "boots the new version"
 assert_contains "$out" "verified" "image verifies"
 [ "$(compress_count lz4)" -ge 1 ] || fail "compressor" "the motif sector was not sent as lz4"
 
-rx="$(sed -n 's/.*rx=\([0-9]*\) bytes/\1/p' <<<"$out")"
 limit=$((RAW_WIRE + 412))   # below the raw cost of both sectors
-[ "$rx" -lt "$limit" ] || fail "wire size" "rx=$rx B, expected under $limit B"
+[ "$WIRE_RX" -lt "$limit" ] || fail "wire size" "rx=$WIRE_RX B, expected under $limit B"
 
-ok "lz4_compressible (rx=$rx B)"
+ok "lz4_compressible (rx=$WIRE_RX B)"

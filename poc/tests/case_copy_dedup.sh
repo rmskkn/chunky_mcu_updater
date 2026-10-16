@@ -21,17 +21,17 @@ server_start
 
 out="$(update 2>&1)"
 echo "$out" | grep -E 'plan v|device: wire|booting'
+wire_stats "$out"
 
 assert_contains "$out" "plan v2, 3 steps" "sector 0 (the version stamp), the write, and the copy"
 assert_contains "$out" "booting version 2" "boots the new version"
 assert_contains "$out" "verified" "image verifies"
 
-rx="$(sed -n 's/.*rx=\([0-9]*\) bytes/\1/p' <<<"$out")"
 # two writes (sector 0, the scrambled one) + a copy; ~524 B of handshake/acks
 limit=$((2 * RAW_WIRE + 524))
-[ "$rx" -lt "$limit" ] || fail "wire size" "rx=$rx B, expected under $limit B (two writes + one copy, not three writes)"
+[ "$WIRE_RX" -lt "$limit" ] || fail "wire size" "rx=$WIRE_RX B, expected under $limit B (two writes + one copy, not three writes)"
 
 [ "$(compress_count raw)" -ge 1 ] || fail "raw fallback" "the scrambled sector did not stay raw"
 grep -q "copied  $S_DST" "$RUN/server.log" || fail "copy step" "server log does not show sector 10 as copied"
 
-ok "copy_dedup (rx=$rx B)"
+ok "copy_dedup (rx=$WIRE_RX B)"
