@@ -7,7 +7,7 @@ to the firmware it was running before the update started.
 Reference platform: **STM32F103CB** — 128 KB flash, 20 KB RAM, 1 KB flash page,
 72 MHz Cortex-M3.
 
-> **Status: design only.** No code yet. [`DESIGN.md`](DESIGN.md) is the current
+> **Status: design only.** No code yet. [`DESIGN.md`](poc/DESIGN.md) is the current
 > specification and is the thing to read, review, and argue with.
 
 ## Purpose
@@ -42,7 +42,7 @@ difference into a spare partition that the running firmware never depends on.
 
    The host PoC implements a single-partition variant instead: one 104 KB
    application, updated in place, which trades unroll and revert for the space.
-   `DESIGN.md` section 18 has the comparison.
+   [`DESIGN.md`](poc/DESIGN.md) section 18 has the comparison.
 4. **The bootloader applies the plan and can unroll it.** Apply is journalled
    and resumable, and it never writes outside the inactive partition. So
    abandoning an update is one page erase, with nothing to undo.
@@ -92,7 +92,7 @@ exchange, and what the PoC deliberately leaves out.
 
 ## Read next
 
-[`DESIGN.md`](DESIGN.md) covers it properly:
+[`DESIGN.md`](poc/DESIGN.md) covers it properly:
 
 | Section | |
 |---|---|
@@ -109,9 +109,9 @@ exchange, and what the PoC deliberately leaves out.
 
 ## For Review/ TODO
 1. In-place single-partition updates;
-2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: `DESIGN.md` 17.2);
+2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: [`DESIGN.md`](poc/DESIGN.md) 17.2);
 3. Multi-generation rollback or over-the-air updates of the bootloader itself;
-4. Reasoning for each is in `DESIGN.md`.
+4. Reasoning for each is in [`DESIGN.md`](poc/DESIGN.md).
 
 
 
