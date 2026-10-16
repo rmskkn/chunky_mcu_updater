@@ -5,16 +5,22 @@ and run on the host. The device reports what is in its flash, the server sends
 only the sectors that differ, and the bootloader applies them.
 
 The device side owns a 128 KB file treated as STM32F103CB flash: page erase,
-half-word programming, and the rule that a program may only clear bits. The
+half-word programming, and the rules that a program may only clear bits and
+may not reprogram a half-word except with zero. The
 firmware under test is a real binary, `klipper.bin` (45 772 B), split into
 sectors and wrapped in an image descriptor.
 
 ## Run it
 
 ```sh
-make
+make                                  # needs liblz4
+make ERASE_SIZE=2048 SECTOR_SIZE=4096 # other geometry, rebuilds everything
 scripts/run_demo.sh
 ```
+
+`cb-flash geometry` prints the build's geometry as a shell-sourceable line.
+`tests/run_matrix.sh` runs the whole suite at four ERASE:SECTOR geometries;
+`make test-compress` runs the compression API and LZ4 tests under ASan/UBSan.
 
 Or drive it by hand. There is no setup step: the device is created on first use
 with the reference binary in its one partition, so its first manifest
@@ -46,7 +52,49 @@ answer is `no update offered` — the comparison is on content, so re-running
 `update` is free and idempotent. `scripts/lab.sh reset` forgets the device so it
 ships fresh again.
 
-## Architecture
+## Benchmarks
+
+`tests/run_all.sh` output, one row per `tests/case_*.sh`, default geometry
+(`ERASE_SIZE=1024 SECTOR_SIZE=1024`, 104 448 B raw image = 102 sectors).
+`wire_stats` in `tests/common.sh` derives these numbers from the client's own
+`device: wire tx=.. rx=.. bytes (framing overhead ..)` log line (`lib/client.c`),
+which counts real frame bytes, not an estimate. Reproduce with
+`bash tests/run_all.sh`.
+
+Bytes saved = the 104 448 B raw image minus rx, i.e. against a naive scheme
+that reflashes the whole image every request. tx (manifest + auth, the device
+telling the server what it already has) is not counted as savable — a naive
+scheme would not pay it, so it is this approach's fixed overhead, not part of
+what it saves.
+
+| Case | What it exercises | tx | rx | rx framing overhead | rx vs raw image | bytes saved |
+|---|---|--:|--:|--:|--:|--:|
+| `case_copy_dedup` | `OP_COPY` plus one interleaved write | 3722 B | 2418 B | 160 B (6.6%) | 2.3% | 102030 B (97.7%) |
+| `case_lz4_compressible` | a repetitive (16-byte motif) sector | 3708 B | 1330 B | 120 B (9.0%) | 1.3% | 103118 B (98.7%) |
+| `case_lz4_dict` (step 2: insertion shifts 63 sectors) | LZ4 with the old sector as dictionary | 4562 B | 6105 B | 1310 B (21.5%) | 5.8% | 98343 B (94.2%) |
+| `case_lz4_uniform_00` | a uniform `0x00` sector | 3708 B | 1314 B | 120 B (9.1%) | 1.3% | 103134 B (98.7%) |
+| `case_lz4_uniform_ff` | a uniform `0xFF` sector | 3708 B | 1314 B | 120 B (9.1%) | 1.3% | 103134 B (98.7%) |
+| `case_many_writes` | 23 ordinary `STEP_WRITE`s, no dedup/compression available | 4002 B | 26228 B | 1200 B (4.6%) | 25.1% | 78220 B (74.9%) |
+| `case_noop_rerun` (2nd request) | device already matches the release: bare handshake | 3668 B | 46 B | 30 B (65.2%) | 0.0% | 104402 B (100.0%) |
+
+**Grand total, every `update()` request this run made (11, including
+`case_lz4_dict`'s other three):** tx = 41 910 B (2890 B framing, 6.9%),
+rx = 44 215 B (3530 B framing, 8.0%) — **3.8%** of 1 148 928 B of
+raw-image-equivalent traffic (11 requests × the 104 448 B raw image) —
+**1 104 713 B saved, 96.2%**.
+
+Framing overhead (the `| 0xA5 0x5A | len | type | seq | payload | crc32 |`
+wrapper, `DESIGN.md` section 6) is a *larger* share of rx the smaller the
+payload is — it's fixed per frame, so a near-empty response (`noop_rerun`,
+65.2%) pays proportionally more than a 63-sector plan (`lz4_dict`, 21.5%).
+That column is about where rx's own bytes go, not about savings.
+
+The worst case here (`many_writes`, 74.9% saved) is the floor: 23 of 102
+sectors changed with content that neither dedups nor compresses, and it
+still cuts traffic by three quarters. The best realistic case (`copy_dedup`/
+`lz4_*`, ~98%) matches `DESIGN.md`'s stated "typical release lands around
+10–15% of a full image" (these synthetic cases do better because the patches
+are small and either duplicate existing content or compress trivially).
 
 Two processes and one file. The server owns the releases; the device owns the
 flash and is the only thing that writes it. Nothing else is shared.
@@ -54,8 +102,8 @@ flash and is the only thing that writes it. Nothing else is shared.
 ```
   cb-server --image release.bin                     cb-client --flash flash.bin
   +-----------------------------------+             +-----------------------------------+
-  | release.bin   raw firmware        |             | manifest.c  md5 of all 104        |
-  |                                   |             |             sectors, 8 B each     |
+  | release.bin   raw firmware        |             | manifest.c  sha256 of all 102     |
+  |                                   |             |             sectors, 32 B each    |
   |                                   |             |             order implicit        |
   | image.c   wrap into an image:     |             | client.c    receive blobs, write  |
   |           descriptor at 0x200,    |             |             them straight into    |
@@ -111,28 +159,36 @@ the progress record, so the next request re-diffs and sends only the gap.
     |-- HELLO  id, geometry, version + image hash --------------->|
     |<-- CHALLENGE  16-byte nonce --------------------------------|
     |                                                             |
-    |   md5 every sector of the partition (104 x 1 KB)            |
+    |   sha256 every sector of the partition (102 x 1 KB)         |
     |-- MANIFEST_DIGEST  sha256 of the body, MAC over the nonce ->|
     |<-- MANIFEST_NEEDED  only on a cache miss -------------------|
-    |-- MANIFEST  836 B of body, fragmented --------------------->|
+    |-- MANIFEST  body, fragmented (size: see DESIGN.md sec. 18) >|
     |-- MANIFEST_END  digest + MAC ------------------------------>|
     |                              verify MAC, nonce, structure   |
     |                      build the target, diff it per sector   |
     |<-- PLAN_BEGIN  version, steps, sha256 + MAC ----------------|
     |                                                             |
-    |<-- STEP_WRITE  dst, offset, 256 B   (x4 per sector) --------|
-    |<-- STEP_WRITE_END  dst, md5 --------------------------------|
-    |   check md5, erase the page, program, re-read, check        |
-    |-- STEP_ACK  dst ------------------------------------------->|
-    |<-- STEP_COPY  dst, src index, md5 --------------------------|
-    |   recorded only; the bootloader does the copying            |
-    |-- STEP_ACK  dst ------------------------------------------->|
+    |   every step streamed with no per-step wait:                |
+    |<-- STEP_WRITE  dst, offset, <=256 B of the encoded sector --|
+    |<-- STEP_WRITE_END  dst, compress id, enc_len, hash ---------|
+    |<-- STEP_COPY  dst, src index, hash -------------------------|
+    |   ... (one of the two, once per step, until the plan ends)  |
     |<-- PLAN_END ------------------------------------------------|
+    |                                                             |
+    |   per STEP_WRITE_END: decompress, check the hash, then      |
+    |   hand the sector to a flash-write worker and start filling |
+    |   the other buffer with the next STEP_WRITE - so one        |
+    |   sector's erase/program overlaps the next one's transfer;  |
+    |   per STEP_COPY: recorded only, the bootloader copies later |
+    |   each step's ACK/NAK follows once its work is done, in the |
+    |   order the steps were sent:                                |
+    |-- STEP_ACK/NAK  dst  (one per step, same order as above) -->|
+    |                                                             |
     |-- PLAN_READY  steps left for the bootloader --------------->|
     |<-- COMMIT --------------------------------------------------|
     |                                                             |
     |   arm the plan: clear one journal half-word, reboot         |
-    |   bootloader: run the copies, re-check every md5,           |
+    |   bootloader: run the copies, re-check every hash,          |
     |               check image_sha256 and the signature          |
     |   verifies -> boot it; fails -> ask for another release     |
 ```
@@ -189,27 +245,35 @@ stable link order are what keep a one-line fix from costing a full transfer.
 |---|---|
 | `cb-server --image FILE` | serves one release; re-reads the file each request |
 | `cb-client --flash FILE --initial FILE` | the device: one request, start to finish |
-| `cb-flash` | `manifest`, `find` (which sector holds a hash), `map`, `mutate` (build a test release) |
+| `cb-flash` | `manifest`, `find` (which sector holds a hash), `map`, `geometry`, `mutate` (build a test release) |
 
 | Source | Covers |
 |---|---|
-| `flash.c` | Page erase, half-word program with the bits-only-clear rule, meta bank ping-pong, journal |
+| `flash.c` | Page erase, half-word program with the bits-only-clear and one-program-per-erase rules, meta bank ping-pong, journal |
 | `manifest.c` | Canonical manifest body, digest, MAC, structural checks |
 | `plan.c` | The three planner rules of `DESIGN.md` section 5 |
 | `image.c` | Image descriptor at partition offset `0x200`, `image_sha256` with the descriptor hole, installing an image |
+| `compress.c`, `lz4.c` | Compressor registry and the LZ4 compressors. Sectors go out raw, LZ4, or LZ4 with the old sector as dictionary, whichever is smallest |
 | `frame.c` | `A5 5A \| len \| type \| seq \| payload \| crc32` framing and the byte counters |
 | `client.c` | The request, then the bootloader: apply, verify, trial boot, confirm |
 
-The flash map is `cb-flash map`, and it is the layout from `DESIGN.md`
-section 2 with the identity page from 10.2:
+The flash map is `cb-flash map`, in erase units, and it is the layout from
+`DESIGN.md` section 2 with the identity unit from 10.2 (this is the default
+1 KB / 1 KB geometry):
 
 ```
-bootloader          0-14     0x00000     15360
-device identity    15        0x03c00      1024
-meta bank 0        16-19     0x04000      4096
-meta bank 1        20-23     0x05000      4096
-application        24-127    0x06000    106496
+bootloader        0-14       0x00000      15360
+device identity   15         0x03c00       1024
+meta bank 0       16-20      0x04000       5120
+meta bank 1       21-25      0x05400       5120
+application       26-127     0x06800     104448
 ```
+
+The server keeps a sector store next to its manifest cache,
+`<cache>/sectors/<hash>`, one file per sector it has served. A stored sector
+is the dictionary for the same sector's next version, which is why a code
+shift costs about 1 % of the raw bytes. Entries are re-hashed on read, so a
+damaged file is just a miss.
 
 ## What this PoC does not do
 
@@ -239,8 +303,12 @@ Writing it turned up three mistakes in `DESIGN.md`, all fixed there:
 1. **The journal encoding could not work.** Section 2 specified
    `0xFFFF -> 0xAAAA -> 0x5555 -> 0x0000` while claiming bits only ever go from
    1 to 0. `0xAAAA -> 0x5555` sets every other bit, so it needs a page erase.
-   Now `0xFFFF -> 0xFFF0 -> 0xFF00 -> 0x0000`, and the emulated flash rejects
-   any program that sets a bit, so it is enforced rather than asserted.
+   Bits-only-clear turned out not to be the binding rule either: an F103 also
+   refuses to reprogram a half-word that is not `0xFFFF`, except with `0x0000`,
+   so the replacement `0xFFFF -> 0xFFF0 -> 0xFF00 -> 0x0000` would have raised
+   `PGERR` on its middle step. The encoding is now the three states a half-word
+   really has, `0xFFFF -> 0xFF00 -> 0x0000`, and the emulated flash enforces
+   both rules rather than asserting them.
 2. **The manifest nonce broke manifest elision.** Section 4 put the server
    nonce inside the manifest body and hashed the body, so `manifest_sha256`
    changed every session and the cache in 17.1 could never hit. The body is now
@@ -289,44 +357,3 @@ Note what the old encoding did *not* buy here: when an entry carried its own
 `index`, hash-to-sector was still a scan of every entry — the index field only
 told you where the matched entry claimed to live. Making the position the index
 removed the field and the possibility of it disagreeing with reality.
-
-## Manifest encoding, before and after
-
-The manifest started as one entry per sector carrying its own index and a full
-MD5. Both fields turned out to be payable.
-
-| | Before | After |
-|---|---|---|
-| Entry | `{index:u16, md5:u8[16]}` | `hash:u8[8]` |
-| Entry size | 18 B | **8 B** |
-| Order | explicit, in the entry | implicit: sector `i` is `hashes[i]` |
-| Body, 104 sectors | 1876 B | **836 B** |
-| Body, 1000 sectors (1 MB part) | 18 008 B | **8 004 B** |
-| Stored plan, `meta_t` | 2068 B | **1236 B** |
-| One request on the wire | 11 396 B | **7 992 B** |
-| Repeated or missing sector | a case to validate | unrepresentable |
-| False "already correct" | none | ~3e-16 at 104 sectors, ~3e-14 at 1000 |
-| Compressor on the device | — | still none |
-
-What the two changes cost, stated honestly: nothing for the implicit order, and
-a 64-bit equality test for the truncation. A collision there would make the
-planner skip a sector that really did differ, and the staged image would then
-fail `image_sha256` — so the failure mode is a retried update, not a corrupt
-device. `DESIGN.md` section 10 is the full argument.
-
-For comparison, what a general compressor achieves on the same data:
-
-| Form | Raw | gzip -9 | xz -9 | zstd -19 |
-|---|---|---|---|---|
-| Old entries, partition 57 % erased | 1876 | 1039 | 1000 | 928 |
-| Hashes only, 16 B, same device | 1664 | 810 | 840 | 759 |
-| Hashes only, 8 B, same device | 832 | 418 | 464 | 391 |
-| 16 B hashes, all distinct (full partition) | 1664 | **1695** | — | **1678** |
-| 8 B hashes, all distinct (full partition) | 832 | **862** | — | **846** |
-
-The last two rows are the point: compression of a full manifest is negative,
-because hash output is uniformly random. Every apparent win above comes from a
-partially used partition hashing many identical erased pages — a property of
-this device today, not of the format. Encoding got 55 % unconditionally;
-compression got 50 % only while the partition was half empty, and would have
-needed a decompressor in a 15 KB bootloader to do it.

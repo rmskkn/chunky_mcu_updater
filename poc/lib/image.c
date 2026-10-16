@@ -78,11 +78,8 @@ int image_install(flash_t *f, const uint8_t *bin, size_t binlen,
 
     if (image_build(bin, binlen, version, root_key, img) < 0) { free(img); return -1; }
 
-    for (int i = 0; i < APP_PAGES; i++) {
-        flash_erase_page(f, APP_PAGE + i);
-        flash_program(f, (size_t)(APP_PAGE + i) * PAGE_SIZE,
-                      img + (size_t)i * PAGE_SIZE, PAGE_SIZE);
-    }
+    for (int i = 0; i < SECTORS_SLOT; i++)
+        flash_write_app_sector(f, (sector_idx_t)i, img + (size_t)i * SECTOR_SIZE);
     free(img);
 
     meta_load(f, &m);

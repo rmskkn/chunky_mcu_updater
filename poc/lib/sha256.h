@@ -17,8 +17,6 @@ void sha256_update(sha256_t *s, const void *data, size_t len);
 void sha256_final(sha256_t *s, uint8_t out[SHA256_LEN]);
 void sha256(const void *data, size_t len, uint8_t out[SHA256_LEN]);
 
-/* PoC stand-in for the release and device signatures. Production uses
- * ECDSA P-256 with RFC 6979 deterministic k (DESIGN.md section 10.2). */
 void hmac_sha256(const uint8_t *key, size_t keylen,
                  const void *data, size_t len, uint8_t out[SHA256_LEN]);
 

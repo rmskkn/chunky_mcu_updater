@@ -1,17 +1,16 @@
-/* cb-client: the device. Owns an emulated flash file, runs an update session,
- * then acts as the bootloader that applies, verifies, unrolls and reverts.
- * DESIGN.md sections 4, 6, 7, 8. */
-#include "frame.h"
-#include "proto.h"
+/* cb-client CLI: argv parsing and the device-time report. The device's
+ * actual work - manifest generation, the update session, the bootloader's
+ * apply/verify step - lives in lib/client.c; DESIGN.md sections 4, 6, 7, 8. */
+#include "client.h"
 #include "manifest.h"
 #include "image.h"
 #include "keys.h"
 #include "util.h"
+#include "platform_posix.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <unistd.h>
 
 static const char *opt_flash = "flash.bin";
 static const char *opt_host  = "127.0.0.1";
@@ -19,75 +18,43 @@ static int opt_port = 7700;
 static const char *opt_initial = NULL;
 static int opt_status = 0;
 
-/* Device-time model. The host runs the same code thousands of times faster,
- * so the interesting number is what the work would cost on the part: hashing
- * at the cycles/byte in flash.h, plus RM0008 flash erase and program times.
- * ECDSA costs are the figures DESIGN.md section 10 budgets, not measurements. */
-#define ECDSA_SIGN_MS   250.0
-#define ECDSA_VERIFY_MS 300.0
+static client_update_stats_t g_stats;
 
-static size_t md5_bytes, sha_bytes;
-static double ecdsa_ms;
-
-static double model_ms(const flash_t *f, int worst)
+static void cli_log(void *ctx, const char *line)
 {
-    double cyc_per_ms = F103_MHZ * 1000.0;
-    return (double)md5_bytes * F103_MD5_CYC_B / cyc_per_ms +
-           (double)sha_bytes * F103_SHA256_CYC_B / cyc_per_ms +
-           f103_flash_ms(f->n_erase, f->prog_bytes, worst) + ecdsa_ms;
+    (void)ctx;
+    puts(line);
 }
 
-static void time_report(const char *phase, double host_ms, const flash_t *f)
+/* Device-time model. The host runs the same code thousands of times faster,
+ * so the interesting number is what the work would cost on the part: hashing
+ * at the cycles/byte in flash.h, plus RM0008 flash erase and program times. */
+static double model_ms(const flash_t *f, int worst, const client_update_stats_t *s)
+{
+    double cyc_per_ms = CB_FLASH_MHZ * 1000.0;
+    return (double)s->sha_bytes * CB_FLASH_SHA256_CYC_B / cyc_per_ms +
+           flash_timing_ms(f->n_erase, f->prog_bytes, worst) + s->ecdsa_ms;
+}
+
+static void time_report(const char *phase, double host_ms, const flash_t *f,
+                        const client_update_stats_t *s)
 {
     printf("time: %-10s host %8.2f ms   F103 %8.1f - %.1f ms"
            "  (flash %.1f - %.1f ms: %ld erase, %zu B prog)\n",
-           phase, host_ms, model_ms(f, 0), model_ms(f, 1),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 0),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 1),
+           phase, host_ms, model_ms(f, 0, s), model_ms(f, 1, s),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 0),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 1),
            f->n_erase, f->prog_bytes);
     if (!machine_output()) { fflush(stdout); return; }
     printf("TIME phase=%s host_ms=%.3f model_min_ms=%.1f model_max_ms=%.1f "
            "flash_min_ms=%.1f flash_max_ms=%.1f erases=%ld "
-           "prog_bytes=%zu md5_bytes=%zu sha_bytes=%zu ecdsa_ms=%.0f\n",
-           phase, host_ms, model_ms(f, 0), model_ms(f, 1),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 0),
-           f103_flash_ms(f->n_erase, f->prog_bytes, 1),
+           "prog_bytes=%zu sha_bytes=%zu ecdsa_ms=%.0f\n",
+           phase, host_ms, model_ms(f, 0, s), model_ms(f, 1, s),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 0),
+           flash_timing_ms(f->n_erase, f->prog_bytes, 1),
            f->n_erase, f->prog_bytes,
-           md5_bytes, sha_bytes, ecdsa_ms);
+           s->sha_bytes, s->ecdsa_ms);
     fflush(stdout);
-}
-
-/* Opens the device, creating it on first use with the firmware it shipped
- * with in slot 0. The manifest the client sends is a statement about real
- * flash contents, so the device has to have some. */
-static void open_device(flash_t *f)
-{
-    if (flash_open(f, opt_flash) == 0) return;
-    if (errno != ENOENT) die("cannot open %s: %s", opt_flash, strerror(errno));
-    if (!opt_initial)
-        die("%s does not exist\n"
-            "  pass --initial FILE: the firmware the device shipped with,\n"
-            "  which is what its first manifest describes",
-            opt_flash);
-
-    size_t binlen;
-    uint8_t *bin = read_file(opt_initial, &binlen);
-    if (!bin) die("cannot read %s", opt_initial);
-    if (flash_create(opt_flash) < 0) die("cannot create %s", opt_flash);
-    /* Seed with the fault injection and the counters off: this is the factory
-     * programmer's work, not the update's, and it must not show up in either
-     * the timings or --fail-after. */
-    if (flash_open(f, opt_flash) < 0) die("cannot open %s", opt_flash);
-
-    uint8_t root_key[32];
-    poc_root_key(root_key);
-    if (image_install(f, bin, binlen, 1, root_key) < 0)
-        die("%s is %zu B, over the %d B slot payload", opt_initial, binlen, IMG_MAX_PAYLOAD);
-    free(bin);
-    printf("device: created %s with %s as version 1\n", opt_flash, opt_initial);
-
-    f->n_erase = f->n_prog = 0;
-    f->prog_bytes = 0;
 }
 
 static const char *state_name(int st)
@@ -96,320 +63,69 @@ static const char *state_name(int st)
     return (st >= 0 && st <= 4) ? n[st] : "?";
 }
 
-static uint32_t app_version(flash_t *f)
-{
-    const image_desc_t *d = image_desc(flash_at(f, APP_BASE));
-    return d->magic == IMG_MAGIC ? d->version : 0;
-}
-
-static void write_sector(flash_t *f, int index, const uint8_t *data)
-{
-    flash_erase_page(f, APP_PAGE + index);
-    flash_program(f, (size_t)(APP_PAGE + index) * PAGE_SIZE, data, PAGE_SIZE);
-}
-
 /* ---------------------------------------------------------------- session */
 
 /* 0 = a plan was staged, 1 = nothing to do. */
 static int cmd_session(void)
 {
     flash_t f;
-    meta_t m;
-    link_t l;
-    manifest_t man;
-    uint8_t pay[FRAME_MAX_PAYLOAD];
-    size_t n;
     uint8_t dev_key[32], root_key[32];
-    int rc = 0;
-
     poc_dev_key(dev_key);
     poc_root_key(root_key);
 
-    open_device(&f);
-    identity_t *id = identity_get(&f);
-    meta_load(&f, &m);
+    device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL);
 
-    double t_start = now_ms(), t_manifest = 0, t_auth = 0, t_stage = 0, t_persist = 0;
-
-    int fd = tcp_connect(opt_host, opt_port);
-    if (fd < 0)
+    plat_io_t *io = plat_io_tcp_connect(opt_host, opt_port);
+    if (!io)
         die("cannot connect to %s:%d: %s\n"
             "  no server is listening there; start one in another terminal:\n"
             "    scripts/lab.sh server",
             opt_host, opt_port, strerror(errno));
-    link_init(&l, fd);
 
-    msg_hello_t h;
-    memset(&h, 0, sizeof h);
-    memcpy(h.device_id, id->device_id, 16);
-    h.sector_size     = PAGE_SIZE;
-    h.sectors         = SECTORS_SLOT;
-    h.last_result     = (uint8_t)m.last_result;
-    h.running_version = app_version(&f);
-    {
-        const uint8_t *app = flash_at(&f, APP_BASE);
-        if (image_desc(app)->magic == IMG_MAGIC) image_hash(app, h.running_sha256);
-    }
-    frame_send(&l, MSG_HELLO, &h, sizeof h);
+    double t_start = now_ms();
+    int rc = client_update_session(&f, io, dev_key, cli_log, NULL, &g_stats);
+    double session_ms = now_ms() - t_start;
 
-    if (frame_expect(&l, MSG_CHALLENGE, pay, &n) < 0) die("no CHALLENGE");
-    msg_challenge_t ch;
-    memcpy(&ch, pay, sizeof ch);
-
-    double t0 = now_ms();
-    manifest_build(&f, &man);
-    t_manifest = now_ms() - t0;
-    md5_bytes += (size_t)MANIFEST_ENTRIES * PAGE_SIZE;   /* both slots hashed */
-
-    t0 = now_ms();
-    msg_manifest_auth_t auth;
-    manifest_digest(&man, auth.manifest_sha256);
-    manifest_mac(dev_key, id->device_id, ch.nonce, auth.manifest_sha256, auth.mac);
-    t_auth = now_ms() - t0;
-    sha_bytes += MANIFEST_BODY_LEN;
-    ecdsa_ms += ECDSA_SIGN_MS;        /* the real signature, not this HMAC */
-    frame_send(&l, MSG_MANIFEST_DIGEST, &auth, sizeof auth);
-
-    int t = frame_recv(&l, pay, &n);
-    if (t == MSG_MANIFEST_NEEDED) {
-        const uint8_t *body = (const uint8_t *)&man;
-        for (size_t off = 0; off < MANIFEST_BODY_LEN; off += 256) {
-            uint8_t buf[4 + 256];
-            uint16_t len = (uint16_t)(MANIFEST_BODY_LEN - off < 256 ? MANIFEST_BODY_LEN - off : 256);
-            uint16_t o16 = (uint16_t)off;
-            memcpy(buf, &o16, 2);
-            memcpy(buf + 2, &len, 2);
-            memcpy(buf + 4, body + off, len);
-            frame_send(&l, MSG_MANIFEST, buf, 4 + len);
-        }
-        frame_send(&l, MSG_MANIFEST_END, &auth, sizeof auth);
-        printf("device: full manifest sent (%zu B of body)\n", MANIFEST_BODY_LEN);
-        t = frame_recv(&l, pay, &n);
-    } else {
-        printf("device: manifest digest accepted, body elided\n");
-    }
-
-    if (t == MSG_NO_UPDATE)        { printf("device: no update offered\n"); rc = 1; goto done; }
-    if (t == MSG_MANIFEST_REJECT)  { printf("device: manifest rejected, reason %u\n", pay[0]); rc = 1; goto done; }
-    if (t != MSG_PLAN_BEGIN)       die("protocol: expected PLAN_BEGIN, got %d", t);
-
-    msg_plan_begin_t pb;
-    memcpy(&pb, pay, sizeof pb);
-    printf("device: plan v%u, %u steps\n", pb.version, pb.step_count);
-
-    meta_t np;
-    meta_init(&np);
-    np.generation   = m.generation;
-    np.plan_state   = PLAN_STAGING;
-    np.target_version = pb.version;
-    np.step_count   = pb.step_count;
-    memcpy(np.target_sha256, pb.image_sha256, SHA256_LEN);
-    memcpy(np.target_mac, pb.image_mac, SHA256_LEN);
-
-    uint8_t sect[PAGE_SIZE];
-    uint8_t done[SECTORS_SLOT];
-    memset(done, 0, sizeof done);
-    int pending_copies = 0;
-    t0 = now_ms();
-
-    for (;;) {
-        t = frame_recv(&l, pay, &n);
-        if (t < 0) die("link closed mid-plan");
-        if (t == MSG_PLAN_END) break;
-
-        if (t == MSG_STEP_COPY) {
-            msg_step_copy_t c;
-            memcpy(&c, pay, sizeof c);
-            if (c.dst >= SECTORS_SLOT) die("bad sector index %u", c.dst);
-            /* Recorded only. The bootloader does flash-to-flash copies
-             * (DESIGN.md section 7 step 2). */
-            np.op[c.dst]        = OP_COPY;
-            np.src_index[c.dst] = c.src_index;
-            memcpy(np.target_hash[c.dst], c.hash, SECTOR_HASH_LEN);
-            pending_copies++;
-            msg_step_ack_t a = { c.dst, 0 };
-            frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
-        } else if (t == MSG_STEP_WRITE) {
-            sector_idx_t dst;
-            uint16_t off, len;
-            memcpy(&dst, pay + 0, 2);
-            memcpy(&off, pay + 2, 2);
-            memcpy(&len, pay + 4, 2);
-            if (dst >= SECTORS_SLOT || (size_t)off + len > PAGE_SIZE)
-                die("bad write fragment");
-            memcpy(sect + off, pay + WRITE_HDR, len);
-        } else if (t == MSG_STEP_WRITE_END) {
-            msg_step_write_end_t we;
-            memcpy(&we, pay, sizeof we);
-            uint8_t got[SECTOR_HASH_LEN];
-            sector_hash(sect, got);
-            if (memcmp(got, we.hash, SECTOR_HASH_LEN)) {
-                msg_step_ack_t nak = { we.dst, NAK_MD5_MISMATCH };
-                frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
-                printf("device: sector %u md5 mismatch\n", we.dst);
-                continue;
-            }
-            write_sector(&f, we.dst, sect);
-            flash_sector_hash(&f, we.dst, got);
-            if (memcmp(got, we.hash, SECTOR_HASH_LEN)) {
-                msg_step_ack_t nak = { we.dst, NAK_FLASH_FAIL };
-                frame_send(&l, MSG_STEP_NAK, &nak, sizeof nak);
-                continue;
-            }
-            md5_bytes += 2 * PAGE_SIZE;   /* hash of the buffer and of the page */
-            np.op[we.dst] = OP_WRITE;
-            memcpy(np.target_hash[we.dst], we.hash, SECTOR_HASH_LEN);
-            done[we.dst] = 1;
-            msg_step_ack_t a = { we.dst, 0 };
-            frame_send(&l, MSG_STEP_ACK, &a, sizeof a);
-        } else {
-            die("protocol: unexpected message %d during plan", t);
-        }
-    }
-
-    t_stage = now_ms() - t0;
-
-    /* Persist the plan once, then mark the sectors already in flash.
-     * meta_store() erases the target bank, so it must come first. */
-    t0 = now_ms();
-    meta_store(&f, &np);
-    for (int i = 0; i < SECTORS_SLOT; i++)
-        if (done[i]) journal_set(&f, i, JRN_VERIFIED);
-    t_persist = now_ms() - t0;
-
-    msg_plan_ready_t pr = { (uint16_t)pending_copies };
-    frame_send(&l, MSG_PLAN_READY, &pr, sizeof pr);
-
-    t = frame_recv(&l, pay, &n);
-    if (t == MSG_COMMIT) {
-        journal_set(&f, JRN_ARM_INDEX, 0x0000);   /* arm: plan is committed */
-        printf("device: plan armed, %d copies left for the bootloader; reboot to apply\n",
-               pending_copies);
-    } else {
-        printf("device: no COMMIT, plan left unarmed and will be unrolled at boot\n");
-    }
-
-done:
-    printf("device: wire tx=%llu rx=%llu bytes\n",
-           (unsigned long long)l.tx_bytes, (unsigned long long)l.rx_bytes);
     printf("time: manifest   host %8.2f ms   F103 model %8.1f ms  (%d sectors hashed)\n",
-           t_manifest, (double)MANIFEST_ENTRIES * PAGE_SIZE * F103_MD5_CYC_B / (F103_MHZ * 1000.0),
+           g_stats.t_manifest, (double)MANIFEST_ENTRIES * SECTOR_SIZE * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0),
            MANIFEST_ENTRIES);
     printf("time: sign       host %8.2f ms   F103 model %8.1f ms  (ECDSA P-256, budgeted)\n",
-           t_auth, ECDSA_SIGN_MS);
+           g_stats.t_auth, ECDSA_SIGN_MS);
     printf("time: stage      host %8.2f ms   F103 %8.1f - %.1f ms  (receive, verify, program)\n",
-           t_stage, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
-           f103_flash_ms(f.n_erase, f.prog_bytes, 1));
-    printf("time: persist    host %8.2f ms\n", t_persist);
-    time_report("session", now_ms() - t_start, &f);
-    close(fd);
+           g_stats.t_stage, flash_timing_ms(f.n_erase, f.prog_bytes, 0),
+           flash_timing_ms(f.n_erase, f.prog_bytes, 1));
+    printf("time: persist    host %8.2f ms\n", g_stats.t_persist);
+    time_report("session", session_ms, &f, &g_stats);
+
+    plat_io_close(io);
     flash_close(&f);
     return rc;
 }
 
 /* ------------------------------------------------------------- bootloader */
 
-/* Applies whatever the session staged, then decides whether the partition is
- * bootable. With one partition there is nothing to fall back to: a failure is
- * reported and the next request is the recovery path. */
 static int cmd_boot(void)
 {
     flash_t f;
-    meta_t m;
     uint8_t root_key[32];
-    const char *why;
-
     poc_root_key(root_key);
-    open_device(&f);
-    double t_start = now_ms(), t_apply = 0, t_verify = 0;
-    meta_load(&f, &m);
 
-    if (m.plan_state == PLAN_STAGING && journal_get(&f, JRN_ARM_INDEX) != 0x0000) {
-        printf("boot: plan was never committed, discarding it\n");
-        m.plan_state  = PLAN_NONE;
-        m.last_result = RES_VERIFY_FAILED;
-        meta_store(&f, &m);
-    } else if (m.plan_state == PLAN_STAGING) {
-        printf("boot: applying plan v%u\n", m.target_version);
-        double t0 = now_ms();
-        for (int i = 0; i < SECTORS_SLOT; i++) {
-            if (m.op[i] == OP_NONE || journal_get(&f, i) == JRN_DONE) continue;
+    device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL);
 
-            uint8_t got[SECTOR_HASH_LEN];
-            if (m.op[i] == OP_COPY) {
-                /* Flash to flash inside the partition, through RAM. */
-                uint8_t tmp[PAGE_SIZE];
-                memcpy(tmp, flash_at(&f, APP_BASE +
-                       (size_t)m.src_index[i] * PAGE_SIZE), PAGE_SIZE);
-                sector_hash(tmp, got);
-                if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
-                    printf("boot: copy source for sector %d no longer matches\n", i);
-                    m.plan_state = PLAN_BAD;
-                    break;
-                }
-                write_sector(&f, i, tmp);
-            }
-            flash_sector_hash(&f, i, got);
-            if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
-                printf("boot: sector %d does not match the plan\n", i);
-                m.plan_state = PLAN_BAD;
-                break;
-            }
-            journal_set(&f, i, JRN_DONE);
-            md5_bytes += 2 * PAGE_SIZE;
-        }
-        t_apply = now_ms() - t0;
+    double t_start = now_ms();
+    client_update_boot(&f, root_key, cli_log, NULL, &g_stats);
+    double boot_ms = now_ms() - t_start;
 
-        if (m.plan_state != PLAN_BAD) {
-            t0 = now_ms();
-            uint8_t hsh[SHA256_LEN];
-            const uint8_t *app = flash_at(&f, APP_BASE);
-            image_hash(app, hsh);
-            sha_bytes += SLOT_SIZE - DESC_LEN;
-            ecdsa_ms += ECDSA_VERIFY_MS;
-            if (memcmp(hsh, m.target_sha256, SHA256_LEN) ||
-                image_verify_hashed(app, root_key, hsh, &why) < 0) {
-                printf("boot: the staged image does not verify (%s)\n",
-                       why ? why : "image_sha256 mismatch");
-                m.plan_state = PLAN_BAD;
-            } else {
-                m.plan_state  = PLAN_COMMITTED;
-                m.last_result = RES_OK;
-            }
-            t_verify = now_ms() - t0;
-        }
-        meta_store(&f, &m);
-    }
-
-    {
-        const uint8_t *app = flash_at(&f, APP_BASE);
-        uint8_t hsh[SHA256_LEN];
-        image_hash(app, hsh);
-        sha_bytes += SLOT_SIZE - DESC_LEN;
-        if (image_verify_hashed(app, root_key, hsh, &why) < 0) {
-            /* No second partition, so this is as far as the device gets: it
-             * keeps asking for a release until one verifies. */
-            printf("boot: no bootable image (%s); requesting an update\n", why);
-            if (m.plan_state != PLAN_BAD) {
-                m.plan_state  = PLAN_BAD;
-                m.last_result = RES_VERIFY_FAILED;
-                meta_store(&f, &m);
-            }
-        } else {
-            printf("boot: booting version %u\n", app_version(&f));
-        }
-    }
-
-    if (t_apply > 0)
+    if (g_stats.t_apply > 0)
         printf("time: apply      host %8.2f ms   F103 %8.1f - %.1f ms  (copies)\n",
-               t_apply, f103_flash_ms(f.n_erase, f.prog_bytes, 0),
-               f103_flash_ms(f.n_erase, f.prog_bytes, 1));
-    if (t_verify > 0)
+               g_stats.t_apply, flash_timing_ms(f.n_erase, f.prog_bytes, 0),
+               flash_timing_ms(f.n_erase, f.prog_bytes, 1));
+    if (g_stats.t_verify > 0)
         printf("time: verify     host %8.2f ms   F103 %8.1f ms  "
-               "(image_sha256 + signature)\n", t_verify,
-               (double)(SLOT_SIZE - DESC_LEN) * F103_SHA256_CYC_B / (F103_MHZ * 1000.0)
+               "(image_sha256 + signature)\n", g_stats.t_verify,
+               (double)(SLOT_SIZE - DESC_LEN) * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0)
                + ECDSA_VERIFY_MS);
-    time_report("boot", now_ms() - t_start, &f);
+    time_report("boot", boot_ms, &f, &g_stats);
     flash_close(&f);
     return 0;
 }
@@ -423,10 +139,10 @@ static int cmd_status(void)
     char hex[80];
     const char *why;
 
-    open_device(&f);
+    poc_root_key(rk);
+    device_open_or_create(&f, opt_flash, opt_initial, rk, cli_log, NULL);
     identity_t *id = identity_get(&f);
     meta_load(&f, &m);
-    poc_root_key(rk);
 
     hexdump_line(id->device_id, 8, hex);
     printf("device_id       %s...\n", hex);
@@ -437,7 +153,7 @@ static int cmd_status(void)
     int ok = image_verify(app, rk, &why);
     printf("application     %s  version %u  %s\n",
            image_desc(app)->magic == IMG_MAGIC ? "image   " : "no image",
-           app_version(&f), ok == 0 ? "verified" : why);
+           client_app_version(&f), ok == 0 ? "verified" : why);
 
     manifest_build(&f, &man);
     manifest_digest(&man, d);

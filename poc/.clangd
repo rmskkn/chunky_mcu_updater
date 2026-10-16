@@ -1,0 +1,6 @@
+CompileFlags:
+  CompilationDatabase: .
+  Add: [-Wall, -Wextra]
+
+Diagnostics:
+  UnusedIncludes: None
