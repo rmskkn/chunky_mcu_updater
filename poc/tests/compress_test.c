@@ -1,6 +1,7 @@
-/* compress.c and lz4.c under ASan/UBSan (make test-compress). Buffers are
+/* lib/compress.c and middleware/lz4.c under ASan/UBSan (make test-compress). Buffers are
  * exact-size heap allocations so an over-read or overrun is a sanitizer report. */
 #include "compress.h"
+#include "lz4.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -218,6 +219,7 @@ static void test_custom(void)
 
 int main(void)
 {
+    CHECK(lz4_register() == 0, "LZ4 registration failed");
     test_roundtrips();
     test_dict_shift();
     test_rejects();

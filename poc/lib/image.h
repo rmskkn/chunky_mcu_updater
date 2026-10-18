@@ -34,17 +34,15 @@ void image_hash(const uint8_t *slot, uint8_t out[SHA256_LEN]);
 int  image_build(const uint8_t *bin, size_t binlen, uint32_t version,
                  const uint8_t root_key[32], uint8_t out[SLOT_SIZE]);
 
-/* 0 = good, else a reason string in *why. */
-int  image_verify(const uint8_t *slot, const uint8_t root_key[32], const char **why);
-/* Same, reusing a hash the caller already computed over the slot. */
-int  image_verify_hashed(const uint8_t *slot, const uint8_t root_key[32],
-                         const uint8_t h[SHA256_LEN], const char **why);
-
 const image_desc_t *image_desc(const uint8_t *slot);
 
-/* Writes a raw firmware binary into the application partition as a signed
- * image: what a factory programmer or a debugger would leave behind. */
-int  image_install(flash_t *f, const uint8_t *bin, size_t binlen,
-                   uint32_t version, const uint8_t root_key[32]);
+/* The image in the application partition, read through flash_read() in
+ * FLASH_READ_CHUNK pieces: the device never holds the slot in RAM. */
+void image_hash_flash(flash_t *f, uint8_t out[SHA256_LEN]);
+void image_desc_read(flash_t *f, image_desc_t *d);
+/* Checks the partition's descriptor against h, a hash the caller already
+ * computed with image_hash_flash(). 0 = good, else a reason string in *why. */
+int  image_verify_flash(flash_t *f, const uint8_t root_key[32],
+                        const uint8_t h[SHA256_LEN], const char **why);
 
 #endif

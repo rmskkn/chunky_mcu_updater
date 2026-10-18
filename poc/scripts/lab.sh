@@ -7,7 +7,8 @@
 #   scripts/lab.sh update         ask the server for it: build and send the
 #                                 manifest, take the delta, apply, verify
 #   scripts/lab.sh status         where the device stands
-#   scripts/lab.sh manifest|map   inspect the flash
+#   scripts/lab.sh manifest       inspect the flash
+#   scripts/lab.sh map            print this build's flash layout
 #   scripts/lab.sh reset          forget the device, so it ships fresh again
 #
 # The device is created on first use with the reference binary in its one
@@ -58,8 +59,11 @@ update)
 status)
     exec "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --status
     ;;
-manifest|map)
-    exec "$CB_FLASH" "$cmd" "$FLASH"
+manifest)
+    exec "$CB_FLASH" manifest "$FLASH"
+    ;;
+map)
+    exec "$CB_FLASH" map
     ;;
 reset)
     rm -f "$FLASH"; rm -rf "$CACHE"

@@ -40,3 +40,9 @@ const compressor_t lz4_compressor = {
 const compressor_t lz4_dict_compressor = {
     COMPRESS_LZ4_DICT, "lz4+dict", 1, lz4_dict_compress, lz4_dict_decompress
 };
+
+int lz4_register(void)
+{
+    if (compress_register(&lz4_compressor) < 0) return -1;
+    return compress_register(&lz4_dict_compressor);
+}

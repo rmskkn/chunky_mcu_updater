@@ -19,6 +19,8 @@ Geometry is a build-time choice, baked in via `-D`:
 
 ```sh
 make ERASE_SIZE=1024 SECTOR_SIZE=2048   # rebuild at a different geometry
+make DEVICE=stm32f103cb                 # device catalog entry: device/<DEVICE>/device.toml
+                                        # -> build/device/geometry.h + memory.ld (needs Python 3.11+)
 ./build/cb-flash geometry               # print the geometry a given build was compiled with
 ```
 
@@ -47,7 +49,7 @@ scripts/run_demo.sh
 ./build/cb-server --port PORT --image RELEASE.bin --cache CACHE_DIR
 ./build/cb-client --flash FLASH.bin --initial BASE.bin --port PORT
 ./build/cb-flash manifest FLASH.bin      # per-sector hashes + digest
-./build/cb-flash map FLASH.bin           # flash layout
+./build/cb-flash map                     # this build's flash layout (from geometry.h, no file)
 ./build/cb-flash geometry                # this build's geometry (shell-sourceable)
 ./build/cb-flash mutate IN OUT RUNS SEED # synthesize a new release
 ./build/cb-flash find FLASH.bin HASH     # which sectors hold this hash
@@ -70,5 +72,5 @@ bash tests/run_matrix.sh
 ## Notes
 
 - `make` has no header-dependency bug to work around: object rules depend on every included header, the `Makefile` itself, and a geometry stamp — a plain `make` after editing any `.h` or the `Makefile` recompiles exactly what's needed.
-- `src/client.c` and `lib/client.c` both exist; their object files live in different dirs (`build/obj/bin/` vs `build/obj/`) to avoid a name collision.
+- Object dirs mirror the source layers: `build/obj/` (lib), `build/obj/plat/` (platform), `build/obj/mw/` (middleware), `build/obj/bin/` (src). lib/ is compiled with only `lib/` and `build/device/` on its include path, so a platform/middleware include there fails the build.
 - Tests each get their own scratch dir under `tests/run/<name>` and their own port — safe to run concurrently.

@@ -3,7 +3,7 @@
 #include "platform_io.h"
 
 /* This backend's own TCP constructors. Not part of the generic seam in
- * lib/platform_io.h: connecting, listening and accepting are properties of
+ * middleware/platform_io.h: connecting, listening and accepting are properties of
  * TCP, not of every transport a port might use (UART just opens a port;
  * CAN has no notion of either). A CLI entry point under src/ -- which
  * already links platform_posix.o by name -- includes this directly. */

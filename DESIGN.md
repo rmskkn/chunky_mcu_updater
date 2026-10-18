@@ -71,8 +71,14 @@ META0_UNIT     = ID_UNIT + 1,  META1_UNIT = META0_UNIT + META_UNITS
 APP_BASE       = round_up((META1_UNIT + META_UNITS) * ERASE_SIZE, SECTOR_SIZE)
 ```
 
-At 1 KB / 1 KB this is the single-partition layout of Section 18 byte for byte.
-The A/B tables in this section show the same scheme with two slots.
+The PoC's device catalog (`poc/device/<part>/device.toml`) declares this
+layout per part; `poc/tools/gen_device.py` generates the header compiled in
+at build time and a linker `MEMORY` block from it, and splits the space after the
+meta banks 50/50 into slot A and slot B, each rounded down to a sector. Its
+meta banks carry the journal in a page of their own, so at 1 KB / 1 KB the
+slots are 51 KB each (pages 26-76 and 77-127) rather than the 52 KB of the
+table above. The PoC still updates slot A in place (Section 18); slot B is
+reserved.
 Sector indices are **slot-relative** and always travel with a slot id.
 
 The bootloader is never erased by the update path. It is the only code that can
@@ -87,7 +93,7 @@ bootloader, the root public key, or the device identity.
 | Page | Contents |
 |------|----------|
 | 0    | `MetaHeader`: magic, generation, `active_slot`, `pending_slot`, `plan_state`, `target_version`, target image SHA-256, signature (64 B), `step_count`, and the per-step op/source table (52 × 2 B) |
-| 1    | Target sector manifest: 52 × SHA-256 (32 B), indexed by slot-relative sector |
+| 1    | Target sector manifest: 52 × SHA-256 truncated to `SECTOR_HASH_LEN` (8 B by default), indexed by slot-relative sector |
 | 2    | Progress journal: 52 × 16-bit state word, advanced by clearing bits (no erase) |
 | 3    | Boot attempt log: 16-bit tokens cleared one per trial boot, plus the last 8 boot outcomes |
 
@@ -155,7 +161,7 @@ MANIFEST                                 // fragmented over several frames
   hashes[]      : u8[16]   // one per sector, order implicit
 
 MANIFEST_END                             // one frame, closes the manifest
-  manifest_sha256 : u8[32] // over the reassembled MANIFEST body above
+  manifest_digest : u8[32] // over the reassembled MANIFEST body above
   signature       : u8[64] // device ECDSA P-256 over the struct below
 ```
 
@@ -163,17 +169,21 @@ Two things are deliberately absent from an entry. There is **no index**: the
 manifest always describes every sector in ascending order, so sector `i` is at
 `hashes[i]`, and a manifest that repeats or omits a sector cannot be expressed
 -- which deletes that whole class of malformed input rather than validating
-against it. And the hash is the **full, untruncated SHA-256 (32 B)**: a
-per-sector hash answers one question, "does this sector already hold the
-bytes the target needs", and today is not a trust boundary, since
-`image_sha256` and the release signature gate the result, so a collision
-costs a retried update, not a corrupt device. The full digest (over a
-truncation) is kept so a per-sector hash can later be wrapped in
-HMAC-SHA256 without changing the field width or the wire format. Dropping
-the index takes the body from 34 bytes per sector to 32.
+against it. And the hash is **SHA-256 truncated to `SECTOR_HASH_LEN` bytes, 8 by
+default**: a per-sector hash answers one question, "does this sector already
+hold the bytes the target needs", and is not a trust boundary, since
+`image_sha256` and the release signature gate the result, so a collision --
+accidental (about 1e-13 for 2048 sectors at 8 B) or planted (about 2^32 work
+at 8 B) -- costs a failed update, not a corrupt device. The width is a
+build-time choice from 8 to 32 bytes (`make SECTOR_HASH_LEN=16`, set in
+`lib/protocol.h`); `HELLO` carries it, and the server refuses a device built
+with a different one. Raise it if a per-sector hash ever becomes a trust
+anchor on its own, or is wrapped in HMAC-SHA256, whose tag RFC 2104 section 5
+wants at least 80 bits long (so 16 B). Dropping the index takes the body to
+exactly `SECTOR_HASH_LEN` bytes per sector.
 
 The body carries **no nonce**. It is a pure function of what is in flash, so
-`manifest_sha256` is stable across sessions and the server can cache it, which
+`manifest_digest` is stable across sessions and the server can cache it, which
 is what makes the elision in Section 17.1 possible. Freshness lives in the
 signed structure instead, which is explicit so neither side has to agree on how
 the fragments were cut:
@@ -183,7 +193,7 @@ typedef struct {                /* 72 bytes, hashed then signed            */
     uint8_t  domain[8];         /* "CBMAN\0\0\0" — domain separation       */
     uint8_t  device_id[16];     /* from the identity page                  */
     uint8_t  nonce[16];         /* server's CHALLENGE                      */
-    uint8_t  manifest_sha256[32];
+    uint8_t  manifest_digest[32];
 } ManifestAuth;
 ```
 
@@ -308,7 +318,7 @@ encoded-sector buffer and one frame buffer (~300 B).
 |-----------|---------|---------|
 | → server | `HELLO` | device id, hw rev, bootloader version, sector size, slot geometry, active slot, running version, last update result, factory certificate |
 | → device | `CHALLENGE` | 16-byte server nonce |
-| → server | `MANIFEST` / `MANIFEST_END` | manifest body, `manifest_sha256`, device signature (Section 4) |
+| → server | `MANIFEST` / `MANIFEST_END` | manifest body, `manifest_digest`, device signature (Section 4) |
 | → device | `MANIFEST_REJECT` | reason (`BAD_SIGNATURE`, `BAD_NONCE`, `UNKNOWN_DEVICE`, `GEOMETRY_MISMATCH`, `MALFORMED`) |
 | → device | `PLAN_BEGIN` | target version, destination slot, step count, target SHA-256, signature |
 | → device | `STEP_COPY` | `dst`, `src_slot`, `src_index`, expected hash |
@@ -454,10 +464,10 @@ idempotent, so a power cut during unroll just means unroll runs again.
 
 ## 10. Security
 
-The full, untruncated SHA-256 (see below) is used **only** for per-sector
+The truncated SHA-256 (see below) is used **only** for per-sector
 equality and transport integrity. It is not a trust boundary: a collision
 would let an attacker who already controls the server substitute a sector,
-and the full digest width does not change that — what gates the result is
+and a wider digest does not change that — what gates the result is
 the whole-image hash and the signature below.
 
 Authenticity comes from one signature per image, checked by the bootloader
@@ -528,16 +538,14 @@ without the per-sector manifest. The two hashes answer different questions:
 the per-sector hash answers "what must I transfer", `image_sha256` answers
 "is the result exactly the released image". The design needs both.
 
-**Per-sector hashes reuse SHA-256.** Each is the full, untruncated SHA-256
-output (32 B), stored as-is in the manifest and plan — kept full rather than
-truncated so a per-sector hash can later be wrapped in HMAC-SHA256 without
-changing the field width or the wire format. Two costs, two savings:
-manifest generation goes from ~15 ms to ~35 ms for the 102 KB PoC partition,
-and the manifest body grows (section 18, needs re-measuring at the 32 B
-width); against that, the bootloader drops a second hash primitive
-(~1.5 KB of flash) in favor of the SHA-256 implementation it already
-carries for `image_sha256` and the signature. The wire format is
-unaffected: `sector, hash, blob` either way, just a wider `hash`.
+**Per-sector hashes reuse SHA-256.** Each is the first `SECTOR_HASH_LEN`
+bytes of SHA-256 (8 by default, configurable from 8 to 32), stored in the
+manifest and plan. Manifest generation costs ~35 ms for the 102 KB PoC
+partition, against ~15 ms for MD5; in exchange the bootloader drops a
+second hash primitive (~1.5 KB of flash) in favor of the SHA-256
+implementation it already carries for `image_sha256` and the signature.
+The wire format is `sector, hash, blob` at any width; only the width of
+`hash` changes.
 
 ### 10.2 Manifest authentication
 
@@ -581,7 +589,7 @@ only and rejects any manifest whose nonce does not match the one it issued.
 
 1. `factory_cert` verifies against the factory CA public key over
    `device_id || pub_key`, and `device_id` is not on the revocation list.
-2. `manifest_sha256` matches the SHA-256 of the reassembled manifest body.
+2. `manifest_digest` matches the SHA-256 of the reassembled manifest body.
 3. `signature` verifies against `pub_key` over `ManifestAuth`, with the
    `domain` field exactly `"CBMAN"`-padded — domain separation prevents a
    signature made for one message type from being replayed as another.
@@ -1212,7 +1220,7 @@ So the device may send a digest instead of the full manifest:
 ```
 MANIFEST_DIGEST
   nonce         : u8[16]     // from CHALLENGE, so this is not replayable
-  manifest_sha256 : u8[32]   // over the canonical manifest body
+  manifest_digest : u8[32]   // over the canonical manifest body
   signature     : u8[64]     // same ManifestAuth struct as Section 4
 ```
 
@@ -1223,6 +1231,15 @@ whose flash was changed by a debugger or a factory tool — gets
 `MANIFEST_NEEDED`, and the device sends the full manifest as in Section 4. The
 canonical body is defined bit-for-bit (Section 4) precisely so this digest is
 reproducible on both sides.
+
+What the server caches is the manifest the device *will* have, not only the
+one it last received: after `COMMIT` it stores the target's sector hashes,
+which are exactly the device's manifest once the plan applies. Caching only
+received manifests would miss on the first request after every update, the
+one most likely to be a cheap no-op. If the update fails, the digests differ,
+the device sends its manifest in full, and that replaces the prediction. In
+the PoC this takes the no-op request after an update from 658 B to 144 B of
+device tx.
 
 Measured: the fixed session cost drops by 2 076 B, which moves the two-sector
 case from 4 574 B to **2 498 B**, 4.1 % of a full image, and the five-sector
@@ -1269,8 +1286,9 @@ maximum level and keeps the smallest of the three; raw wins unless a
 compressed form is strictly smaller.
 
 The dictionary is the device's *current* content of the destination sector.
-It stays in flash until that sector's own erase, so the decoder reads it in
-place (no RAM), and the server knows exactly what it is from the manifest
+It stays in flash until that sector's own erase; the device copies it into a
+one-sector buffer (flash is read through a copy, never a pointer, so QSPI and
+external parts work the same), and the server knows exactly what it is from the manifest
 hash, via a content-addressed sector store of every sector it has served. A
 release that shifts code by a few bytes leaves each sector a displaced copy of
 its old self, so the old sector is the best possible dictionary. Measured on
@@ -1306,7 +1324,7 @@ layout**, chosen deliberately: one application partition, updated in place.
 | Sectors in the manifest | 104, both slots | 102, the one partition |
 | Manifest body | 2088 B | 1636 B |
 | Rule 1, already correct | fires on every update | fires on every update |
-| Rule 2, local copy | finds sectors in the other slot | almost never fires |
+| Rule 2, local copy | finds sectors in the other slot | only from sectors the plan leaves untouched; rarely fires |
 | Unroll | one page erase | not possible |
 | Trial boot and revert | yes, one generation back | not possible |
 | Resume after a power cut | yes | yes |
@@ -1327,6 +1345,23 @@ itself: the bootloader reports that it has no bootable image and asks for
 another release. The device is recoverable as long as the server is reachable,
 and bricked if it is not. Rollback is traded for 52 KB of application space and
 nothing else.
+
+**WRITEs reach flash before the plan is recorded.** The session programs
+each written sector as it arrives; the plan (COPY steps, target hashes) is
+persisted once, at `PLAN_END`. A link drop mid-session therefore leaves the
+sectors written so far with no record of the plan they belonged to, and an
+unarmed plan (no `COMMIT`) cannot be unrolled either -- its writes are
+already in place. Neither loses the device: the next request's manifest
+describes flash as it now is and the server re-diffs from it. But the
+partition holds a mix of two images until then, which is the cost of
+updating in place and is not hidden by the word "unroll".
+
+**A COPY source must be a sector the plan leaves alone.** WRITEs land during
+the session and COPYs at boot, so a source that any step of the same plan
+rewrites holds its new bytes by the time the bootloader copies it, and the
+plan fails as `PLAN_BAD`. The planner takes a COPY source only from sectors
+whose current hash already equals the target's (rule 1), and sends the
+sector as a WRITE otherwise (`tests/case_copy_src_rewritten.sh`).
 
 **Resume survives, rollback does not.** The partition's own sector hashes are
 the progress record, so a power cut mid-update costs only the sectors not yet

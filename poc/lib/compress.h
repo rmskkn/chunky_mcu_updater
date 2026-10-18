@@ -3,15 +3,11 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "flash.h"
-
-/* Sector encodings on the wire (STEP_WRITE_END.compress), DESIGN.md 17.2.
- * 3..COMPRESS_MAX_ID are free for compressors registered by the integrator. */
-enum { COMPRESS_RAW = 0, COMPRESS_LZ4 = 1, COMPRESS_LZ4_DICT = 2 };
-#define COMPRESS_MAX_ID 15
+#include "protocol.h"   /* COMPRESS_* wire ids */
 
 /* A compression library, as the update path sees it. Dictionary-using
- * compressors get the destination sector's current flash content, read in
- * place, so the dictionary costs no RAM. */
+ * compressors get the destination sector's current flash content, copied
+ * into a sector buffer by the caller. */
 typedef struct {
     uint8_t     id;          /* wire id; unique */
     const char *name;
@@ -29,8 +25,9 @@ typedef struct {
                       uint8_t out[SECTOR_SIZE]);
 } compressor_t;
 
-/* Adds a compressor next to the built-in LZ4 ones. 0, or -1 if the id is
- * taken or out of range. Call before the first session. */
+/* Adds a compressor; none is built in (RAW needs none). 0, or -1 if the id
+ * is taken or out of range. Call before the first session, on both sides:
+ * a device can decode only the ids it registered. */
 int compress_register(const compressor_t *c);
 
 /* Server. Smallest of RAW and every registered compressor (dictionary ones

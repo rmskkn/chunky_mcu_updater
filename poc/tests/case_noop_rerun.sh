@@ -22,5 +22,9 @@ second="$(update 2>&1)"
 wire_stats "$second"
 assert_contains "$second" "no update offered" "second run finds nothing to do"
 [ "$WIRE_RX" -lt 200 ] || fail "wire size" "rx=$WIRE_RX B on a no-op request, expected a bare handshake"
+# The server cached the manifest the first run's plan produced, so the
+# request right after an update elides the manifest body too.
+assert_contains "$second" "body elided" "manifest elided right after an update"
+[ "$WIRE_TX" -lt 300 ] || fail "wire size" "tx=$WIRE_TX B on a no-op request, expected the manifest elided"
 
 ok "noop_rerun (rx=$WIRE_RX B)"

@@ -3,12 +3,13 @@
  * No argv parsing, no printf/report table: status goes through the log
  * callback, the finished plan/wire counts through server_session_result_t.
  * cb-server.c is the thin CLI shell around this. */
-#include "update_server.h"
+#include "server_session.h"
 #include "frame.h"
-#include "proto.h"
+#include "protocol.h"
 #include "manifest.h"
 #include "image.h"
 #include "compress.h"
+#include "host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,7 +66,8 @@ static int store_get(const char *cache_dir, const uint8_t h[SECTOR_HASH_LEN],
 
 int server_update_session(plat_io_t *io, const char *image_path, const char *cache_dir,
                           const uint8_t dev_key[32], const uint8_t root_key[32],
-                          log_fn log, void *log_ctx, server_session_result_t *out)
+                          log_fn log, void *log_ctx, server_session_result_t *out,
+                          cb_err_t *err)
 {
     link_t l;
     uint8_t pay[FRAME_MAX_PAYLOAD];
@@ -80,7 +82,8 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
 
     if (frame_expect(&l, MSG_HELLO, pay, &n) < 0) return 0;
     memcpy(&hello, pay, sizeof hello);
-    if (hello.sector_size != SECTOR_SIZE || hello.sectors != SECTORS_SLOT) {
+    if (hello.sector_size != SECTOR_SIZE || hello.sectors != SECTORS_SLOT ||
+        hello.sector_hash_len != SECTOR_HASH_LEN) {
         uint8_t r = REJ_GEOMETRY_MISMATCH;
         frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
         log_fmt(log, log_ctx, "server: geometry mismatch, session refused");
@@ -98,7 +101,7 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     memcpy(&auth, pay, sizeof auth);
 
     uint8_t want_mac[SHA256_LEN];
-    manifest_mac(dev_key, hello.device_id, ch.nonce, auth.manifest_sha256, want_mac);
+    manifest_mac(dev_key, hello.device_id, ch.nonce, auth.manifest_digest, want_mac);
     if (memcmp(want_mac, auth.mac, SHA256_LEN)) {
         uint8_t r = REJ_BAD_SIGNATURE;
         frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
@@ -113,7 +116,7 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     if (cbuf && clen == MANIFEST_BODY_LEN) {
         uint8_t d[SHA256_LEN];
         sha256(cbuf, clen, d);
-        if (!memcmp(d, auth.manifest_sha256, SHA256_LEN)) {
+        if (!memcmp(d, auth.manifest_digest, SHA256_LEN)) {
             memcpy(&dev, cbuf, MANIFEST_BODY_LEN);
             cached = 1;
         }
@@ -126,27 +129,36 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     } else {
         frame_send(&l, MSG_MANIFEST_NEEDED, NULL, 0);
         uint8_t *body = malloc(MANIFEST_BODY_LEN);
+        if (!body) return err_set(err, "out of memory for a manifest body");
         size_t got = 0;
         for (;;) {
             int t = frame_recv(&l, pay, &n);
             if (t < 0) { free(body); return 0; }
             if (t == MSG_MANIFEST_END) break;
-            if (t != MSG_MANIFEST) die("protocol: expected MANIFEST, got %d", t);
             uint16_t off, len;
+            if (t != MSG_MANIFEST || n < 4) {
+                log_fmt(log, log_ctx, "server: protocol: expected MANIFEST, got %d; session ended", t);
+                free(body);
+                return 0;
+            }
             memcpy(&off, pay, 2);
             memcpy(&len, pay + 2, 2);
-            if ((size_t)off + len > MANIFEST_BODY_LEN) die("manifest fragment out of range");
+            if ((size_t)off + len > MANIFEST_BODY_LEN || len > n - 4) {
+                log_fmt(log, log_ctx, "server: manifest fragment out of range; session ended");
+                free(body);
+                return 0;
+            }
             memcpy(body + off, pay + 4, len);
             got += len;
         }
         memcpy(&auth, pay, sizeof auth);
         uint8_t d[SHA256_LEN];
         sha256(body, MANIFEST_BODY_LEN, d);
-        manifest_mac(dev_key, hello.device_id, ch.nonce, auth.manifest_sha256, want_mac);
+        manifest_mac(dev_key, hello.device_id, ch.nonce, auth.manifest_digest, want_mac);
         const char *why = NULL;
         memcpy(&dev, body, MANIFEST_BODY_LEN);
 
-        if (got != MANIFEST_BODY_LEN || memcmp(d, auth.manifest_sha256, SHA256_LEN) ||
+        if (got != MANIFEST_BODY_LEN || memcmp(d, auth.manifest_digest, SHA256_LEN) ||
             memcmp(want_mac, auth.mac, SHA256_LEN) || manifest_check(&dev, &why)) {
             uint8_t r = why ? REJ_MALFORMED : REJ_BAD_SIGNATURE;
             frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
@@ -165,11 +177,16 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
      * the server tracking anything. */
     size_t binlen;
     uint8_t *bin = read_file(image_path, &binlen);
-    if (!bin) die("cannot read %s", image_path);
+    if (!bin) return err_set(err, "cannot read %s", image_path);
     uint32_t ver = hello.running_version + 1;
     uint8_t *target = malloc(SLOT_SIZE);
-    if (image_build(bin, binlen, ver, root_key, target) < 0)
-        die("%s is %zu B, over the %d B slot payload", image_path, binlen, IMG_MAX_PAYLOAD);
+    if (!target) { free(bin); return err_set(err, "out of memory for a %d B slot image", SLOT_SIZE); }
+    if (image_build(bin, binlen, ver, root_key, target) < 0) {
+        free(bin);
+        free(target);
+        return err_set(err, "%s is %zu B, over the %d B slot payload",
+                       image_path, binlen, IMG_MAX_PAYLOAD);
+    }
     free(bin);
 
     /* The first session after factory install finds no history and falls back
@@ -264,7 +281,8 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
             memcpy(&nak, pay, sizeof nak);
             log_fmt(log, log_ctx, "server: NAK on sector %u reason %u", nak.dst, nak.code);
         } else if (t != MSG_STEP_ACK) {
-            die("protocol: expected STEP_ACK/NAK, got %d", t);
+            log_fmt(log, log_ctx, "server: protocol: expected STEP_ACK/NAK, got %d; session ended", t);
+            goto out_report;
         }
     }
 
@@ -272,6 +290,22 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     log_fmt(log, log_ctx, "server: device staged the plan, %u steps left for the bootloader",
            (unsigned)((msg_plan_ready_t *)pay)->pending);
     frame_send(&l, MSG_COMMIT, NULL, 0);
+
+    /* The device's next manifest is the one this plan produces: the target,
+     * sector for sector. Cache it now so that request elides its body
+     * (DESIGN.md 17.1) instead of always missing right after an update. If
+     * the update fails, the digests differ and the device sends its manifest
+     * in full, which then replaces this one. */
+    {
+        manifest_t next;
+        memset(&next, 0, sizeof next);
+        next.sector_size = SECTOR_SIZE;
+        next.sectors     = SECTORS_SLOT;
+        for (int i = 0; i < SECTORS_SLOT; i++)
+            sector_hash(target + (size_t)i * SECTOR_SIZE, next.h[i]);
+        cache_path(cpath, sizeof cpath, hello.device_id, cache_dir);
+        write_file(cpath, &next, MANIFEST_BODY_LEN);
+    }
 
 out_report:
     out->ver = ver;

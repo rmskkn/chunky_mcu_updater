@@ -2,8 +2,8 @@
 # OP_COPY: the target wants sector 10 to hold exactly what sector 40 already
 # holds in the device's current flash. The planner should resolve that as a
 # copy (no bytes on the wire for sector 10) rather than a write, and the
-# unbounded step pipeline (lib/update_server.c) plus the client's double-buffered
-# write path (lib/client.c) must not disturb a plan that mixes copies and
+# unbounded step pipeline (middleware/server_session.c) plus the device's step-at-a-time
+# write path (lib/device.c) must not disturb a plan that mixes copies and
 # writes with the ACK for each arriving out of send order.
 source "$(dirname "$0")/common.sh"
 need_build

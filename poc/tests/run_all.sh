@@ -9,7 +9,7 @@
 # cases are independent and this runs them one at a time, in process.
 #
 # Not covered here: the "flash already holds this content" skip in
-# lib/client.c's flash_worker. Under the real protocol the server never
+# lib/device.c's stage_sector. Under the real protocol the server never
 # plans a WRITE for a sector the device's own manifest already matches, so
 # that guard has no black-box trigger - it is defence in depth (e.g. against
 # a future retry/resend path), not a behaviour these end-to-end cases can

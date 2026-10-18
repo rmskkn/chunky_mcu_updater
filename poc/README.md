@@ -55,13 +55,14 @@ ships fresh again.
 ## Benchmarks
 
 `tests/run_all.sh` output, one row per `tests/case_*.sh`, default geometry
-(`ERASE_SIZE=1024 SECTOR_SIZE=1024`, 104 448 B raw image = 102 sectors).
+(`DEVICE=stm32f103cb ERASE_SIZE=1024 SECTOR_SIZE=1024`, 8 B sector hashes, 52 224 B raw image =
+51 sectors, one A/B slot).
 `wire_stats` in `tests/common.sh` derives these numbers from the client's own
-`device: wire tx=.. rx=.. bytes (framing overhead ..)` log line (`lib/client.c`),
+`device: wire tx=.. rx=.. bytes (framing overhead ..)` log line (`middleware/client_session.c`),
 which counts real frame bytes, not an estimate. Reproduce with
 `bash tests/run_all.sh`.
 
-Bytes saved = the 104 448 B raw image minus rx, i.e. against a naive scheme
+Bytes saved = the 52 224 B raw image minus rx, i.e. against a naive scheme
 that reflashes the whole image every request. tx (manifest + auth, the device
 telling the server what it already has) is not counted as savable — a naive
 scheme would not pay it, so it is this approach's fixed overhead, not part of
@@ -69,30 +70,35 @@ what it saves.
 
 | Case | What it exercises | tx | rx | rx framing overhead | rx vs raw image | bytes saved |
 |---|---|--:|--:|--:|--:|--:|
-| `case_copy_dedup` | `OP_COPY` plus one interleaved write | 3722 B | 2418 B | 160 B (6.6%) | 2.3% | 102030 B (97.7%) |
-| `case_lz4_compressible` | a repetitive (16-byte motif) sector | 3708 B | 1330 B | 120 B (9.0%) | 1.3% | 103118 B (98.7%) |
-| `case_lz4_dict` (step 2: insertion shifts 63 sectors) | LZ4 with the old sector as dictionary | 4562 B | 6105 B | 1310 B (21.5%) | 5.8% | 98343 B (94.2%) |
-| `case_lz4_uniform_00` | a uniform `0x00` sector | 3708 B | 1314 B | 120 B (9.1%) | 1.3% | 103134 B (98.7%) |
-| `case_lz4_uniform_ff` | a uniform `0xFF` sector | 3708 B | 1314 B | 120 B (9.1%) | 1.3% | 103134 B (98.7%) |
-| `case_many_writes` | 23 ordinary `STEP_WRITE`s, no dedup/compression available | 4002 B | 26228 B | 1200 B (4.6%) | 25.1% | 78220 B (74.9%) |
-| `case_noop_rerun` (2nd request) | device already matches the release: bare handshake | 3668 B | 46 B | 30 B (65.2%) | 0.0% | 104402 B (100.0%) |
+| `case_copy_dedup` | `OP_COPY` plus one interleaved write | 712 B | 2345 B | 160 B (6.8%) | 4.5% | 49879 B (95.5%) |
+| `case_copy_src_rewritten` | a copy whose source the plan rewrites: sent as a write instead | 712 B | 3435 B | 200 B (5.8%) | 6.6% | 48789 B (93.4%) |
+| `case_lz4_compressible` | a repetitive (16-byte motif) sector | 698 B | 1281 B | 120 B (9.4%) | 2.5% | 50943 B (97.5%) |
+| `case_lz4_dict` (step 2: insertion shifts 32 sectors) | LZ4 with the old sector as dictionary | 604 B | 2413 B | 680 B (28.2%) | 4.6% | 49811 B (95.4%) |
+| `case_lz4_uniform_00` | a uniform `0x00` sector | 698 B | 1265 B | 120 B (9.5%) | 2.4% | 50959 B (97.6%) |
+| `case_lz4_uniform_ff` | a uniform `0xFF` sector | 698 B | 1265 B | 120 B (9.5%) | 2.4% | 50959 B (97.6%) |
+| `case_many_writes` | 17 ordinary `STEP_WRITE`s, no dedup/compression available | 908 B | 18643 B | 890 B (4.8%) | 35.7% | 33581 B (64.3%) |
+| `case_noop_rerun` (2nd request) | device already matches the release: bare handshake, manifest elided | 144 B | 36 B | 20 B (55.6%) | 0.1% | 52188 B (99.9%) |
 
-**Grand total, every `update()` request this run made (11, including
-`case_lz4_dict`'s other three):** tx = 41 910 B (2890 B framing, 6.9%),
-rx = 44 215 B (3530 B framing, 8.0%) — **3.8%** of 1 148 928 B of
-raw-image-equivalent traffic (11 requests × the 104 448 B raw image) —
-**1 104 713 B saved, 96.2%**.
+**Grand total, every `update()` request this run made (12, including
+`case_lz4_dict`'s other three):** tx = 6938 B (1280 B framing, 18.4%),
+rx = 35 930 B (2760 B framing, 7.7%) — **5.7%** of 626 688 B of
+raw-image-equivalent traffic (12 requests × the 52 224 B raw image) —
+**590 758 B saved, 94.3%**.
+
+A request right after an update elides the manifest too: the server caches
+the manifest the plan will produce, not only the one it received, so the
+`noop_rerun` follow-up costs 180 B in both directions.
 
 Framing overhead (the `| 0xA5 0x5A | len | type | seq | payload | crc32 |`
 wrapper, `DESIGN.md` section 6) is a *larger* share of rx the smaller the
 payload is — it's fixed per frame, so a near-empty response (`noop_rerun`,
-65.2%) pays proportionally more than a 63-sector plan (`lz4_dict`, 21.5%).
+55.6%) pays proportionally more than a 32-sector plan (`lz4_dict`, 28.2%).
 That column is about where rx's own bytes go, not about savings.
 
-The worst case here (`many_writes`, 74.9% saved) is the floor: 23 of 102
+The worst case here (`many_writes`, 64.3% saved) is the floor: 17 of 51
 sectors changed with content that neither dedups nor compresses, and it
-still cuts traffic by three quarters. The best realistic case (`copy_dedup`/
-`lz4_*`, ~98%) matches `DESIGN.md`'s stated "typical release lands around
+still cuts traffic by almost two thirds. The best realistic case (`copy_dedup`/
+`lz4_*`, ~95-97%) matches `DESIGN.md`'s stated "typical release lands around
 10–15% of a full image" (these synthetic cases do better because the patches
 are small and either duplicate existing content or compress trivially).
 
@@ -102,10 +108,10 @@ flash and is the only thing that writes it. Nothing else is shared.
 ```
   cb-server --image release.bin                     cb-client --flash flash.bin
   +-----------------------------------+             +-----------------------------------+
-  | release.bin   raw firmware        |             | manifest.c  sha256 of all 102     |
-  |                                   |             |             sectors, 32 B each    |
+  | release.bin   raw firmware        |             | manifest.c  sha256 of all 51      |
+  |                                   |             |             sectors, 8 B each     |
   |                                   |             |             order implicit        |
-  | image.c   wrap into an image:     |             | client.c    receive blobs, write  |
+  | image.c   wrap into an image:     |             | device.c    receive blobs, write  |
   |           descriptor at 0x200,    |             |             them straight into    |
   |           image_sha256, MAC       |             |             them in place         |
   |                                   |             |                                   |
@@ -113,7 +119,7 @@ flash and is the only thing that writes it. Nothing else is shared.
   |           device manifest:        |             |             program half-words,   |
   |           skip / copy / write     |             |             refuse to set a bit   |
   |                                   |             |                                   |
-  | cache/    last manifest per       |             | client.c    bootloader: copies,   |
+  | cache/    last manifest per       |             | device.c    bootloader: copies,   |
   |           device, for elision     |             |             verify, trial, confirm|
   +-----------------------------------+             +-----------------------------------+
                     |                                                 |
@@ -129,11 +135,16 @@ chose to send.
 
 ```
                            flash.bin, 128 KB
-  +--------------+------+---------+---------+---------------------------+
-  | bootloader   | id   | meta 0  | meta 1  | application               |
-  | 15 KB        | 1 KB | 4 KB    | 4 KB    | 104 KB, 104 sectors       |
-  +--------------+------+---------+---------+---------------------------+
-   pages 0-14     15     16-19     20-23     24-127
+  +------------+------+--------+--------+--------------+--------------+
+  | bootloader | id   | meta 0 | meta 1 | slot A       | slot B       |
+  | 15 KB      | 1 KB | 5 KB   | 5 KB   | 51 KB, 51 s. | 51 KB, 51 s. |
+  +------------+------+--------+--------+--------------+--------------+
+   pages 0-14   15     16-20    21-25    26-76          77-127
+
+  The layout comes from the device catalog, device/stm32f103cb/device.toml,
+  which tools/gen_device.py turns into build/device/geometry.h and
+  build/device/memory.ld (make DEVICE=...). Each meta bank is 4 KB of meta_t plus the journal's
+  own page.
 ```
 
 | Region | Who writes it | What it holds |
@@ -141,7 +152,8 @@ chose to send.
 | bootloader | nobody, after provisioning | the update: receive, apply, verify |
 | id | the factory | device key, root key; write-protected |
 | meta 0 / meta 1 | the bootloader | plan state, the plan, the progress journal; two banks ping-pong by generation so a torn write loses nothing |
-| application | the bootloader, in place | the one firmware image, read to build the manifest and rewritten sector by sector |
+| slot A | the bootloader, in place | the firmware image, read to build the manifest and rewritten sector by sector |
+| slot B | nobody yet | reserved for the A/B flow (`DESIGN.md` sections 2-8); the PoC still updates slot A in place |
 
 **One partition means there is nothing to fall back to.** An update rewrites
 the running image, so a release that fails to verify leaves the device with no
@@ -159,7 +171,7 @@ the progress record, so the next request re-diffs and sends only the gap.
     |-- HELLO  id, geometry, version + image hash --------------->|
     |<-- CHALLENGE  16-byte nonce --------------------------------|
     |                                                             |
-    |   sha256 every sector of the partition (102 x 1 KB)         |
+    |   sha256 every sector of the partition (51 x 1 KB)          |
     |-- MANIFEST_DIGEST  sha256 of the body, MAC over the nonce ->|
     |<-- MANIFEST_NEEDED  only on a cache miss -------------------|
     |-- MANIFEST  body, fragmented (size: see DESIGN.md sec. 18) >|
@@ -176,9 +188,8 @@ the progress record, so the next request re-diffs and sends only the gap.
     |<-- PLAN_END ------------------------------------------------|
     |                                                             |
     |   per STEP_WRITE_END: decompress, check the hash, then      |
-    |   hand the sector to a flash-write worker and start filling |
-    |   the other buffer with the next STEP_WRITE - so one        |
-    |   sector's erase/program overlaps the next one's transfer;  |
+    |   erase and program the sector before taking the next       |
+    |   message - the link's own buffering absorbs the stall;     |
     |   per STEP_COPY: recorded only, the bootloader copies later |
     |   each step's ACK/NAK follows once its work is done, in the |
     |   order the steps were sent:                                |
@@ -252,21 +263,33 @@ stable link order are what keep a one-line fix from costing a full transfer.
 | `flash.c` | Page erase, half-word program with the bits-only-clear and one-program-per-erase rules, meta bank ping-pong, journal |
 | `manifest.c` | Canonical manifest body, digest, MAC, structural checks |
 | `plan.c` | The three planner rules of `DESIGN.md` section 5 |
-| `image.c` | Image descriptor at partition offset `0x200`, `image_sha256` with the descriptor hole, installing an image |
-| `compress.c`, `lz4.c` | Compressor registry and the LZ4 compressors. Sectors go out raw, LZ4, or LZ4 with the old sector as dictionary, whichever is smallest |
-| `frame.c` | `A5 5A \| len \| type \| seq \| payload \| crc32` framing and the byte counters |
-| `client.c` | The request, then the bootloader: apply, verify, trial boot, confirm |
+| `image.c` | Image descriptor at partition offset `0x200`, `image_sha256` with the descriptor hole, building an image |
+| `flash_view.c` | Reading the image and the manifest out of the device's flash, apart from the RAM-only code so a server links no flash port |
+| `compress.c` | Compressor registry; nothing built in. Sectors go out raw, LZ4, or LZ4 with the old sector as dictionary, whichever is smallest |
+| `protocol.h` | The wire protocol on its own: frame layout, message types and records, reason and result codes. No flash model or geometry |
+| `device.c` | The device core, fed one message at a time with no threads, transport or clock: the request, then the bootloader: apply, verify, trial boot, confirm |
+| `middleware/frame.c` | `A5 5A \| len \| type \| seq \| payload \| crc32` framing and the byte counters |
+| `middleware/client_session.c`, `middleware/server_session.c` | Each side's session carried over a framed link |
+| `middleware/flash_file.c` | The host's flash port: the part as an mmap'd file. Create, provision, install the factory image, open by path. `lib/` only sees an opaque port |
+| `middleware/lz4.c` | The liblz4 binding, registered by each CLI with `lz4_register()` |
+| `middleware/host.c` | Files, randomness, clock, environment: what `lib/` never does |
 
-The flash map is `cb-flash map`, in erase units, and it is the layout from
-`DESIGN.md` section 2 with the identity unit from 10.2 (this is the default
-1 KB / 1 KB geometry):
+The flash map is `cb-flash map`. It needs no flash file: it walks
+`CB_REGION_LIST` from the generated `build/device/geometry.h`, which any
+firmware or tool can include on its own (it depends on nothing but
+`<stddef.h>`). This is the layout from `DESIGN.md` section 2 with the
+identity unit from 10.2, at the default 1 KB / 1 KB geometry; slot A is
+updated in place, slot B is reserved:
 
 ```
-bootloader        0-14       0x00000      15360
-device identity   15         0x03c00       1024
-meta bank 0       16-20      0x04000       5120
-meta bank 1       21-25      0x05400       5120
-application       26-127     0x06800     104448
+STM32F103CB, erase unit 1024 B, sector 1024 B, sector hash 8 B
+region       units      offset    address       size  protect
+bootloader     0-14     0x00000   0x08000000   15360  yes
+identity      15-15     0x03c00   0x08003c00    1024  yes
+meta0         16-20     0x04000   0x08004000    5120  no
+meta1         21-25     0x05400   0x08005400    5120  no
+slot_a        26-76     0x06800   0x08006800   52224  no
+slot_b        77-127    0x13400   0x08013400   52224  no
 ```
 
 The server keeps a sector store next to its manifest cache,
@@ -310,7 +333,7 @@ Writing it turned up three mistakes in `DESIGN.md`, all fixed there:
    really has, `0xFFFF -> 0xFF00 -> 0x0000`, and the emulated flash enforces
    both rules rather than asserting them.
 2. **The manifest nonce broke manifest elision.** Section 4 put the server
-   nonce inside the manifest body and hashed the body, so `manifest_sha256`
+   nonce inside the manifest body and hashed the body, so `manifest_digest`
    changed every session and the cache in 17.1 could never hit. The body is now
    nonce-free and freshness lives only in `ManifestAuth`.
 3. **Framing overhead was off by one.** The stated 11 B per frame is 10:
