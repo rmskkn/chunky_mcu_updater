@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Many ordinary STEP_WRITE sectors in one plan - exercises the unbounded
-# step pipeline and the client's double-buffered flash worker (lib/client.c:
-# flash_worker/stage_sector) under load: steps keep streaming in while
-# earlier sectors are still (modelled as) programming, and every ACK/NAK
-# must still land before the plan is persisted. Correctness is checked by
+# step pipeline against the device's step-at-a-time write path (lib/device.c:
+# stage_sector) under load: steps keep streaming in while earlier sectors
+# are being programmed, and every ACK/NAK must still land before the plan
+# is persisted. Correctness is checked by
 # re-reading every sector's hash after the update, not just by booting.
 source "$(dirname "$0")/common.sh"
 need_build

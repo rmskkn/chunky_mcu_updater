@@ -40,8 +40,10 @@ difference into a spare partition that the running firmware never depends on.
    space. That is what makes two 52 KB application slots fit in 128 KB of
    flash.
 
-   The host PoC implements a single-partition variant instead: one 104 KB
-   application, updated in place, which trades unroll and revert for the space.
+   The host PoC lays out both slots (51 KB each, from the device catalog
+   entry `poc/device/stm32f103cb/device.toml`) but still runs the
+   single-partition update: slot A updated in place, slot B reserved, which
+   trades unroll and revert for simplicity until the A/B flow lands.
    [`DESIGN.md`](poc/DESIGN.md) section 18 has the comparison.
 4. **The bootloader applies the plan and can unroll it.** Apply is journalled
    and resumable, and it never writes outside the inactive partition. So

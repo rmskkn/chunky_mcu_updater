@@ -1,7 +1,12 @@
 /* cb-client CLI: argv parsing and the device-time report. The device's
  * actual work - manifest generation, the update session, the bootloader's
- * apply/verify step - lives in lib/client.c; DESIGN.md sections 4, 6, 7, 8. */
-#include "client.h"
+ * apply/verify step - lives in lib/device.c, carried over the link by
+ * client_session.c; DESIGN.md sections 4, 6, 7, 8. */
+#include "client_session.h"
+#include "cli.h"
+#include "flash_file.h"
+#include "host.h"
+#include "lz4.h"
 #include "manifest.h"
 #include "image.h"
 #include "keys.h"
@@ -18,7 +23,7 @@ static int opt_port = 7700;
 static const char *opt_initial = NULL;
 static int opt_status = 0;
 
-static client_update_stats_t g_stats;
+static device_stats_t g_stats;
 
 static void cli_log(void *ctx, const char *line)
 {
@@ -29,7 +34,7 @@ static void cli_log(void *ctx, const char *line)
 /* Device-time model. The host runs the same code thousands of times faster,
  * so the interesting number is what the work would cost on the part: hashing
  * at the cycles/byte in flash.h, plus RM0008 flash erase and program times. */
-static double model_ms(const flash_t *f, int worst, const client_update_stats_t *s)
+static double model_ms(const flash_t *f, int worst, const device_stats_t *s)
 {
     double cyc_per_ms = CB_FLASH_MHZ * 1000.0;
     return (double)s->sha_bytes * CB_FLASH_SHA256_CYC_B / cyc_per_ms +
@@ -37,7 +42,7 @@ static double model_ms(const flash_t *f, int worst, const client_update_stats_t 
 }
 
 static void time_report(const char *phase, double host_ms, const flash_t *f,
-                        const client_update_stats_t *s)
+                        const device_stats_t *s)
 {
     printf("time: %-10s host %8.2f ms   F103 %8.1f - %.1f ms"
            "  (flash %.1f - %.1f ms: %ld erase, %zu B prog)\n",
@@ -65,26 +70,36 @@ static const char *state_name(int st)
 
 /* ---------------------------------------------------------------- session */
 
-/* 0 = a plan was staged, 1 = nothing to do. */
+/* 0 = a plan was staged, 1 = nothing to do, -1 = failed (reported). */
 static int cmd_session(void)
 {
     flash_t f;
+    cb_err_t err;
     uint8_t dev_key[32], root_key[32];
     poc_dev_key(dev_key);
     poc_root_key(root_key);
 
-    device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL);
+    if (device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL, &err) < 0)
+        return cli_fail("%s", err.msg);
 
     plat_io_t *io = plat_io_tcp_connect(opt_host, opt_port);
-    if (!io)
-        die("cannot connect to %s:%d: %s\n"
-            "  no server is listening there; start one in another terminal:\n"
-            "    scripts/lab.sh server",
-            opt_host, opt_port, strerror(errno));
+    if (!io) {
+        int e = errno;
+        flash_file_close(&f);
+        return cli_fail("cannot connect to %s:%d: %s\n"
+                        "  no server is listening there; start one in another terminal:\n"
+                        "    scripts/lab.sh server",
+                        opt_host, opt_port, strerror(e));
+    }
 
     double t_start = now_ms();
-    int rc = client_update_session(&f, io, dev_key, cli_log, NULL, &g_stats);
+    int rc = client_update_session(&f, io, dev_key, cli_log, NULL, &g_stats, &err);
     double session_ms = now_ms() - t_start;
+    if (rc < 0) {
+        plat_io_close(io);
+        flash_file_close(&f);
+        return cli_fail("%s", err.msg);
+    }
 
     printf("time: manifest   host %8.2f ms   F103 model %8.1f ms  (%d sectors hashed)\n",
            g_stats.t_manifest, (double)MANIFEST_ENTRIES * SECTOR_SIZE * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0),
@@ -98,7 +113,7 @@ static int cmd_session(void)
     time_report("session", session_ms, &f, &g_stats);
 
     plat_io_close(io);
-    flash_close(&f);
+    flash_file_close(&f);
     return rc;
 }
 
@@ -107,14 +122,20 @@ static int cmd_session(void)
 static int cmd_boot(void)
 {
     flash_t f;
+    cb_err_t err;
     uint8_t root_key[32];
     poc_root_key(root_key);
 
-    device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL);
+    if (device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL, &err) < 0)
+        return cli_fail("%s", err.msg);
 
     double t_start = now_ms();
-    client_update_boot(&f, root_key, cli_log, NULL, &g_stats);
+    int rc = device_boot(&f, root_key, cli_log, NULL, &g_stats);
     double boot_ms = now_ms() - t_start;
+    if (rc < 0) {
+        flash_file_close(&f);
+        return cli_fail("boot: %s", f.err.msg);
+    }
 
     if (g_stats.t_apply > 0)
         printf("time: apply      host %8.2f ms   F103 %8.1f - %.1f ms  (copies)\n",
@@ -126,7 +147,7 @@ static int cmd_boot(void)
                (double)(SLOT_SIZE - DESC_LEN) * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0)
                + ECDSA_VERIFY_MS);
     time_report("boot", boot_ms, &f, &g_stats);
-    flash_close(&f);
+    flash_file_close(&f);
     return 0;
 }
 
@@ -139,28 +160,37 @@ static int cmd_status(void)
     char hex[80];
     const char *why;
 
+    cb_err_t err;
     poc_root_key(rk);
-    device_open_or_create(&f, opt_flash, opt_initial, rk, cli_log, NULL);
-    identity_t *id = identity_get(&f);
+    if (device_open_or_create(&f, opt_flash, opt_initial, rk, cli_log, NULL, &err) < 0)
+        return cli_fail("%s", err.msg);
+    identity_t id;
+    if (identity_get(&f, &id) < 0) {
+        flash_file_close(&f);
+        return cli_fail("%s", f.err.msg);
+    }
     meta_load(&f, &m);
 
-    hexdump_line(id->device_id, 8, hex);
+    hexdump_line(id.device_id, 8, hex);
     printf("device_id       %s...\n", hex);
     printf("meta gen %u  state %s  last_result %u\n",
            m.generation, state_name(m.plan_state), m.last_result);
 
-    const uint8_t *app = flash_at(&f, APP_BASE);
-    int ok = image_verify(app, rk, &why);
+    image_desc_t desc;
+    uint8_t h[SHA256_LEN];
+    image_desc_read(&f, &desc);
+    image_hash_flash(&f, h);
+    int ok = image_verify_flash(&f, rk, h, &why);
     printf("application     %s  version %u  %s\n",
-           image_desc(app)->magic == IMG_MAGIC ? "image   " : "no image",
-           client_app_version(&f), ok == 0 ? "verified" : why);
+           desc.magic == IMG_MAGIC ? "image   " : "no image",
+           device_app_version(&f), ok == 0 ? "verified" : why);
 
     manifest_build(&f, &man);
     manifest_digest(&man, d);
     hexdump_line(d, 8, hex);
     printf("manifest digest %s...  %d sectors, body %zu B\n",
            hex, SECTORS_SLOT, MANIFEST_BODY_LEN);
-    flash_close(&f);
+    flash_file_close(&f);
     return 0;
 }
 
@@ -181,6 +211,8 @@ static int usage(void)
 
 int main(int argc, char **argv)
 {
+    g_stats.clock_ms = now_ms;
+    if (lz4_register() < 0) { cli_fail("cannot register the LZ4 decoders"); return 1; }
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--flash") && i + 1 < argc)           opt_flash = argv[++i];
         else if (!strcmp(argv[i], "--host") && i + 1 < argc)       opt_host = argv[++i];
@@ -190,12 +222,11 @@ int main(int argc, char **argv)
         else return usage();
     }
 
-    if (opt_status) return cmd_status();
+    if (opt_status) return cmd_status() < 0 ? 1 : 0;
 
     /* Ask for an update by reporting what is in flash, then reboot into the
      * bootloader to apply and verify it. One partition, so the write is in
      * place and there is no trial boot to pass. */
-    cmd_session();
-    cmd_boot();
-    return cmd_status();
+    if (cmd_session() < 0 || cmd_boot() < 0 || cmd_status() < 0) return 1;
+    return 0;
 }

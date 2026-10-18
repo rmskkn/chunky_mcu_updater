@@ -3,6 +3,9 @@
 #include "manifest.h"
 #include "image.h"
 #include "util.h"
+#include "flash_file.h"
+#include "cli.h"
+#include "host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +15,7 @@ static int usage(void)
     fprintf(stderr,
         "usage:\n"
         "  cb-flash manifest FLASH             per-sector hashes and the digest\n"
-        "  cb-flash map FLASH                  the flash layout\n"
+        "  cb-flash map                        this build's flash layout\n"
         "  cb-flash geometry                   this build's geometry, shell-sourceable\n"
         "  cb-flash mutate IN OUT RUNS SEED    a new release: RUNS patched runs\n"
         "  cb-flash find FLASH HASH            which sectors hold this hash\n");
@@ -27,7 +30,7 @@ static int cmd_manifest(const char *path)
     uint8_t d[SHA256_LEN];
     char hex[80];
 
-    if (flash_open(&f, path) < 0) die("cannot open %s", path);
+    if (flash_file_open(&f, path) < 0) return cli_fail("cannot open %s", path);
     meta_load(&f, &m);
     (void)m;
     manifest_build(&f, &man);
@@ -39,7 +42,7 @@ static int cmd_manifest(const char *path)
     manifest_digest(&man, d);
     hexdump_line(d, 32, hex);
     printf("body %zu B  digest %s\n", MANIFEST_BODY_LEN, hex);
-    flash_close(&f);
+    flash_file_close(&f);
     return 0;
 }
 
@@ -56,14 +59,14 @@ static int cmd_find(const char *path, const char *hex)
     char buf[64];
 
     if (n == 0 || n > SECTOR_HASH_LEN || strlen(hex) % 2)
-        die("hash must be 2 to %d hex bytes", SECTOR_HASH_LEN);
+        return cli_fail("hash must be 2 to %d hex bytes", SECTOR_HASH_LEN);
     for (size_t i = 0; i < n; i++) {
         unsigned b;
-        if (sscanf(hex + i * 2, "%2x", &b) != 1) die("bad hex in %s", hex);
+        if (sscanf(hex + i * 2, "%2x", &b) != 1) return cli_fail("bad hex in %s", hex);
         want[i] = (uint8_t)b;
     }
 
-    if (flash_open(&f, path) < 0) die("cannot open %s", path);
+    if (flash_file_open(&f, path) < 0) return cli_fail("cannot open %s", path);
     manifest_build(&f, &man);
 
     int hits = 0;
@@ -76,39 +79,35 @@ static int cmd_find(const char *path, const char *hex)
         }
     printf("%d of %d sectors match %s%s\n", hits, SECTORS_SLOT, hex,
            n < SECTOR_HASH_LEN ? " (prefix)" : "");
-    flash_close(&f);
+    flash_file_close(&f);
     return hits ? 0 : 1;
 }
 
-/* Regions in erase units, with the byte address and size next to them. */
-static void map_row(const char *name, int unit, int units)
+/* The map straight from the generated geometry.h: no flash file, since the
+ * layout is a property of the build, not of one device's contents. */
+static int cmd_map(void)
 {
-    char r[16];
-    if (units > 1) snprintf(r, sizeof r, "%d-%d", unit, unit + units - 1);
-    else           snprintf(r, sizeof r, "%d", unit);
-    printf("%-17s %-10s 0x%05x     %6d\n", name, r, unit * ERASE_SIZE, units * ERASE_SIZE);
-}
-
-static int cmd_map(const char *path)
-{
-    flash_t f;
-    if (flash_open(&f, path) < 0) die("cannot open %s", path);
-    printf("erase unit %d B, sector %d B\n", ERASE_SIZE, SECTOR_SIZE);
-    printf("region            units      bytes       size\n");
-    map_row("bootloader", 0, BL_UNITS);
-    map_row("device identity", ID_UNIT, 1);
-    map_row("meta bank 0", META0_UNIT, META_UNITS);
-    map_row("meta bank 1", META1_UNIT, META_UNITS);
-    map_row("application", (int)(APP_BASE / ERASE_SIZE), (int)(SLOT_SIZE / ERASE_SIZE));
-    flash_close(&f);
+    printf("%s, erase unit %d B, sector %d B, sector hash %d B\n",
+           CB_DEVICE_NAME, ERASE_SIZE, SECTOR_SIZE, SECTOR_HASH_LEN);
+    printf("region       units      offset    address       size  protect\n");
+#define ROW(name, base, size, protect)                                        \
+    printf("%-12s %3u-%-6u 0x%05x   0x%08x  %6u  %s\n", name,               \
+           (unsigned)((base) / ERASE_SIZE),                                    \
+           (unsigned)(((base) + (size)) / ERASE_SIZE - 1), (unsigned)(base),   \
+           (unsigned)(CB_FLASH_BASE + (base)), (unsigned)(size),               \
+           (protect) ? "yes" : "no");
+    CB_REGION_LIST(ROW)
+#undef ROW
     return 0;
 }
 
 /* One line the test scripts eval, so their sizes follow the build. */
 static int cmd_geometry(void)
 {
-    printf("ERASE_SIZE=%d SECTOR_SIZE=%d SECTORS=%d SLOT_SIZE=%d PAYLOAD_MAX=%d DESC_LEN=%d\n",
-           ERASE_SIZE, SECTOR_SIZE, SECTORS_SLOT, SLOT_SIZE, IMG_MAX_PAYLOAD, DESC_LEN);
+    printf("ERASE_SIZE=%d SECTOR_SIZE=%d SECTORS=%d SLOT_SIZE=%d PAYLOAD_MAX=%d DESC_LEN=%d "
+           "SECTOR_HASH_LEN=%d\n",
+           ERASE_SIZE, SECTOR_SIZE, SECTORS_SLOT, SLOT_SIZE, IMG_MAX_PAYLOAD, DESC_LEN,
+           SECTOR_HASH_LEN);
     return 0;
 }
 
@@ -118,27 +117,34 @@ static int cmd_mutate(const char *in, const char *out, int runs, unsigned seed)
 {
     size_t len;
     uint8_t *b = read_file(in, &len);
-    if (!b) die("cannot read %s", in);
+    if (!b) return cli_fail("cannot read %s", in);
     srand(seed);
     for (int i = 0; i < runs; i++) {
         size_t off = ((size_t)rand() * 65536 + (size_t)rand()) % (len - 16);
         for (int k = 0; k < 16; k++) b[off + k] ^= (uint8_t)(0x5A + i);
     }
-    if (write_file(out, b, len) < 0) die("cannot write %s", out);
+    if (write_file(out, b, len) < 0) { free(b); return cli_fail("cannot write %s", out); }
     free(b);
     printf("wrote %s, %d patched runs of 16 B\n", out, runs);
     return 0;
 }
 
-int main(int argc, char **argv)
+static int run(int argc, char **argv)
 {
     if (argc < 2) return usage();
     const char *c = argv[1];
     if (!strcmp(c, "manifest") && argc == 3) return cmd_manifest(argv[2]);
-    if (!strcmp(c, "map") && argc == 3)      return cmd_map(argv[2]);
+    if (!strcmp(c, "map") && argc == 2)      return cmd_map();
     if (!strcmp(c, "geometry") && argc == 2) return cmd_geometry();
     if (!strcmp(c, "find") && argc == 4)     return cmd_find(argv[2], argv[3]);
     if (!strcmp(c, "mutate") && argc == 6)
         return cmd_mutate(argv[2], argv[3], atoi(argv[4]), (unsigned)atoi(argv[5]));
     return usage();
+}
+
+/* A command's -1 (already reported by cli_fail) is exit status 1. */
+int main(int argc, char **argv)
+{
+    int rc = run(argc, argv);
+    return rc < 0 ? 1 : rc;
 }

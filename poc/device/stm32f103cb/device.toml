@@ -1,0 +1,70 @@
+# STM32F103CB: 128 KB flash in 1 KB pages, 16-bit programming
+# (RM0008, PM0075, DS5319). tools/gen_device.py turns this into
+# build/device/geometry.h (for lib/) and build/device/memory.ld (for a
+# firmware link). Pick it with make DEVICE=stm32f103cb.
+
+[part]
+name       = "STM32F103CB"
+flash_base = 0x08000000      # where flash sits in the address map
+flash_size = "128K"
+erase_size = "1K"            # minimum erasable unit: one page (RM0008)
+
+# PM0075: one program per half-word after an erase, except that 0x0000 may
+# always be written regardless of the half-word's current content.
+# flash_program() in lib/flash.c enforces whatever is set here.
+[part.program]
+once        = true           # false: no limit on programs per half-word
+zero_exempt = true           # 0x0000 does not count against the limit
+
+# DS5319 Table 23 "Flash memory characteristics", TA = -40 to +105 C. The
+# Typ column is empty there, so every figure is a [min, max] range. The
+# part programs 16 bits per operation, so "word" is one half-word and a
+# 1 KB page is 512 programming operations. Endurance is 1 kcycle min
+# (DS5319 Rev 1; later revisions state 10 kcycles), which is why anything
+# rewritten per boot clears bits instead of erasing a page.
+[part.timing]
+erase_ms     = [20.0, 40.0]  # tERASE, one page
+prog_us      = [20.0, 40.0]  # tprog, one half-word
+mhz          = 72.0
+sha256_cyc_b = 25.0          # SHA-256 cycles per byte, software
+
+[update]
+sector_size = "1K"           # delta unit: hashed, diffed, sent, compressed
+
+# The map, in address order (DESIGN.md section 2). Sizes are bytes or K/M,
+# rounded up to whole erase units. "rest/N" is an equal 1/N share of what
+# is left after the fixed regions, rounded down to the region's alignment;
+# rest regions come last. align = "sector" starts a region on a sector
+# boundary. lib/ needs bootloader, identity, meta0, meta1, slot_a, slot_b.
+[[region]]
+name    = "bootloader"
+size    = "15K"
+protect = true               # option-byte write protection at provisioning
+
+[[region]]
+name    = "identity"
+size    = "1K"
+protect = true
+
+# A meta bank is meta_t in `size`, plus the progress journal in an erase
+# unit of its own (journal = true): the journal is never erased while a
+# plan is live, so it cannot share a unit with meta_t.
+[[region]]
+name    = "meta0"
+size    = "4K"
+journal = true
+
+[[region]]
+name    = "meta1"
+size    = "4K"
+journal = true
+
+[[region]]
+name  = "slot_a"
+size  = "rest/2"
+align = "sector"
+
+[[region]]
+name  = "slot_b"
+size  = "rest/2"
+align = "sector"

@@ -5,7 +5,7 @@
 /* Byte-stream transport seam. frame.c frames messages over whatever this
  * backs -- TCP, UART, a USB CDC pipe, anything that moves bytes in order.
  * Opaque, so no socket, UART peripheral, or other OS/hardware handle type
- * names itself in lib/.
+ * names itself in lib/ or middleware/.
  *
  * Creating one of these is a property of the transport (TCP needs a host
  * and port; UART needs a baud rate; CAN needs none of that), not something

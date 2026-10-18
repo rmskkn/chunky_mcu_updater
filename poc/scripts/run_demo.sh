@@ -27,7 +27,7 @@ rule "the same release again: the manifest already matches it"
 update 2>&1 | grep -E 'no update|booting'
 
 rule "flash layout"
-"$CB_FLASH" map "$FLASH"
+"$CB_FLASH" map
 
 server_stop
 rule "what the server saw"

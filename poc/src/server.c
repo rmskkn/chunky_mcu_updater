@@ -1,8 +1,11 @@
 /* cb-server CLI: argv parsing and the per-session report table. The sender's
  * actual work - diffing a device manifest against the target release and
- * streaming only the sectors that differ - lives in update_server.c;
+ * streaming only the sectors that differ - lives in server_session.c;
  * DESIGN.md sections 5-6. */
-#include "update_server.h"
+#include "server_session.h"
+#include "cli.h"
+#include "host.h"
+#include "lz4.h"
 #include "frame.h"
 #include "plan.h"
 #include "keys.h"
@@ -113,8 +116,13 @@ static void report(const char *label, const server_session_result_t *r)
 static void session(plat_io_t *io)
 {
     server_session_result_t res;
-    if (server_update_session(io, opt_image, opt_cache, dev_key, root_key,
-                              cli_log, NULL, &res)) {
+    cb_err_t err;
+    int rc = server_update_session(io, opt_image, opt_cache, dev_key, root_key,
+                                   cli_log, NULL, &res, &err);
+    /* The server's own fault ends this session, not the server: the
+     * release may be fixed before the next device connects. */
+    if (rc < 0) cli_fail("%s", err.msg);
+    if (rc > 0) {
         char label[32];
         snprintf(label, sizeof label, "v%u", res.ver);
         report(label, &res);
@@ -125,12 +133,13 @@ int main(int argc, char **argv)
 {
     poc_dev_key(dev_key);
     poc_root_key(root_key);
+    if (lz4_register() < 0) { cli_fail("cannot register the LZ4 compressors"); return 1; }
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc)        opt_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--image") && i + 1 < argc)  opt_image = argv[++i];
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc)  opt_cache = argv[++i];
-        else die("unknown option %s", argv[i]);
+        else { cli_fail("unknown option %s", argv[i]); return 2; }
     }
 
     /* A device that dies mid-plan closes the socket under us; without this the
@@ -145,16 +154,20 @@ int main(int argc, char **argv)
 #endif
     mkdir(opt_cache, 0755);
 
-    if (!opt_image)
-        die("no image to serve\n"
-            "  usage: cb-server --image FILE [--port N] [--cache DIR]");
+    if (!opt_image) {
+        cli_fail("no image to serve\n"
+                 "  usage: cb-server --image FILE [--port N] [--cache DIR]");
+        return 2;
+    }
 
     plat_io_t *srv = plat_io_tcp_listen(opt_port);
-    if (!srv)
-        die("cannot listen on port %d: %s\n"
-            "  another server is probably still running: pkill cb-server\n"
-            "  or pick a free port on both sides: --port N",
-            opt_port, strerror(errno));
+    if (!srv) {
+        cli_fail("cannot listen on port %d: %s\n"
+                 "  another server is probably still running: pkill cb-server\n"
+                 "  or pick a free port on both sides: --port N",
+                 opt_port, strerror(errno));
+        return 1;
+    }
     printf("server: listening on 127.0.0.1:%d, serving %s\n", opt_port, opt_image);
     printf("server: a full image is %d sectors, %.0f-%.0f ms of flash on the device\n",
            SECTORS_SLOT, SECTORS_SLOT * flash_sector_timing_ms(0), SECTORS_SLOT * flash_sector_timing_ms(1));

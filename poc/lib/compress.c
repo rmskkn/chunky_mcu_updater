@@ -1,20 +1,13 @@
 #include "compress.h"
-#include "lz4.h"
 #include <string.h>
 
+/* Empty until the integrator registers compressors: lib/ links no
+ * compression library itself (the host's LZ4 is middleware/lz4.c). RAW
+ * always works without one. */
 static const compressor_t *reg[COMPRESS_MAX_ID + 1];
-
-static void builtins(void)
-{
-    if (!reg[COMPRESS_LZ4]) {
-        reg[COMPRESS_LZ4]      = &lz4_compressor;
-        reg[COMPRESS_LZ4_DICT] = &lz4_dict_compressor;
-    }
-}
 
 int compress_register(const compressor_t *c)
 {
-    builtins();
     if (c->id == COMPRESS_RAW || c->id > COMPRESS_MAX_ID || reg[c->id]) return -1;
     reg[c->id] = c;
     return 0;
@@ -26,7 +19,6 @@ size_t compress_sector(const uint8_t in[SECTOR_SIZE], const uint8_t *dict,
     uint8_t tmp[SECTOR_SIZE];
     size_t best = 0;
 
-    builtins();
     for (int i = 1; i <= COMPRESS_MAX_ID; i++) {
         const compressor_t *c = reg[i];
         if (!c || (c->uses_dict && !dict)) continue;
@@ -53,7 +45,6 @@ int decompress_sector(uint8_t id, const uint8_t *enc, size_t enc_len,
         memcpy(out, enc, SECTOR_SIZE);
         return 0;
     }
-    builtins();
     if (id > COMPRESS_MAX_ID || !reg[id]) return -1;
     if (reg[id]->uses_dict && !dict) return -1;
     return reg[id]->decompress(enc, enc_len, dict, out) == SECTOR_SIZE ? 0 : -1;
