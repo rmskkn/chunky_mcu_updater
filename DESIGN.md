@@ -71,8 +71,8 @@ META0_UNIT     = ID_UNIT + 1,  META1_UNIT = META0_UNIT + META_UNITS
 APP_BASE       = round_up((META1_UNIT + META_UNITS) * ERASE_SIZE, SECTOR_SIZE)
 ```
 
-The PoC's device catalog (`poc/device/<part>/device.toml`) declares this
-layout per part; `poc/tools/gen_device.py` generates the header compiled in
+The PoC's device catalog (`device/<part>/device.toml`) declares this
+layout per part; `tools/gen_device.py` generates the header compiled in
 at build time and a linker `MEMORY` block from it, and splits the space after the
 meta banks 50/50 into slot A and slot B, each rounded down to a sector. Its
 meta banks carry the journal in a page of their own, so at 1 KB / 1 KB the
@@ -133,8 +133,8 @@ allowing several programs per word before erase turns the limit off
 | **Update client** | Application firmware | Owns the transport. Computes the device manifest, receives steps, writes blob sectors into the inactive slot, fills the meta bank, reboots. |
 | **Bootloader** | Pages 0–15 | Executes COPY steps, verifies the whole image, flips slots, runs trial boots, reverts, unrolls. No network. |
 
-The host PoC in `poc/` implements exactly this split, and
-[`poc/README.md`](poc/README.md) draws it: which process owns what, how the
+The host PoC in this repository implements exactly this split, and
+[`docs/poc.md`](docs/poc.md) draws it: which process owns what, how the
 flash regions relate, and the whole message exchange of one request.
 
 The transport lives in the application because that is where the UART/CAN/
@@ -339,7 +339,7 @@ Every session is protected as described in Section 10.3, and every manifest is
 signed by the device and verified by the server before a plan is generated
 (Section 10.2). A session that fails either check never reaches the planner.
 
-[`poc/README.md`](poc/README.md) has the same exchange as a sequence diagram,
+[`docs/poc.md`](docs/poc.md) has the same exchange as a sequence diagram,
 drawn from the working implementation.
 
 **Resume.** On reconnect the client repeats `HELLO`/`CHALLENGE` with the stored
@@ -1063,7 +1063,7 @@ Framing costs 10 B per frame (2 magic + 2 length + 1 type + 1 sequence +
 `PLAN_BEGIN` + the closing messages: **2328 B measured**.
 
 The numbers below are **measured**, not modelled: they come from the host PoC
-in `poc/`, which runs the real protocol over a real socket against a 128 KB
+in this repository, which runs the real protocol over a real socket against a 128 KB
 emulated flash and a 45 772 B reference binary. The PoC prints the same
 figures, one row per update request, for whatever release it is given.
 
@@ -1315,10 +1315,10 @@ system `liblz4`.
 
 Everything above assumes A/B: two application partitions, the inactive one
 rewritten and the active one untouched, which is what makes unroll O(1) and
-revert possible at all. The host PoC in `poc/` implements a **different
+revert possible at all. The host PoC in this repository implements a **different
 layout**, chosen deliberately: one application partition, updated in place.
 
-| | A/B (Sections 2-8) | Single partition (`poc/`) |
+| | A/B (Sections 2-8) | Single partition (PoC) |
 |---|---|---|
 | Application space | 2 x 52 KB | 102 KB |
 | Sectors in the manifest | 104, both slots | 102, the one partition |
