@@ -24,6 +24,7 @@
 static const char *opt_image = NULL;   /* the release to serve */
 static const char *opt_cache  = "cache";
 static int opt_port    = 7700;
+static int opt_abort    = 0;   /* test-only: ABORT instead of COMMIT, see --abort-after-plan */
 
 static uint8_t dev_key[32], root_key[32];
 
@@ -118,7 +119,7 @@ static void session(plat_io_t *io)
     server_session_result_t res;
     cb_err_t err;
     int rc = server_update_session(io, opt_image, opt_cache, dev_key, root_key,
-                                   cli_log, NULL, &res, &err);
+                                   opt_abort, cli_log, NULL, &res, &err);
     /* The server's own fault ends this session, not the server: the
      * release may be fixed before the next device connects. */
     if (rc < 0) cli_fail("%s", err.msg);
@@ -139,6 +140,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--port") && i + 1 < argc)        opt_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--image") && i + 1 < argc)  opt_image = argv[++i];
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc)  opt_cache = argv[++i];
+        else if (!strcmp(argv[i], "--abort-after-plan"))       opt_abort = 1;
         else { cli_fail("unknown option %s", argv[i]); return 2; }
     }
 

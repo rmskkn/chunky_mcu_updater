@@ -15,12 +15,19 @@ out="$(update 2>&1)"
 echo "$out" | grep -E 'plan v|device: wire|booting'
 wire_stats "$out"
 
-assert_contains "$out" "plan v2, 2 steps" "sector 0 (the version stamp) plus the patched sector"
+# Exactly 2 sectors sent (sector 0, the patched sector); everything else is
+# a free OP_COPY from the active slot (the destination starts blank on the
+# device's first A/B update), which inflates the step count without
+# costing wire bytes -- "2 sent" is the stable invariant, not step count.
+# (0x00 is not the blank/erased pattern, unlike 0xFF -- see
+# case_lz4_uniform_ff.sh -- so this sector still needs to be sent.)
+grep -q "2 sent, " "$RUN/server.log" || fail "write count" \
+    "expected exactly 2 writes (sector 0 and the patched sector); see $RUN/server.log"
 assert_contains "$out" "booting version 2" "boots the new version"
 assert_contains "$out" "verified" "image verifies"
 [ "$(compress_count lz4)" -ge 1 ] || fail "compressor" "the uniform sector was not sent as lz4"
 
-limit=$((RAW_WIRE + 412))
-[ "$WIRE_RX" -lt "$limit" ] || fail "wire size" "rx=$WIRE_RX B, expected under $limit B (one raw-sized write + one tiny sector)"
+limit=$((RAW_WIRE + COPY_MARGIN))
+[ "$WIRE_RX" -lt "$limit" ] || fail "wire size" "rx=$WIRE_RX B, expected under $limit B (two small writes, many free copies)"
 
 ok "lz4_uniform_00 (rx=$WIRE_RX B)"

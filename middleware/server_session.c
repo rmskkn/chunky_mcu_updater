@@ -66,6 +66,7 @@ static int store_get(const char *cache_dir, const uint8_t h[SECTOR_HASH_LEN],
 
 int server_update_session(plat_io_t *io, const char *image_path, const char *cache_dir,
                           const uint8_t dev_key[32], const uint8_t root_key[32],
+                          int abort_before_commit,
                           log_fn log, void *log_ctx, server_session_result_t *out,
                           cb_err_t *err)
 {
@@ -83,14 +84,17 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     if (frame_expect(&l, MSG_HELLO, pay, &n) < 0) return 0;
     memcpy(&hello, pay, sizeof hello);
     if (hello.sector_size != SECTOR_SIZE || hello.sectors != SECTORS_SLOT ||
-        hello.sector_hash_len != SECTOR_HASH_LEN) {
+        hello.sector_hash_len != SECTOR_HASH_LEN ||
+        (hello.active_slot != SLOT_A && hello.active_slot != SLOT_B)) {
         uint8_t r = REJ_GEOMETRY_MISMATCH;
         frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
         log_fmt(log, log_ctx, "server: geometry mismatch, session refused");
         return 0;
     }
-    log_fmt(log, log_ctx, "server: HELLO running_version=%u last_result=%u",
-           hello.running_version, hello.last_result);
+    log_fmt(log, log_ctx, "server: HELLO running_version=%u last_result=%u active_slot=%c",
+           hello.running_version, hello.last_result, 'A' + hello.active_slot);
+    int active_slot = hello.active_slot;
+    int dest_slot   = OTHER_SLOT(active_slot);   /* the device's own inactive slot */
 
     rnd_bytes(ch.nonce, NONCE_LEN);
     frame_send(&l, MSG_CHALLENGE, &ch, sizeof ch);
@@ -207,7 +211,7 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     }
 
     double t_plan = now_ms();
-    plan_build(&dev, target, &out->plan);
+    plan_build(&dev, active_slot, dest_slot, target, &out->plan);
     t_plan = now_ms() - t_plan;
     log_fmt(log, log_ctx, "server: plan built in %.2f ms", t_plan);
 
@@ -216,11 +220,12 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     memset(&pb, 0, sizeof pb);
     pb.version    = (uint32_t)ver;
     pb.step_count = (uint16_t)out->plan.count;
+    pb.dest_slot  = (slot_id_t)dest_slot;
     memcpy(pb.image_sha256, d->sha256, SHA256_LEN);
     memcpy(pb.image_mac, d->mac, SHA256_LEN);
     frame_send(&l, MSG_PLAN_BEGIN, &pb, sizeof pb);
-    log_fmt(log, log_ctx, "server: plan v%d, %d steps (%d skipped)",
-           ver, out->plan.count, out->plan.n_skip);
+    log_fmt(log, log_ctx, "server: plan v%d, %d steps (%d skipped), dest slot %c",
+           ver, out->plan.count, out->plan.n_skip, 'A' + dest_slot);
 
     /* Stream every step without waiting for its ACK (DESIGN.md 6, revised):
      * the device flashes one sector in the background while the next one's
@@ -231,15 +236,16 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
         step_t *s = &out->plan.step[k];
         if (s->op == OP_COPY) {
             msg_step_copy_t c;
-            c.dst = s->dst; c.src_index = s->src_index;
+            c.dst = s->dst; c.src_slot = s->src_slot; c.src_index = s->src_index;
             memcpy(c.hash, s->hash, SECTOR_HASH_LEN);
             frame_send(&l, MSG_STEP_COPY, &c, sizeof c);
         } else {
-            /* dev.h[dst] is the device's current content of dst, which is what
-             * its flash holds when it decompresses: each dst is written once
-             * per plan, and writes happen in-session. */
+            /* dev.h[.] at dest_slot's own index for dst is the device's
+             * current content there, which is what its flash holds when it
+             * decompresses: each dst is written once per plan, and writes
+             * happen in-session. */
             uint8_t enc[SECTOR_SIZE], dict[SECTOR_SIZE], method;
-            int have_dict = store_get(cache_dir, dev.h[s->dst], dict) == 0;
+            int have_dict = store_get(cache_dir, dev.h[manifest_index(dest_slot, s->dst)], dict) == 0;
             size_t enc_len = compress_sector(target + (size_t)s->dst * SECTOR_SIZE,
                                              have_dict ? dict : NULL, enc, &method);
             out->n_raw      += method == COMPRESS_RAW;
@@ -289,20 +295,35 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     if (frame_expect(&l, MSG_PLAN_READY, pay, &n) < 0) goto out_report;
     log_fmt(log, log_ctx, "server: device staged the plan, %u steps left for the bootloader",
            (unsigned)((msg_plan_ready_t *)pay)->pending);
+
+    if (abort_before_commit) {
+        /* Test-only hook (docs/ab_migration.md's "unroll before any boot
+         * attempt" case): simulate the link or server giving up between
+         * PLAN_READY and COMMIT. The device never arms the plan, so the
+         * next device_boot() finds it staged but unarmed and unrolls it. */
+        frame_send(&l, MSG_ABORT, NULL, 0);
+        log_fmt(log, log_ctx, "server: test hook, sending ABORT instead of COMMIT");
+        goto out_report;
+    }
     frame_send(&l, MSG_COMMIT, NULL, 0);
 
-    /* The device's next manifest is the one this plan produces: the target,
-     * sector for sector. Cache it now so that request elides its body
-     * (DESIGN.md 17.1) instead of always missing right after an update. If
-     * the update fails, the digests differ and the device sends its manifest
-     * in full, which then replaces this one. */
+    /* The device's next manifest is the one this plan produces: dest_slot
+     * becomes the target, sector for sector; active_slot is unchanged
+     * (confirming only moves which slot is "active," never a flash byte).
+     * Cache it now so that request elides its body (DESIGN.md 17.1) instead
+     * of always missing right after an update. If the update fails, the
+     * digests differ and the device sends its manifest in full, which then
+     * replaces this one. */
     {
         manifest_t next;
         memset(&next, 0, sizeof next);
         next.sector_size = SECTOR_SIZE;
-        next.sectors     = SECTORS_SLOT;
-        for (int i = 0; i < SECTORS_SLOT; i++)
-            sector_hash(target + (size_t)i * SECTOR_SIZE, next.h[i]);
+        next.sectors     = MANIFEST_ENTRIES;
+        for (int i = 0; i < SECTORS_SLOT; i++) {
+            sector_hash(target + (size_t)i * SECTOR_SIZE, next.h[manifest_index(dest_slot, i)]);
+            memcpy(next.h[manifest_index(active_slot, i)],
+                  manifest_hash_at(&dev, manifest_index(active_slot, i)), SECTOR_HASH_LEN);
+        }
         cache_path(cpath, sizeof cpath, hello.device_id, cache_dir);
         write_file(cpath, &next, MANIFEST_BODY_LEN);
     }

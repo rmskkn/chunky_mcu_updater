@@ -40,11 +40,12 @@ difference into a spare partition that the running firmware never depends on.
    space. That is what makes two 52 KB application slots fit in 128 KB of
    flash.
 
-   The host PoC lays out both slots (51 KB each, from the device catalog
-   entry `device/stm32f103cb/device.toml`) but still runs the
-   single-partition update: slot A updated in place, slot B reserved, which
-   trades unroll and revert for simplicity until the A/B flow lands.
-   [`DESIGN.md`](DESIGN.md) section 18 has the comparison.
+   The host PoC runs the real A/B flow: both slots (51 KB each, from the
+   device catalog entry `device/stm32f103cb/device.toml`) are live, the
+   session always writes the inactive one, and the bootloader trial-boots
+   the result before confirming it. [`DESIGN.md`](DESIGN.md) section 18
+   (historical) has the single-partition variant the PoC ran before this
+   migration, kept as a record of that layout's tradeoffs.
 4. **The bootloader applies the plan and can unroll it.** Apply is journalled
    and resumable, and it never writes outside the inactive partition. So
    abandoning an update is one page erase, with nothing to undo.
@@ -109,9 +110,9 @@ exchange, and what the PoC deliberately leaves out.
 | 17 | Overhead against a full image transfer, and manifest elision |
 
 ## For Review/ TODO
-1. In-place single-partition updates;
+1. A/B updates with trial boot and revert (done: `docs/ab_migration.md`, [`DESIGN.md`](DESIGN.md) sections 2-8; section 18 (historical) has the single-partition variant this superseded);
 2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: [`DESIGN.md`](DESIGN.md) 17.2);
-3. Multi-generation rollback or over-the-air updates of the bootloader itself;
+3. Multi-generation rollback (more than one previous image recoverable) or over-the-air updates of the bootloader itself;
 4. Reasoning for each is in [`DESIGN.md`](DESIGN.md).
 
 

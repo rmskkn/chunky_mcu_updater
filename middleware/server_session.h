@@ -22,8 +22,12 @@ typedef struct {
  * on the device's side, or nothing to update). -1 with the reason in *err
  * is the server's own fault (the release cannot be read or does not fit),
  * which the next session will hit too. */
+/* abort_before_commit (test-only, docs/ab_migration.md): send ABORT instead
+ * of COMMIT right after PLAN_READY, simulating a link or server fault
+ * before the device ever arms the plan. */
 int server_update_session(plat_io_t *io, const char *image_path, const char *cache_dir,
                           const uint8_t dev_key[32], const uint8_t root_key[32],
+                          int abort_before_commit,
                           log_fn log, void *log_ctx, server_session_result_t *out,
                           cb_err_t *err);
 

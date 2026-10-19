@@ -34,6 +34,9 @@ static int cmd_manifest(const char *path)
     meta_load(&f, &m);
     (void)m;
     manifest_build(&f, &man);
+    /* Flat index, slot A's sectors (0..SECTORS_SLOT-1) then slot B's -- same
+     * numbering the wire manifest and tests/common.sh's sector_hash_hex()
+     * use, so a sector number alone is still enough to find its entry. */
     for (int k = 0; k < MANIFEST_ENTRIES; k++) {
         hexdump_line(man.h[k], SECTOR_HASH_LEN, hex);
         printf("%3d %s%s", k, hex, (k % 5 == 4) ? "\n" : "   ");
@@ -70,14 +73,15 @@ static int cmd_find(const char *path, const char *hex)
     manifest_build(&f, &man);
 
     int hits = 0;
-    for (int i = 0; i < SECTORS_SLOT; i++)
-        if (!memcmp(man.h[i], want, n)) {
-            hexdump_line(man.h[i], SECTOR_HASH_LEN, buf);
-            printf("sector %3d  %s  at 0x%05zx\n", i, buf,
-                   APP_BASE + (size_t)i * SECTOR_SIZE);
+    for (int k = 0; k < MANIFEST_ENTRIES; k++)
+        if (!memcmp(man.h[k], want, n)) {
+            int slot = manifest_slot_of(k), i = manifest_sector_of(k);
+            hexdump_line(man.h[k], SECTOR_HASH_LEN, buf);
+            printf("slot %c sector %3d  %s  at 0x%05zx\n", 'A' + slot, i, buf,
+                   slot_base(slot) + (size_t)i * SECTOR_SIZE);
             hits++;
         }
-    printf("%d of %d sectors match %s%s\n", hits, SECTORS_SLOT, hex,
+    printf("%d of %d sectors match %s%s\n", hits, MANIFEST_ENTRIES, hex,
            n < SECTOR_HASH_LEN ? " (prefix)" : "");
     flash_file_close(&f);
     return hits ? 0 : 1;

@@ -20,6 +20,14 @@ need_build() {
     [ -x "$CB_FLASH" ] || make -C "$POC" >/dev/null
     eval "$("$CB_FLASH" geometry)"
     RAW_WIRE=$((SECTOR_SIZE / 256 * 272))   # per 256 B fragment: frame 10 + header 6
+    # A/B margin: on a device's first update the destination slot starts
+    # blank, so almost every sector the plan doesn't write is a free
+    # OP_COPY instead of an "already right" skip -- zero bytes each, but
+    # still a framed STEP_COPY + STEP_ACK, which scales with SECTOR_HASH_LEN
+    # (msg_step_copy_t carries a full hash). Tests that bound total wire
+    # size after a first-ever update add this per-sector margin on top of
+    # whatever the write-sized sectors actually cost.
+    COPY_MARGIN=$((SECTORS * (40 + 2 * SECTOR_HASH_LEN) + 700))
 }
 
 # test_init NAME: sets RUN, CACHE, FLASH, IMAGE, BASE, PORT and clears RUN.

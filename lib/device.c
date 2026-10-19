@@ -36,10 +36,10 @@ static void ack(device_session_t *s, uint8_t type, sector_idx_t dst, uint8_t cod
     reply(s, type, &a, sizeof a);
 }
 
-uint32_t device_app_version(flash_t *f)
+uint32_t device_app_version(flash_t *f, int slot)
 {
     image_desc_t d;
-    image_desc_read(f, &d);
+    image_desc_read(f, slot, &d);
     return d.magic == IMG_MAGIC ? d.version : 0;
 }
 
@@ -63,7 +63,7 @@ int device_session_start(device_session_t *s, flash_t *f, const uint8_t dev_key[
 
     meta_t m;
     meta_load(f, &m);
-    s->generation = m.generation;
+    s->active_slot = m.active_slot;
 
     msg_hello_t h;
     memset(&h, 0, sizeof h);
@@ -72,10 +72,11 @@ int device_session_start(device_session_t *s, flash_t *f, const uint8_t dev_key[
     h.sectors         = SECTORS_SLOT;
     h.last_result     = (uint8_t)m.last_result;
     h.sector_hash_len = SECTOR_HASH_LEN;
+    h.active_slot     = (slot_id_t)s->active_slot;
     image_desc_t d;
-    image_desc_read(f, &d);
+    image_desc_read(f, s->active_slot, &d);
     h.running_version = d.magic == IMG_MAGIC ? d.version : 0;
-    if (d.magic == IMG_MAGIC) image_hash_flash(f, h.running_sha256);
+    if (d.magic == IMG_MAGIC) image_hash_flash(f, s->active_slot, h.running_sha256);
     reply(s, MSG_HELLO, &h, sizeof h);
 
     s->state = S_CHALLENGE;
@@ -139,11 +140,26 @@ static int on_offer(device_session_t *s, int t, const uint8_t *pay, size_t n)
     msg_plan_begin_t pb;
     if (n < sizeof pb) return fail(s, "short PLAN_BEGIN (%zu B)", n);
     memcpy(&pb, pay, sizeof pb);
-    log_fmt(s->log, s->log_ctx, "device: plan v%u, %u steps", pb.version, pb.step_count);
 
-    meta_init(&s->np);
-    s->np.generation     = s->generation;
+    /* pending_slot is always "the slot not currently active," computed from
+     * our own stored active_slot -- never from pb.dest_slot, which is only
+     * cross-checked below (docs/ab_migration.md: "never from anything the
+     * wire sends"). */
+    s->pending_slot = OTHER_SLOT(s->active_slot);
+    if (pb.dest_slot != s->pending_slot)
+        return fail(s, "server's plan targets slot %d, this device's inactive slot is %d",
+                   pb.dest_slot, s->pending_slot);
+    log_fmt(s->log, s->log_ctx, "device: plan v%u, %u steps, into slot %c",
+           pb.version, pb.step_count, 'A' + s->pending_slot);
+
+    /* Reload rather than meta_init(): a fresh plan is per-cycle scratch, but
+     * active_slot (and, once a plan exists, the attempt log) must survive
+     * every cycle including this one if it never lands -- meta_reset_plan()
+     * clears only the scratch fields. */
+    meta_load(s->f, &s->np);
+    meta_reset_plan(&s->np);
     s->np.plan_state     = PLAN_STAGING;
+    s->np.pending_slot   = (uint8_t)s->pending_slot;
     s->np.target_version = pb.version;
     s->np.step_count     = pb.step_count;
     memcpy(s->np.target_sha256, pb.image_sha256, SHA256_LEN);
@@ -171,14 +187,14 @@ static void stage_sector(device_session_t *s, sector_idx_t dst,
     /* The sector may already hold this exact content - a stale manifest
      * cache or a re-sent step, say. Check before erasing: an erase/program
      * cycle is real wear and the slow part of this step, a hash is neither. */
-    flash_sector_hash(s->f, dst, got);
+    flash_sector_hash(s->f, s->pending_slot, dst, got);
     if (memcmp(got, hash, SECTOR_HASH_LEN)) {
-        if (flash_write_app_sector(s->f, dst, s->sect) < 0) {
+        if (flash_write_app_sector(s->f, s->pending_slot, s->active_slot, dst, s->sect) < 0) {
             ack(s, MSG_STEP_NAK, dst, NAK_FLASH_FAIL);
             log_fmt(s->log, s->log_ctx, "device: sector %u: %s", dst, s->f->err.msg);
             return;
         }
-        flash_sector_hash(s->f, dst, got);
+        flash_sector_hash(s->f, s->pending_slot, dst, got);
     }
 
     if (memcmp(got, hash, SECTOR_HASH_LEN)) {
@@ -226,11 +242,14 @@ static int on_step(device_session_t *s, int t, const uint8_t *pay, size_t n)
         msg_step_copy_t c;
         if (n < sizeof c) return fail(s, "short STEP_COPY (%zu B)", n);
         memcpy(&c, pay, sizeof c);
-        if (c.dst >= SECTORS_SLOT || c.src_index >= SECTORS_SLOT)
-            return fail(s, "bad sector index dst=%u src=%u", c.dst, c.src_index);
+        if (c.dst >= SECTORS_SLOT || c.src_index >= SECTORS_SLOT ||
+            (c.src_slot != SLOT_A && c.src_slot != SLOT_B))
+            return fail(s, "bad sector index dst=%u src_slot=%u src=%u",
+                       c.dst, c.src_slot, c.src_index);
         /* Recorded only. The bootloader does flash-to-flash copies
          * (DESIGN.md section 7 step 2). */
         s->np.op[c.dst]        = OP_COPY;
+        s->np.src_slot[c.dst]  = c.src_slot;
         s->np.src_index[c.dst] = c.src_index;
         memcpy(s->np.target_hash[c.dst], c.hash, SECTOR_HASH_LEN);
         s->pending_copies++;
@@ -253,10 +272,11 @@ static int on_step(device_session_t *s, int t, const uint8_t *pay, size_t n)
             (we.compress == COMPRESS_RAW && we.enc_len != SECTOR_SIZE))
             return fail(s, "bad write end");
 
-        /* The dictionary is dst's current flash content, which is what our
-         * manifest told the server it holds: dst is written once per plan,
-         * and only after this. */
-        flash_read(s->f, APP_BASE + (size_t)we.dst * SECTOR_SIZE, s->dict, SECTOR_SIZE);
+        /* The dictionary is dst's current flash content in the pending
+         * slot, which is what our manifest told the server it holds: dst is
+         * written once per plan, and only after this. */
+        flash_read(s->f, slot_base(s->pending_slot) + (size_t)we.dst * SECTOR_SIZE,
+                  s->dict, SECTOR_SIZE);
         if (decompress_sector(we.compress, s->enc, we.enc_len, s->dict, s->sect) < 0) {
             ack(s, MSG_STEP_NAK, we.dst, NAK_DECOMPRESS);
             log_fmt(s->log, s->log_ctx, "device: sector %u does not decompress", we.dst);
@@ -327,9 +347,50 @@ static int boot_flash_fail(flash_t *f, log_fn log, void *log_ctx)
     return -1;
 }
 
-/* Applies whatever the session staged, then decides whether the partition is
- * bootable. With one partition there is nothing to fall back to: a failure is
- * reported and the next request is the recovery path. */
+/* Unroll (DESIGN.md section 8): abandon a plan that never booted -- never
+ * armed, a copy source gone stale, or the staged image failing verify.
+ * Erasing just sector 0 of the pending slot is enough: the slot header
+ * disappears, so it is unmistakably invalid, and the apply invariant means
+ * there is nothing else to undo. active_slot is untouched; it was never
+ * going to move until a confirm that now never happens. */
+static int unroll_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx, const char *why)
+{
+    int pending = m->pending_slot;
+    log_fmt(log, log_ctx, "boot: unrolling the plan into slot %c (%s)", 'A' + pending, why);
+    size_t off = slot_base(pending);
+    for (int u = 0; u < SECTOR_SIZE / ERASE_SIZE; u++)
+        if (flash_erase_unit(f, (int)(off / ERASE_SIZE) + u) < 0) return -1;
+    m->plan_state    = PLAN_NONE;
+    m->pending_slot  = SLOT_NONE;
+    m->attempts_left = 0;
+    m->last_result   = RES_VERIFY_FAILED;
+    return meta_store(f, m);
+}
+
+/* Revert (DESIGN.md section 8): a committed-but-broken image, after
+ * MAX_TRIES failed trial boots. active_slot is unchanged -- it was never
+ * moved, so the image that was running before the update is still there.
+ * The pending slot's descriptor is marked REVOKED so it is never retried
+ * as-is; it is now simply the inactive slot again, available as the
+ * destination of the next plan. */
+static int revert_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx)
+{
+    int pending = m->pending_slot;
+    log_fmt(log, log_ctx, "boot: reverting after %d failed trial boots; "
+           "slot %c revoked, staying on slot %c",
+           MAX_TRIES, 'A' + pending, 'A' + m->active_slot);
+    if (image_revoke_flash(f, pending) < 0) return -1;
+    m->plan_state    = PLAN_NONE;
+    m->pending_slot  = SLOT_NONE;
+    m->attempts_left = 0;
+    m->last_result   = RES_TRIAL_FAILED;
+    return meta_store(f, m);
+}
+
+/* Applies whatever the session staged into the pending slot, trial-boots
+ * it, and otherwise decides whether the active slot is bootable (DESIGN.md
+ * sections 7-8). See device.h for the calling contract: one call is one
+ * simulated boot/reset cycle. */
 int device_boot(flash_t *f, const uint8_t root_key[32],
                 log_fn log, void *log_ctx, device_stats_t *stats)
 {
@@ -343,98 +404,175 @@ int device_boot(flash_t *f, const uint8_t root_key[32],
     meta_load(f, &m);
 
     if (m.plan_state == PLAN_STAGING && journal_get(f, JRN_ARM_INDEX) != 0x0000) {
-        log_fmt(log, log_ctx, "boot: plan was never committed, discarding it "
-                "(the sectors it wrote stay as written)");
-        m.plan_state  = PLAN_NONE;
-        m.last_result = RES_VERIFY_FAILED;
-        if (meta_store(f, &m) < 0) return boot_flash_fail(f, log, log_ctx);
+        if (unroll_plan(f, &m, log, log_ctx, "plan was never committed") < 0)
+            return boot_flash_fail(f, log, log_ctx);
+        goto final_boot;   /* unroll leaves nothing pending; boot active_slot */
     } else if (m.plan_state == PLAN_STAGING) {
-        log_fmt(log, log_ctx, "boot: applying plan v%u", m.target_version);
+        int pending = m.pending_slot;
+        log_fmt(log, log_ctx, "boot: applying plan v%u into slot %c",
+               m.target_version, 'A' + pending);
         double t0 = tick(stats);
-        for (int i = 0; i < SECTORS_SLOT; i++) {
+        int bad = 0;
+        for (int i = 0; i < SECTORS_SLOT && !bad; i++) {
             if (m.op[i] == OP_NONE || journal_get(f, i) == JRN_DONE) continue;
 
             uint8_t got[SECTOR_HASH_LEN];
             if (m.op[i] == OP_COPY) {
-                /* src_index came off the wire a session ago and lives in
-                 * flash across the reboot; a bounds check at send time
-                 * (device_session_feed) does not protect this read, which
-                 * runs on every boot regardless of how the stored value got
-                 * there. Treat an out-of-range index as a bad plan, same as
-                 * a copy source that no longer matches -- this path must
-                 * never read outside the partition. */
-                if (m.src_index[i] >= SECTORS_SLOT) {
-                    log_fmt(log, log_ctx, "boot: copy source for sector %d is out of range", i);
-                    m.plan_state = PLAN_BAD;
+                /* src_slot/src_index came off the wire a session ago and
+                 * live in flash across the reboot; the bounds check at send
+                 * time (device_session_feed) does not protect this read,
+                 * which runs on every boot regardless of how the stored
+                 * value got there. Treat an out-of-range index, or a slot
+                 * id that is neither A nor B, as a bad plan, same as a copy
+                 * source that no longer matches -- this path must never
+                 * read outside the two slots. */
+                if (m.src_index[i] >= SECTORS_SLOT ||
+                    (m.src_slot[i] != SLOT_A && m.src_slot[i] != SLOT_B)) {
+                    if (unroll_plan(f, &m, log, log_ctx, "copy source out of range") < 0)
+                        return boot_flash_fail(f, log, log_ctx);
+                    bad = 1;
                     break;
                 }
-                /* Flash to flash inside the partition, through RAM. */
+                /* Flash to flash, through RAM; source is always safe to
+                 * read (either the untouched active slot, or a sector of
+                 * the pending slot the plan itself already verified as
+                 * correct and left alone -- lib/plan.c's rule 2). */
                 uint8_t tmp[SECTOR_SIZE];
-                flash_read(f, APP_BASE + (size_t)m.src_index[i] * SECTOR_SIZE,
+                flash_read(f, slot_base(m.src_slot[i]) + (size_t)m.src_index[i] * SECTOR_SIZE,
                            tmp, SECTOR_SIZE);
                 sector_hash(tmp, got);
                 if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
-                    log_fmt(log, log_ctx, "boot: copy source for sector %d no longer matches", i);
-                    m.plan_state = PLAN_BAD;
+                    if (unroll_plan(f, &m, log, log_ctx, "copy source no longer matches") < 0)
+                        return boot_flash_fail(f, log, log_ctx);
+                    bad = 1;
                     break;
                 }
-                if (flash_write_app_sector(f, (sector_idx_t)i, tmp) < 0) {
+                if (flash_write_app_sector(f, pending, m.active_slot, (sector_idx_t)i, tmp) < 0) {
                     log_fmt(log, log_ctx, "boot: copy into sector %d: %s", i, f->err.msg);
-                    m.plan_state  = PLAN_BAD;
-                    m.last_result = RES_FLASH_FAIL;
+                    if (unroll_plan(f, &m, log, log_ctx, "flash failure during copy") < 0)
+                        return boot_flash_fail(f, log, log_ctx);
+                    bad = 1;
                     break;
                 }
             }
-            flash_sector_hash(f, i, got);
+            flash_sector_hash(f, pending, i, got);
             if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
-                log_fmt(log, log_ctx, "boot: sector %d does not match the plan", i);
-                m.plan_state = PLAN_BAD;
+                if (unroll_plan(f, &m, log, log_ctx, "sector does not match the plan") < 0)
+                    return boot_flash_fail(f, log, log_ctx);
+                bad = 1;
                 break;
             }
             if (journal_set(f, i, JRN_DONE) < 0) {
                 log_fmt(log, log_ctx, "boot: journal for sector %d: %s", i, f->err.msg);
-                m.plan_state  = PLAN_BAD;
-                m.last_result = RES_FLASH_FAIL;
+                if (unroll_plan(f, &m, log, log_ctx, "flash failure recording progress") < 0)
+                    return boot_flash_fail(f, log, log_ctx);
+                bad = 1;
                 break;
             }
             stats->sha_bytes += 2 * SECTOR_SIZE;
         }
         stats->t_apply = tick(stats) - t0;
+        /* unroll_plan() already recorded and stored the result; boot
+         * active_slot, which this failed apply never touched. */
+        if (bad) goto final_boot;
 
-        if (m.plan_state != PLAN_BAD) {
-            t0 = tick(stats);
-            uint8_t hsh[SHA256_LEN];
-            image_hash_flash(f, hsh);
-            stats->sha_bytes += SLOT_SIZE - DESC_LEN;
-            stats->ecdsa_ms += ECDSA_VERIFY_MS;
-            if (memcmp(hsh, m.target_sha256, SHA256_LEN) ||
-                image_verify_flash(f, root_key, hsh, &why) < 0) {
-                log_fmt(log, log_ctx, "boot: the staged image does not verify (%s)",
-                       why ? why : "image_sha256 mismatch");
-                m.plan_state = PLAN_BAD;
-            } else {
-                m.plan_state  = PLAN_COMMITTED;
-                m.last_result = RES_OK;
-            }
+        t0 = tick(stats);
+        uint8_t hsh[SHA256_LEN];
+        image_hash_flash(f, pending, hsh);
+        stats->sha_bytes += SLOT_SIZE - DESC_LEN;
+        stats->ecdsa_ms += ECDSA_VERIFY_MS;
+        if (memcmp(hsh, m.target_sha256, SHA256_LEN) ||
+            image_verify_flash(f, pending, root_key, hsh, &why) < 0) {
             stats->t_verify = tick(stats) - t0;
+            if (unroll_plan(f, &m, log, log_ctx,
+                            why ? why : "image_sha256 mismatch") < 0)
+                return boot_flash_fail(f, log, log_ctx);
+            goto final_boot;
         }
+        stats->t_verify = tick(stats) - t0;
+
+        /* DESIGN.md section 7 steps 4-5: the pending image verified, so it
+         * becomes a trial -- MAX_TRIES tokens, then immediately consume one
+         * for this same boot/reset cycle (see device.h's calling contract:
+         * the STAGING->TRIAL transition and the first trial attempt happen
+         * in one device_boot() call, exactly like a real bootloader would
+         * do between one apply pass and the jump that follows it). */
+        m.plan_state    = PLAN_TRIAL;
+        m.attempts_left = MAX_TRIES;
         if (meta_store(f, &m) < 0) return boot_flash_fail(f, log, log_ctx);
     }
 
+    if (m.plan_state == PLAN_TRIAL) {
+        if (m.attempts_left == 0) {
+            if (revert_plan(f, &m, log, log_ctx) < 0) return boot_flash_fail(f, log, log_ctx);
+            goto final_boot;   /* revert leaves nothing pending; boot active_slot */
+        }
+        m.attempts_left--;
+        if (meta_store(f, &m) < 0) return boot_flash_fail(f, log, log_ctx);
+        log_fmt(log, log_ctx,
+               "boot: booting version %u (trial boot, slot %c, attempt %d/%d; "
+               "call device_confirm() or this attempt is wasted)",
+               device_app_version(f, m.pending_slot), 'A' + m.pending_slot,
+               MAX_TRIES - m.attempts_left, MAX_TRIES);
+        /* Unlike every other path here, this call ends with the *pending*
+         * slot running on trial, not active_slot -- there is nothing to
+         * fall through to. */
+        return 0;
+    }
+
+final_boot:
+    /* plan_state is NONE or COMMITTED: an ordinary boot of active_slot.
+     * The signature is not re-checked here (DESIGN.md section 10.1) -- only
+     * image_sha256, cheap enough to pay every boot, which is what turns bit
+     * rot in a long-deployed image into a clean fallback instead of an
+     * undefined crash. */
     uint8_t hsh[SHA256_LEN];
-    image_hash_flash(f, hsh);
+    image_hash_flash(f, m.active_slot, hsh);
     stats->sha_bytes += SLOT_SIZE - DESC_LEN;
-    if (image_verify_flash(f, root_key, hsh, &why) < 0) {
-        /* No second partition, so this is as far as the device gets: it
-         * keeps asking for a release until one verifies. */
-        log_fmt(log, log_ctx, "boot: no bootable image (%s); requesting an update", why);
-        if (m.plan_state != PLAN_BAD) {
-            m.plan_state  = PLAN_BAD;
+    if (image_verify_flash(f, m.active_slot, root_key, hsh, &why) < 0) {
+        log_fmt(log, log_ctx, "boot: active slot %c does not verify (%s)",
+               'A' + m.active_slot, why);
+        int other = OTHER_SLOT(m.active_slot);
+        uint8_t hsh2[SHA256_LEN];
+        const char *why2 = NULL;
+        image_hash_flash(f, other, hsh2);
+        if (image_verify_flash(f, other, root_key, hsh2, &why2) == 0) {
+            log_fmt(log, log_ctx, "boot: falling back to slot %c", 'A' + other);
+            m.active_slot = (uint8_t)other;
             m.last_result = RES_VERIFY_FAILED;
             if (meta_store(f, &m) < 0) return boot_flash_fail(f, log, log_ctx);
+            log_fmt(log, log_ctx, "boot: booting version %u", device_app_version(f, m.active_slot));
+        } else {
+            /* Both slots unusable: this is as far as the device gets. A
+             * real port enters the recovery loop here (DESIGN.md section
+             * 3); the PoC just reports it and asks for another release. */
+            log_fmt(log, log_ctx, "boot: no bootable image in either slot (%s); "
+                   "requesting an update", why2 ? why2 : why);
+            if (m.last_result != RES_VERIFY_FAILED) {
+                m.last_result = RES_VERIFY_FAILED;
+                if (meta_store(f, &m) < 0) return boot_flash_fail(f, log, log_ctx);
+            }
         }
     } else {
-        log_fmt(log, log_ctx, "boot: booting version %u", device_app_version(f));
+        log_fmt(log, log_ctx, "boot: booting version %u", device_app_version(f, m.active_slot));
     }
     return 0;
+}
+
+int device_confirm(flash_t *f, log_fn log, void *log_ctx)
+{
+    meta_t m;
+    meta_load(f, &m);
+    if (m.plan_state != PLAN_TRIAL)
+        return err_set(&f->err, "confirm: no trial boot in progress (plan_state=%d)",
+                       m.plan_state);
+
+    log_fmt(log, log_ctx, "device: confirming slot %c (trial boot succeeded)",
+           'A' + m.pending_slot);
+    m.active_slot    = m.pending_slot;
+    m.pending_slot   = SLOT_NONE;
+    m.plan_state     = PLAN_COMMITTED;
+    m.attempts_left  = 0;
+    m.last_result    = RES_OK;
+    return meta_store(f, &m);
 }

@@ -11,8 +11,8 @@
 #   scripts/lab.sh map            print this build's flash layout
 #   scripts/lab.sh reset          forget the device, so it ships fresh again
 #
-# The device is created on first use with the reference binary in its one
-# application partition, so its first manifest describes real firmware. The
+# The device is created on first use with the reference binary in slot A
+# (slot B starts blank), so its first manifest describes real firmware. The
 # server stays up across requests and prints one stats row per request.
 source "$(dirname "$0")/common.sh"
 need_build
