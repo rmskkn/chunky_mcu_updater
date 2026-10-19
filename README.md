@@ -7,7 +7,7 @@ to the firmware it was running before the update started.
 Reference platform: **STM32F103CB** — 128 KB flash, 20 KB RAM, 1 KB flash page,
 72 MHz Cortex-M3.
 
-> **Status: design only.** No code yet. [`DESIGN.md`](poc/DESIGN.md) is the current
+> **Status: design only.** No code yet. [`DESIGN.md`](DESIGN.md) is the current
 > specification and is the thing to read, review, and argue with.
 
 ## Purpose
@@ -41,10 +41,10 @@ difference into a spare partition that the running firmware never depends on.
    flash.
 
    The host PoC lays out both slots (51 KB each, from the device catalog
-   entry `poc/device/stm32f103cb/device.toml`) but still runs the
+   entry `device/stm32f103cb/device.toml`) but still runs the
    single-partition update: slot A updated in place, slot B reserved, which
    trades unroll and revert for simplicity until the A/B flow lands.
-   [`DESIGN.md`](poc/DESIGN.md) section 18 has the comparison.
+   [`DESIGN.md`](DESIGN.md) section 18 has the comparison.
 4. **The bootloader applies the plan and can unroll it.** Apply is journalled
    and resumable, and it never writes outside the inactive partition. So
    abandoning an update is one page erase, with nothing to undo.
@@ -75,7 +75,7 @@ can trust what it is diffing against, and the session always runs over TLS.
 
 ## Proof of concept
 
-[`poc/`](poc/) is a working host implementation of one update request: a
+The repository is a working host implementation of one update request: a
 server, a device client, and a 128 KB emulated STM32F103CB flash with page
 erase and programming that refuses to set a bit without an erase. It transfers
 a real 45 772 B firmware binary sector by sector and applies it through the
@@ -84,17 +84,16 @@ against a full transfer, and what the device spends in flash. Writing it
 corrected three errors in the design.
 
 ```sh
-cd poc
 make
 scripts/run_demo.sh
 ```
 
-[`poc/README.md`](poc/README.md) has the architecture diagrams, the message
+[`docs/poc.md`](docs/poc.md) has the architecture diagrams, the message
 exchange, and what the PoC deliberately leaves out.
 
 ## Read next
 
-[`DESIGN.md`](poc/DESIGN.md) covers it properly:
+[`DESIGN.md`](DESIGN.md) covers it properly:
 
 | Section | |
 |---|---|
@@ -111,9 +110,9 @@ exchange, and what the PoC deliberately leaves out.
 
 ## For Review/ TODO
 1. In-place single-partition updates;
-2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: [`DESIGN.md`](poc/DESIGN.md) 17.2);
+2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: [`DESIGN.md`](DESIGN.md) 17.2);
 3. Multi-generation rollback or over-the-air updates of the bootloader itself;
-4. Reasoning for each is in [`DESIGN.md`](poc/DESIGN.md).
+4. Reasoning for each is in [`DESIGN.md`](DESIGN.md).
 
 
 
@@ -125,7 +124,6 @@ binary in slot 0, so its first manifest describes real firmware.
 Terminal 1, left running:
 
 ```sh
-cd poc
 scripts/lab.sh server
 ```
 

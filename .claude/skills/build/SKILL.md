@@ -1,11 +1,11 @@
 ---
 name: build
-description: Build, run, and test the chunky_bootloader PoC (poc/). Use whenever compiling, running cb-server/cb-client/cb-flash, running the test suite, or checking the build across geometries.
+description: Build, run, and test the chunky_bootloader PoC. Use whenever compiling, running cb-server/cb-client/cb-flash, running the test suite, or checking the build across geometries.
 ---
 
 # chunky_bootloader PoC: build / run / test
 
-All commands run from `poc/` unless noted. Binaries land in `poc/build/`.
+All commands run from the repository root unless noted. Binaries land in `build/`.
 
 ## Build
 
