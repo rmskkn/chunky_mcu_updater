@@ -90,10 +90,11 @@ void flash_file_close(flash_t *f)
     f->io = NULL;
 }
 
-/* Writes a raw firmware binary into the application partition as a signed
- * image: what a factory programmer or a debugger would leave behind. A host
- * tool's job, so it lives here and not in lib/. -1 with the reason in
- * f->err. */
+/* Writes a raw firmware binary into slot A as a signed image: what a
+ * factory programmer or a debugger would leave behind. Slot B stays
+ * erased -- a fresh device has nothing pending (DESIGN.md: "slot B:
+ * nobody yet"). A host tool's job, so it lives here and not in lib/. -1
+ * with the reason in f->err. */
 static int install_image(flash_t *f, const uint8_t *bin, size_t binlen,
                   uint32_t version, const uint8_t root_key[32])
 {
@@ -107,8 +108,10 @@ static int install_image(flash_t *f, const uint8_t *bin, size_t binlen,
                        binlen, IMG_MAX_PAYLOAD);
     }
 
+    /* -1 "active_slot" to flash_write_app_sector(): this is provisioning,
+     * before any update exists to protect an active slot from. */
     for (int i = 0; i < SECTORS_SLOT; i++)
-        if (flash_write_app_sector(f, (sector_idx_t)i, img + (size_t)i * SECTOR_SIZE) < 0) {
+        if (flash_write_app_sector(f, SLOT_A, -1, (sector_idx_t)i, img + (size_t)i * SECTOR_SIZE) < 0) {
             free(img);
             return -1;
         }
@@ -116,8 +119,10 @@ static int install_image(flash_t *f, const uint8_t *bin, size_t binlen,
 
     meta_load(f, &m);
     if (m.magic != META_MAGIC) meta_init(&m);
-    m.plan_state  = PLAN_COMMITTED;
-    m.last_result = RES_NONE;
+    m.active_slot  = SLOT_A;
+    m.pending_slot = SLOT_NONE;
+    m.plan_state   = PLAN_COMMITTED;
+    m.last_result  = RES_NONE;
     return meta_store(f, &m);
 }
 

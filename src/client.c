@@ -64,8 +64,8 @@ static void time_report(const char *phase, double host_ms, const flash_t *f,
 
 static const char *state_name(int st)
 {
-    static const char *n[] = { "NONE", "STAGING", "APPLYING", "COMMITTED", "BAD" };
-    return (st >= 0 && st <= 4) ? n[st] : "?";
+    static const char *n[] = { "NONE", "STAGING", "APPLYING", "TRIAL", "COMMITTED", "BAD" };
+    return (st >= 0 && st <= 5) ? n[st] : "?";
 }
 
 /* ---------------------------------------------------------------- session */
@@ -151,6 +151,36 @@ static int cmd_boot(void)
     return 0;
 }
 
+/* --------------------------------------------------------------- confirm */
+
+/* The application's "I'm healthy, I reached the server" call (DESIGN.md
+ * section 7). A benign no-op, not a failure, when there is no trial in
+ * progress -- e.g. the default end-to-end flow calling this right after a
+ * boot that found nothing to apply. */
+static int cmd_confirm(void)
+{
+    flash_t f;
+    cb_err_t err;
+    meta_t m;
+    uint8_t root_key[32];
+    poc_root_key(root_key);
+
+    if (device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL, &err) < 0)
+        return cli_fail("%s", err.msg);
+    meta_load(&f, &m);
+    if (m.plan_state != PLAN_TRIAL) {
+        flash_file_close(&f);
+        return 0;
+    }
+    int rc = device_confirm(&f, cli_log, NULL);
+    if (rc < 0) {
+        flash_file_close(&f);
+        return cli_fail("confirm: %s", f.err.msg);
+    }
+    flash_file_close(&f);
+    return 0;
+}
+
 static int cmd_status(void)
 {
     flash_t f;
@@ -173,23 +203,29 @@ static int cmd_status(void)
 
     hexdump_line(id.device_id, 8, hex);
     printf("device_id       %s...\n", hex);
-    printf("meta gen %u  state %s  last_result %u\n",
-           m.generation, state_name(m.plan_state), m.last_result);
+    printf("meta gen %u  state %s  last_result %u  active slot %c",
+           m.generation, state_name(m.plan_state), m.last_result, 'A' + m.active_slot);
+    if (m.plan_state == PLAN_TRIAL)
+        printf("  pending slot %c (%d/%d trial attempts left)",
+               'A' + m.pending_slot, m.attempts_left, MAX_TRIES);
+    printf("\n");
 
-    image_desc_t desc;
-    uint8_t h[SHA256_LEN];
-    image_desc_read(&f, &desc);
-    image_hash_flash(&f, h);
-    int ok = image_verify_flash(&f, rk, h, &why);
-    printf("application     %s  version %u  %s\n",
-           desc.magic == IMG_MAGIC ? "image   " : "no image",
-           device_app_version(&f), ok == 0 ? "verified" : why);
+    for (int slot = SLOT_A; slot <= SLOT_B; slot++) {
+        image_desc_t desc;
+        uint8_t h[SHA256_LEN];
+        image_desc_read(&f, slot, &desc);
+        image_hash_flash(&f, slot, h);
+        int ok = image_verify_flash(&f, slot, rk, h, &why);
+        printf("slot %c          %s  version %u  %s\n", 'A' + slot,
+               desc.magic == IMG_MAGIC ? "image   " : "no image",
+               device_app_version(&f, slot), ok == 0 ? "verified" : why);
+    }
 
     manifest_build(&f, &man);
     manifest_digest(&man, d);
     hexdump_line(d, 8, hex);
     printf("manifest digest %s...  %d sectors, body %zu B\n",
-           hex, SECTORS_SLOT, MANIFEST_BODY_LEN);
+           hex, MANIFEST_ENTRIES, MANIFEST_BODY_LEN);
     flash_file_close(&f);
     return 0;
 }
@@ -198,19 +234,31 @@ static int usage(void)
 {
     fprintf(stderr,
         "usage: cb-client --flash FILE [options]\n"
-        "  runs one whole update attempt: send the manifest, take the sectors\n"
-        "  the server says differ, apply them, verify, boot and confirm.\n"
+        "  default: runs one whole update attempt end to end -- send the\n"
+        "  manifest, take the sectors the server says differ, apply them,\n"
+        "  trial-boot, confirm (simulating a healthy application), report.\n"
         "\n"
         "  --flash FILE       emulated flash device (required)\n"
         "  --initial FILE     firmware to create the device with, first run only\n"
         "  --host H           server address, default 127.0.0.1\n"
         "  --port N           server port, default 7700\n"
-        "  --status           print the device state and exit\n");
+        "  --status           print the device state and exit\n"
+        "  --session-only     only run the session (manifest, plan, stage) --\n"
+        "                     no boot, no confirm\n"
+        "  --boot-only        only run the bootloader step (apply/verify, or\n"
+        "                     one more trial attempt, or revert) -- no session\n"
+        "  --confirm-only     only run the application confirm step\n"
+        "  --no-confirm       with the default flow, skip the auto-confirm\n"
+        "                     after boot -- leaves a successful trial pending\n"
+        "  (the last four simulate repeated reset cycles, or inspecting the\n"
+        "  device mid-cycle, for testing the trial/confirm/revert state\n"
+        "  machine: see docs/ab_migration.md)\n");
     return 2;
 }
 
 int main(int argc, char **argv)
 {
+    int opt_boot_only = 0, opt_confirm_only = 0, opt_no_confirm = 0, opt_session_only = 0;
     g_stats.clock_ms = now_ms;
     if (lz4_register() < 0) { cli_fail("cannot register the LZ4 decoders"); return 1; }
     for (int i = 1; i < argc; i++) {
@@ -219,14 +267,26 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--port") && i + 1 < argc)       opt_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--initial") && i + 1 < argc)    opt_initial = argv[++i];
         else if (!strcmp(argv[i], "--status"))                     opt_status = 1;
+        else if (!strcmp(argv[i], "--boot-only"))                  opt_boot_only = 1;
+        else if (!strcmp(argv[i], "--confirm-only"))                opt_confirm_only = 1;
+        else if (!strcmp(argv[i], "--no-confirm"))                  opt_no_confirm = 1;
+        else if (!strcmp(argv[i], "--session-only"))                opt_session_only = 1;
         else return usage();
     }
 
     if (opt_status) return cmd_status() < 0 ? 1 : 0;
+    if (opt_confirm_only) return cmd_confirm() < 0 ? 1 : (cmd_status() < 0 ? 1 : 0);
+    if (opt_boot_only) return cmd_boot() < 0 ? 1 : (cmd_status() < 0 ? 1 : 0);
+    if (opt_session_only) return cmd_session() < 0 ? 1 : 0;
 
-    /* Ask for an update by reporting what is in flash, then reboot into the
-     * bootloader to apply and verify it. One partition, so the write is in
-     * place and there is no trial boot to pass. */
-    if (cmd_session() < 0 || cmd_boot() < 0 || cmd_status() < 0) return 1;
+    /* Default: one whole update attempt -- session, bootloader apply and
+     * trial boot, then (unless suppressed) the application's own confirm,
+     * simulating the common case of a healthy image that reaches the
+     * server right away. --session-only/--boot-only/--confirm-only above
+     * are what a test uses to drive the trial/revert state machine, or
+     * inspect the device mid-cycle, through repeated simulated resets. */
+    if (cmd_session() < 0 || cmd_boot() < 0) return 1;
+    if (!opt_no_confirm && cmd_confirm() < 0) return 1;
+    if (cmd_status() < 0) return 1;
     return 0;
 }

@@ -61,7 +61,8 @@ typedef struct {
     device_stats_t  no_stats;
     int             state;
     uint8_t         device_id[16];
-    uint32_t        generation;      /* of the meta bank the session started on */
+    int             active_slot;     /* loaded at session start; never changes mid-session */
+    int             pending_slot;    /* OTHER_SLOT(active_slot) once PLAN_BEGIN arrives */
     double          t0;
     manifest_t      man;
     msg_manifest_auth_t auth;
@@ -85,13 +86,37 @@ int device_session_start(device_session_t *s, flash_t *f, const uint8_t dev_key[
  * other DEV_* codes once it is over. */
 int device_session_feed(device_session_t *s, int type, const uint8_t *payload, size_t len);
 
-uint32_t device_app_version(flash_t *f);
+uint32_t device_app_version(flash_t *f, int slot);
 
-/* Applies whatever the session staged, then checks whether the partition is
- * bootable. stats may be NULL. 0, or -1 if the result could not be
- * recorded in flash (the reason in f->err); a plan that fails to apply or
- * an image that fails to verify is a recorded outcome, not an error. */
+/* Applies whatever the session staged, then decides whether the result is
+ * bootable (DESIGN.md sections 7-8). stats may be NULL. 0, or -1 if the
+ * result could not be recorded in flash (the reason in f->err); a plan that
+ * fails to apply, an image that fails to verify, or a trial that runs out
+ * of attempts is a recorded outcome, not an error.
+ *
+ * Calling contract (docs/ab_migration.md's open question, resolved this
+ * way): the host PoC has no real watchdog or CPU reset, so one call is one
+ * simulated boot/reset cycle, and a test drives repeated trial attempts by
+ * calling this repeatedly -- the attempt log persists in meta_t across
+ * calls, same as it would across real resets. A trial boot that succeeds
+ * does *not* auto-confirm; the caller (standing in for the application
+ * reaching a working state and talking to the server) must call
+ * device_confirm() separately, or call device_boot() again to simulate a
+ * reset with no confirm, which consumes another attempt. This is the
+ * "closest to the real mechanism" option the migration plan offered,
+ * chosen over a single-call simplified resolution because it is what lets
+ * a shell-level test (this repo has no unit-test harness in C) exercise
+ * the confirm/retry/revert paths with the real cb-client binary: see
+ * src/client.c's --boot-only / --confirm-only / --no-confirm flags. */
 int  device_boot(flash_t *f, const uint8_t root_key[32],
                  log_fn log, void *log_ctx, device_stats_t *stats);
+
+/* The application's "I reached a working state and talked to the server"
+ * call (DESIGN.md section 7, "application duties on a trial boot"): only
+ * valid while plan_state == PLAN_TRIAL. Promotes pending_slot to
+ * active_slot, clears the attempt log. 0, or -1 with the reason in
+ * f->err -- including "no trial in progress," which is a caller mistake,
+ * not a flash fault, but still reported rather than silently ignored. */
+int  device_confirm(flash_t *f, log_fn log, void *log_ctx);
 
 #endif

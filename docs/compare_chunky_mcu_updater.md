@@ -9,9 +9,9 @@ our [`DESIGN.md`](../DESIGN.md) plus the PoC in this repository.
 
 chunky_mcu_updater is a Rust rewrite of the same sector-delta idea. It has a
 stricter signed descriptor, a persistent anti-rollback floor and an apply engine
-in the application. Our PoC has compression and an in-place mode that it lacks.
-It also avoids one gap that our PoC has: our PoC writes flash before it checks
-the plan's signature.
+in the application. Our PoC has compression and ran an in-place mode until the
+A/B migration (`docs/ab_migration.md`); it now runs the real A/B flow instead,
+same as `DESIGN.md` sections 2-8 and theirs.
 
 ## Main differences
 
@@ -20,8 +20,8 @@ table follows from them.
 
 1. **Who applies the update.** Theirs: the running app applies every step into
    DFU, and the bootloader only verifies and switches. Ours: COPY runs in the
-   bootloader with a journal (DESIGN), or the bootloader owns the transport and
-   updates in place (PoC).
+   bootloader with a journal, WRITE in the application (`DESIGN.md` section
+   11; the PoC runs this too, since the A/B migration).
 2. **Trust model.** Theirs trusts one thing: the release key in the
    bootloader. The manifest, server and transport are untrusted, and there is
    no TLS. Ours adds a device identity, a signed manifest with a server nonce,
@@ -71,7 +71,7 @@ every step, then the whole image.
 
 | Topic | chunky_mcu_updater | chunky_bootloader |
 | --- | --- | --- |
-| Who applies the plan | The running app applies ERASE, COPY and WRITE into DFU. The bootloader only verifies and switches (page swap, `SWAP_BANK`, or RP2350 boot ROM) | DESIGN: COPY in the bootloader, with a journal. PoC: in place, and the bootloader owns the transport (§18) |
+| Who applies the plan | The running app applies ERASE, COPY and WRITE into DFU. The bootloader only verifies and switches (page swap, `SWAP_BANK`, or RP2350 boot ROM) | COPY in the bootloader, with a journal, WRITE in the application (§11). PoC runs this too, since the A/B migration (§18 historical: the PoC's prior in-place mode, bootloader owning the transport) |
 | Progress record | None in A/B: re-manifest and re-plan after any break (their §9.1) | A/B: meta banks, journal, plan states. PoC: flash is the record, as in theirs |
 | Descriptor location | Last 128 B of the slot. The hash covers `[0, slot_len-128)` | At `0x200`, after the vector table. The hash range has a hole |
 | Commit marker | Descriptor chunk, last because steps go in ascending order | Sector 0, sent last |
@@ -88,21 +88,34 @@ every step, then the whole image.
 | Transport | WireWeaver `ww_dfu`. Trusted for nothing. No confidentiality | Own framing. TLS mandatory on IP hops. Challenge nonce |
 | Testing | Golden vectors shared by the Rust and C readers. Power-cut simulator at every flash op. Hardware bench on F103, G0, H7, RP2350 | Host PoC on mmap'd file flash. `case_*.sh` integration tests |
 
-## Gap in our PoC: flash is written before the signature is checked
+## Closed by the A/B migration: flash written before the signature is checked
 
-`lib/device.c:137-156` accepts `PLAN_BEGIN`, copies `image_sha256` and
-`image_mac` into the pending meta, and starts to take WRITE steps. The MAC is
-checked only at boot (`device.c:411`). The PoC updates in place, so anyone who
-can reach the session can overwrite the running image without any key. The
-device then has no bootable firmware until a good update arrives.
+As of 2026-10-19, `lib/device.c` accepted `PLAN_BEGIN`, copied `image_sha256`
+and `image_mac` into the pending meta, and started taking WRITE steps before
+the MAC was ever checked (only at boot). That PoC ran single-partition
+(`DESIGN.md` section 18, historical): the session wrote the one partition the
+device booted from, so anyone who could reach the session could overwrite the
+running image without any key, leaving the device with no bootable firmware
+until a good update arrived -- `docs/auth_verification.md` has the full
+analysis.
 
-Their SPEC §6.1 forbids this. No flash is touched until the descriptor seal
-passes. Cheap checks that need no key (magic, format, bounds, reserved bytes,
-length) run before the seal, so junk never costs a signature verification.
+The A/B migration (`docs/ab_migration.md`, 2026-10-20) closes this
+structurally, not by adding the check their SPEC §6.1 has: writes now land in
+the *pending* slot, which nothing boots until the bootloader's own
+`image_sha256`/signature check passes and the trial boot that follows it is
+confirmed (`DESIGN.md` sections 7-8's apply invariant -- "the active slot is
+read-only for the entire update"). An unauthenticated session can still fill
+the inactive slot with garbage, but it cannot make that garbage bootable; the
+worst case is a wasted plan and a trial that never confirms.
 
-Fix: verify the descriptor MAC at `PLAN_BEGIN`, before the first
-`stage_sector`. Add a `case_*.sh` test that sends a plan with a bad MAC and
-checks that the partition is not changed.
+What's still open, and is not specific to partition layout: `plan_mac` (their
+descriptor seal's equivalent) is still only checked once, at boot, rather than
+before the first chunk is accepted -- a liveness improvement (reject a bad
+chunk instantly instead of eventually), not a security one, since the
+whole-image hash and signature already gate what boots either way.
+`docs/auth_verification.md`'s Scheme A/B and meta-header-integrity proposals
+track that, and its own "Open items" list is where that work would land next,
+not here.
 
 ## Items for consolidation
 

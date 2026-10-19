@@ -35,7 +35,7 @@ enum { REJ_BAD_SIGNATURE = 1, REJ_BAD_NONCE, REJ_UNKNOWN_DEVICE,
 enum { NAK_HASH_MISMATCH = 1, NAK_FLASH_FAIL, NAK_BAD_INDEX, NAK_DECOMPRESS };
 
 /* last_result codes reported back in HELLO */
-enum { RES_NONE = 0, RES_OK, RES_VERIFY_FAILED, RES_FLASH_FAIL };
+enum { RES_NONE = 0, RES_OK, RES_VERIFY_FAILED, RES_FLASH_FAIL, RES_TRIAL_FAILED };
 
 /* Sector encodings (STEP_WRITE_END.compress), DESIGN.md 17.2.
  * 3..COMPRESS_MAX_ID are free for compressors registered by the integrator. */
@@ -43,6 +43,14 @@ enum { COMPRESS_RAW = 0, COMPRESS_LZ4 = 1, COMPRESS_LZ4_DICT = 2 };
 #define COMPRESS_MAX_ID 15
 
 #define NONCE_LEN 16
+
+/* Slot ids, DESIGN.md section 2: exactly two application slots, A and B.
+ * Wire-level and geometry-independent -- unlike sector_idx_t, this never
+ * grows with the partition, so it lives here rather than in flash.h.
+ * SLOT_NONE is an internal (never-on-the-wire) sentinel for "no slot": a
+ * fresh device's pending_slot, or one a plan just unrolled/reverted. */
+enum { SLOT_A = 0, SLOT_B = 1, SLOT_NONE = 0xFF };
+typedef uint8_t slot_id_t;
 
 /* Sector indices are partition-relative. A byte covers 256 sectors, which is
  * a 256 KB partition at a 1 KB sector and runs out on a 1 MB part, so the index
@@ -76,10 +84,11 @@ _Static_assert(SECTOR_HASH_LEN >= 8 && SECTOR_HASH_LEN <= SHA256_LEN,
 typedef struct {
     uint8_t  device_id[16];
     uint16_t sector_size;
-    uint16_t sectors;
+    uint16_t sectors;          /* sectors per slot, not the manifest total */
     uint8_t  last_result;
     uint8_t  sector_hash_len;  /* SECTOR_HASH_LEN the device was built with */
-    uint8_t  pad[2];
+    slot_id_t active_slot;    /* which slot is currently running (DESIGN.md section 6) */
+    uint8_t  pad;
     uint32_t running_version;
     /* image_sha256 of the active slot, or zeros if it holds no image. The hash
      * excludes the descriptor (DESIGN.md 10.1), so it identifies the firmware
@@ -111,15 +120,26 @@ typedef struct {
 typedef struct {
     uint32_t version;
     uint16_t step_count;
-    uint8_t  pad[2];
+    slot_id_t dest_slot;   /* always the device's reported inactive slot; the
+                            * device cross-checks this against its own
+                            * computed pending_slot and never trusts it alone
+                            * (DESIGN.md section 6: "target version, destination
+                            * slot, step count..."). */
+    uint8_t  pad;
     uint8_t  image_sha256[SHA256_LEN];
     uint8_t  image_mac[SHA256_LEN];
 } msg_plan_begin_t;
 
-/* A copy inside the one partition: the bytes this sector needs already sit at
- * src_index, so nothing goes over the wire. */
+/* A copy from flash the device already has: the bytes dst needs already sit
+ * at (src_slot, src_index), so nothing goes over the wire. src_slot may be
+ * the active slot (always safe, untouched for the whole update) or the
+ * destination slot itself (only safe when src_index is a sector this same
+ * plan does not also rewrite -- DESIGN.md section 5 rule 2, section 8's
+ * apply invariant). */
 typedef struct {
     sector_idx_t dst;
+    slot_id_t    src_slot;
+    uint8_t      pad;
     sector_idx_t src_index;
     uint8_t      hash[SECTOR_HASH_LEN];
 } msg_step_copy_t;

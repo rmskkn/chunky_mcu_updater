@@ -10,10 +10,18 @@
  *
  * Entry order is implicit: sector i is at h[i], every sector always present.
  * That drops the index field, and with it the whole class of manifests that
- * repeat or omit a sector -- they cannot be expressed. */
+ * repeat or omit a sector -- they cannot be expressed.
+ *
+ * The device hashes both slots and reports all of it (DESIGN.md section 4):
+ * slot A's sectors first, then slot B's, one flat array rather than (slot,
+ * index) pairs -- docs/ab_migration.md's open question on indexing, resolved
+ * this way because it is what's already on the wire (MANIFEST's hashes[] has
+ * no slot field either) and manifest_index()/manifest_slot_of()/
+ * manifest_sector_of() below are the only places that need to know the
+ * split exists. */
 typedef struct {
     uint16_t sector_size;
-    uint16_t sectors;
+    uint16_t sectors;          /* 2 * SECTORS_SLOT */
     uint8_t  h[MANIFEST_ENTRIES][SECTOR_HASH_LEN];
 } manifest_t;
 
@@ -30,6 +38,14 @@ void manifest_mac(const uint8_t key[32], const uint8_t device_id[16],
 
 /* Structural checks, DESIGN.md section 10.2 step 5. 0 = good. */
 int  manifest_check(const manifest_t *m, const char **why);
+
+/* Flat manifest index <-> (slot, slot-relative sector). */
+static inline int manifest_index(int slot, int sector) {
+    return slot == SLOT_A ? sector : SECTORS_SLOT + sector;
+}
+static inline int manifest_slot_of(int index)   { return index < SECTORS_SLOT ? SLOT_A : SLOT_B; }
+static inline int manifest_sector_of(int index)  { return index < SECTORS_SLOT ? index : index - SECTORS_SLOT; }
+
 const uint8_t *manifest_hash_at(const manifest_t *m, int index);
 
 #endif

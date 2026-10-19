@@ -35,9 +35,10 @@ RAM, 1 KB flash page, 72 MHz Cortex-M3).
 
 ## 2. Memory map (STM32F103CB, 1 KB pages)
 
-> Sections 2 to 8 describe the A/B layout. The host PoC implements the
-> single-partition variant instead; Section 18 has the differences and the
-> trade.
+> Sections 2 to 8 describe the A/B layout, which is what the host PoC
+> implements. Section 18 (historical) has the single-partition variant the
+> PoC ran before the A/B migration (`docs/ab_migration.md`), kept as a
+> record of that layout's tradeoffs.
 
 | Region       | Pages   | Address range             | Size  | Purpose |
 |--------------|---------|---------------------------|-------|---------|
@@ -77,8 +78,10 @@ at build time and a linker `MEMORY` block from it, and splits the space after th
 meta banks 50/50 into slot A and slot B, each rounded down to a sector. Its
 meta banks carry the journal in a page of their own, so at 1 KB / 1 KB the
 slots are 51 KB each (pages 26-76 and 77-127) rather than the 52 KB of the
-table above. The PoC still updates slot A in place (Section 18); slot B is
-reserved.
+table above. The PoC updates whichever slot is currently inactive and
+trial-boots the result (Sections 7-8); a fresh device starts with slot A
+active and slot B blank, which is what the PoC's first-ever update to a
+device looks like, below.
 Sector indices are **slot-relative** and always travel with a slot id.
 
 The bootloader is never erased by the update path. It is the only code that can
@@ -1311,7 +1314,17 @@ system `liblz4`.
 
 ---
 
-## 18. Single-partition variant
+## 18. Single-partition variant (historical)
+
+> **Superseded.** This section described the host PoC's behavior before the
+> A/B migration (`docs/ab_migration.md`, landed 2026-10-20). The PoC now
+> implements Sections 2-8 as specified -- two slots, trial boot, unroll,
+> revert -- and no longer runs the single-partition variant below. Kept
+> here, unedited, as the record of that variant's tradeoffs: the comparison
+> table and the consequences it lists were real costs of a real design this
+> codebase actually ran for a time, and are worth keeping for anyone
+> choosing between the two layouts on a smaller part than the reference
+> STM32F103CB. Nothing below this point reflects the current implementation.
 
 Everything above assumes A/B: two application partitions, the inactive one
 rewritten and the active one untouched, which is what makes unroll O(1) and

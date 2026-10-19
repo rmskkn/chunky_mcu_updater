@@ -15,12 +15,18 @@ out="$(update 2>&1)"
 echo "$out" | grep -E 'plan v|device: wire|booting'
 wire_stats "$out"
 
-assert_contains "$out" "plan v2, 2 steps" "sector 0 (the version stamp) plus the motif sector"
+# Exactly 2 sectors sent (sector 0, the motif sector); everything else is a
+# free OP_COPY from the active slot (the destination starts blank on the
+# device's first A/B update), which inflates the step count without
+# costing wire bytes -- "2 sent" is the stable invariant, not step count.
+grep -q "2 sent, " "$RUN/server.log" || fail "write count" \
+    "expected exactly 2 writes (sector 0 and the motif sector); see $RUN/server.log"
 assert_contains "$out" "booting version 2" "boots the new version"
 assert_contains "$out" "verified" "image verifies"
 [ "$(compress_count lz4)" -ge 1 ] || fail "compressor" "the motif sector was not sent as lz4"
 
-limit=$((RAW_WIRE + 412))   # below the raw cost of both sectors
+# two writes, both compressible, plus many free copies of everything else.
+limit=$((RAW_WIRE + COPY_MARGIN))
 [ "$WIRE_RX" -lt "$limit" ] || fail "wire size" "rx=$WIRE_RX B, expected under $limit B"
 
 ok "lz4_compressible (rx=$WIRE_RX B)"

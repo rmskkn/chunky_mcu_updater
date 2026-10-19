@@ -78,11 +78,15 @@ int flash_read(flash_t *f, size_t off, void *buf, size_t len)
     return 0;
 }
 
-int flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[SECTOR_SIZE])
+int flash_write_app_sector(flash_t *f, int slot, int active_slot,
+                          sector_idx_t index, const uint8_t data[SECTOR_SIZE])
 {
     if (index >= SECTORS_SLOT)
         return err_set(&f->err, "flash: sector %u outside the partition", index);
-    size_t off = APP_BASE + (size_t)index * SECTOR_SIZE;
+    if (slot == active_slot)
+        return err_set(&f->err, "flash: refusing to write slot %d, it is the active slot "
+                       "(DESIGN.md section 8 apply invariant)", slot);
+    size_t off = slot_base(slot) + (size_t)index * SECTOR_SIZE;
 
     for (int u = 0; u < SECTOR_SIZE / ERASE_SIZE; u++)
         if (flash_erase_unit(f, (int)(off / ERASE_SIZE) + u) < 0) return -1;
@@ -90,9 +94,9 @@ int flash_write_app_sector(flash_t *f, sector_idx_t index, const uint8_t data[SE
 }
 
 
-void flash_sector_hash(flash_t *f, int index, uint8_t out[SECTOR_HASH_LEN])
+void flash_sector_hash(flash_t *f, int slot, int index, uint8_t out[SECTOR_HASH_LEN])
 {
-    size_t base = APP_BASE + (size_t)index * SECTOR_SIZE;
+    size_t base = slot_base(slot) + (size_t)index * SECTOR_SIZE;
     uint8_t chunk[FLASH_READ_CHUNK];
     sha256_t s;
 
@@ -119,7 +123,25 @@ void meta_init(meta_t *m)
     memset(m, 0, sizeof *m);
     m->magic        = META_MAGIC;
     m->generation   = 0;
+    m->active_slot  = SLOT_A;
+    m->pending_slot = SLOT_NONE;
     m->plan_state   = PLAN_NONE;
+}
+
+void meta_reset_plan(meta_t *m)
+{
+    m->plan_state    = PLAN_NONE;
+    m->pending_slot  = SLOT_NONE;
+    m->attempts_left = 0;
+    m->target_version = 0;
+    memset(m->target_sha256, 0, sizeof m->target_sha256);
+    memset(m->target_mac, 0, sizeof m->target_mac);
+    m->step_count = 0;
+    memset(m->op, 0, sizeof m->op);
+    memset(m->src_slot, 0, sizeof m->src_slot);
+    memset(m->src_index, 0, sizeof m->src_index);
+    memset(m->target_hash, 0, sizeof m->target_hash);
+    /* active_slot, magic, generation, crc, last_result: untouched. */
 }
 
 static int bank_valid(flash_t *f, int bank, meta_t *out)

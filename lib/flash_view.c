@@ -9,10 +9,14 @@ void manifest_build(flash_t *f, manifest_t *m)
 {
     memset(m, 0, sizeof *m);
     m->sector_size = SECTOR_SIZE;
-    m->sectors     = SECTORS_SLOT;
+    m->sectors     = MANIFEST_ENTRIES;
 
-    for (int i = 0; i < SECTORS_SLOT; i++)
-        flash_sector_hash(f, i, m->h[i]);
+    /* Both slots, slot A first then slot B (DESIGN.md section 4: "The
+     * device hashes both slots and reports all of it"). */
+    for (int i = 0; i < SECTORS_SLOT; i++) {
+        flash_sector_hash(f, SLOT_A, i, m->h[manifest_index(SLOT_A, i)]);
+        flash_sector_hash(f, SLOT_B, i, m->h[manifest_index(SLOT_B, i)]);
+    }
 }
 
 static void hash_range(sha256_t *s, flash_t *f, size_t off, size_t len)
@@ -27,27 +31,28 @@ static void hash_range(sha256_t *s, flash_t *f, size_t off, size_t len)
     }
 }
 
-void image_hash_flash(flash_t *f, uint8_t out[SHA256_LEN])
+void image_hash_flash(flash_t *f, int slot, uint8_t out[SHA256_LEN])
 {
     sha256_t s;
+    size_t base = slot_base(slot);
     sha256_init(&s);
-    hash_range(&s, f, APP_BASE, VECT_LEN);
-    hash_range(&s, f, APP_BASE + CODE_OFF, SLOT_SIZE - CODE_OFF);
+    hash_range(&s, f, base, VECT_LEN);
+    hash_range(&s, f, base + CODE_OFF, SLOT_SIZE - CODE_OFF);
     sha256_final(&s, out);
 }
 
-void image_desc_read(flash_t *f, image_desc_t *d)
+void image_desc_read(flash_t *f, int slot, image_desc_t *d)
 {
-    flash_read(f, APP_BASE + DESC_OFF, d, sizeof *d);
+    flash_read(f, slot_base(slot) + DESC_OFF, d, sizeof *d);
 }
 
-int image_verify_flash(flash_t *f, const uint8_t root_key[32],
+int image_verify_flash(flash_t *f, int slot, const uint8_t root_key[32],
                        const uint8_t h[SHA256_LEN], const char **why)
 {
     image_desc_t d;
     uint8_t mac[SHA256_LEN];
 
-    image_desc_read(f, &d);
+    image_desc_read(f, slot, &d);
     if (d.magic != IMG_MAGIC)      { *why = "no image descriptor"; return -1; }
     if (d.image_len != SLOT_SIZE)  { *why = "bad image_len";       return -1; }
     if (memcmp(h, d.sha256, SHA256_LEN)) { *why = "image_sha256 mismatch"; return -1; }
@@ -55,6 +60,15 @@ int image_verify_flash(flash_t *f, const uint8_t root_key[32],
     hmac_sha256(root_key, 32, &d, 16 + SHA256_LEN, mac);
     if (memcmp(mac, d.mac, SHA256_LEN)) { *why = "release signature mismatch"; return -1; }
 
+    if (d.revoked == IMG_REVOKED) { *why = "image revoked after a failed trial boot"; return -1; }
+
     *why = NULL;
     return 0;
+}
+
+int image_revoke_flash(flash_t *f, int slot)
+{
+    uint32_t revoked = IMG_REVOKED;
+    return flash_program(f, slot_base(slot) + DESC_OFF + offsetof(image_desc_t, revoked),
+                         &revoked, sizeof revoked);
 }

@@ -35,6 +35,7 @@ int image_build(const uint8_t *bin, size_t binlen, uint32_t version,
     d.version   = version;
     d.image_len = SLOT_SIZE;
     d.flags     = 0;
+    d.revoked   = IMG_NOT_REVOKED;   /* erased value: nothing to clear later unless reverted */
     memcpy(out + DESC_OFF, &d, sizeof d);
 
     image_hash(out, d.sha256);

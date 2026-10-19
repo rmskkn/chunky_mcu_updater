@@ -32,12 +32,12 @@ void manifest_mac(const uint8_t key[32], const uint8_t device_id[16],
 int manifest_check(const manifest_t *m, const char **why)
 {
     if (m->sector_size != SECTOR_SIZE) { *why = "sector_size"; return -1; }
-    if (m->sectors != SECTORS_SLOT)  { *why = "sectors";     return -1; }
+    if (m->sectors != MANIFEST_ENTRIES) { *why = "sectors";    return -1; }
     *why = NULL;
     return 0;
 }
 
 const uint8_t *manifest_hash_at(const manifest_t *m, int index)
 {
-    return (index >= 0 && index < SECTORS_SLOT) ? m->h[index] : NULL;
+    return (index >= 0 && index < MANIFEST_ENTRIES) ? m->h[index] : NULL;
 }
