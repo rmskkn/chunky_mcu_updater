@@ -11,6 +11,8 @@ on:
       - 'tests/**'
       - 'scripts/**'
       - 'tools/**'
+      - 'rust/**'
+      - 'SPEC.md'
       - 'Makefile'
       - '.github/workflows/poc-tests.yml'
   pull_request:
@@ -33,3 +35,14 @@ jobs:
 
       - name: end-to-end tests, all geometries
         run: tests/run_matrix.sh
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: C reader against the golden vectors, and the example
+        run: make vectors example
+
+      - name: Rust tests, generated header current
+        run: make rust-test check-regen
