@@ -92,6 +92,23 @@ scripts/run_demo.sh
 [`docs/poc.md`](docs/poc.md) has the architecture diagrams, the message
 exchange, and what the PoC deliberately leaves out.
 
+## Wire format and the Rust side
+
+[`SPEC.md`](SPEC.md) is format 2 in octets (descriptor, plan, steps, manifest, and what a receiver checks in
+which order). [`rust/`](rust) holds it as Rust types (`chunky_format`), the C reader generated from them
+(`rust/chunky_format/c/chunky_format.h`, header-only C99) and golden vectors both readers are tested against.
+The C targets need no Rust; the others need `cargo`.
+
+```sh
+make vectors       # the C reader against the golden vectors (CC, CFLAGS)
+make example       # rust/chunky_format/c/read_plan.c: a C peer reading a plan
+make rust          # cargo build of rust/
+make rust-test     # cargo test of rust/: layout, vectors, garbage, header current
+make regen         # rewrite chunky_format.h, only when its inputs changed
+make check-regen   # fail when the committed chunky_format.h is stale
+make hooks         # optional: a pre-commit hook that runs check-regen
+```
+
 ## Read next
 
 [`DESIGN.md`](DESIGN.md) covers it properly:

@@ -1,0 +1,15 @@
+# The Rust side of chunky: the wire format (format 2, SPEC.md) as Rust types, and the generator of the C reader.
+# Its own workspace so the C tree at the repository root stays as it is: `make rust`, `make rust-test`.
+[workspace]
+resolver = "3"
+members = ["chunky_format", "chunky_format_gen"]
+
+[workspace.package]
+version = "0.11.1"
+edition = "2024"
+repository = "https://github.com/rmskkn/chunky_mcu_updater"
+
+[workspace.dependencies]
+chunky_format = { path = "chunky_format" }
+sha2 = { version = "0.10", default-features = false }
+ed25519-dalek = { version = "2", default-features = false }
