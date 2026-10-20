@@ -173,7 +173,12 @@ inactive one, descriptor magic, `image_len` equal to the plan's, signature,
 `sha256` equal to the plan's, and the table fold against `table_root`. The
 plan's `OP_COPY` for the descriptor sector is refused. `unroll_plan()` now
 erases only the inactive slot, so a forged `pending_slot` cannot erase the
-active one. Not added (not in the plan): a downgrade check in the bootloader.
+active one.
+
+**Follow-up, 2026-10-20** (see [`auth_open_cases.md`](auth_open_cases.md)):
+`plan_check()` also refuses a downgrade; the full pending-image verify is
+`pending_verify()`, run at the `STAGING` to `TRIAL` transition and on every
+later trial boot; `revert_plan()` revokes only the inactive slot.
 
 
 1. Before applying anything: read the pending descriptor, verify its MAC,

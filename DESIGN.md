@@ -433,7 +433,8 @@ NONE ──PLAN_BEGIN──> STAGING ──all steps verified──> READY
    neither is valid, assume `active_slot = A`, `plan_state = NONE`.
 2. **`plan_state == READY` or `APPLYING`** → set `APPLYING`. Before running
    anything, check the staged plan against the pending slot's descriptor:
-   the signature verifies, `image_len` and `image_sha256` match the plan's, and
+   the signature verifies, `image_len` and `image_sha256` match the plan's, the
+   version is not below the active image's (unless `allow_downgrade`), and
    `SHA256(meta.target_hash[0..N)) == table_root`. The meta plan is believed only
    through that signed root; a forged or stale one is **unrolled** without a
    single COPY running. Then for each journal step not yet `0x0000`:
@@ -443,11 +444,15 @@ NONE ──PLAN_BEGIN──> STAGING ──all steps verified──> READY
    * `STEP_WRITE`: the application already wrote it; re-verify its hash and mark
      `0x0000`. A mismatch means the staged data is bad → **unroll**.
 3. Verify the full pending image: `[0, image_len)` minus the descriptor hole
-   against the full 32 B `image_sha256`, the ECDSA signature, and that the
-   descriptor is not revoked. Failure → **unroll**.
+   against the full 32 B `image_sha256`, the ECDSA signature, that the
+   descriptor is not revoked, that `pending_slot` is the inactive slot, and
+   that the version is not a downgrade. Failure → **unroll**.
 4. Set `pending_slot` to trial: write the attempt log with `MAX_TRIES = 3`
    tokens, set `plan_state = TRIAL`, bump generation.
-5. **`plan_state == TRIAL`** → clear one attempt token. If none remain →
+5. **`plan_state == TRIAL`** → repeat step 3's verify, unless this same boot
+   just ran it: a `TRIAL` meta may be forged straight into that state, so the
+   bootloader never jumps to a slot it has not verified on this boot. Failure
+   → **unroll**. Then clear one attempt token. If none remain →
    **revert** (Section 8). Otherwise start the independent watchdog (IWDG,
    ~8 s), set `SCB->VTOR` to the pending slot base, and jump.
 6. **`plan_state` otherwise** → recompute `image_sha256` over `active_slot` and
@@ -493,7 +498,9 @@ idempotent, so a power cut during unroll just means unroll runs again.
 
 **Revert** — a committed-but-broken image, after `MAX_TRIES` failed trial boots:
 
-1. Mark the pending slot header `REVOKED` so it is never retried.
+1. Mark the pending slot header `REVOKED` so it is never retried. Only the
+   inactive slot is ever revoked: a meta whose `pending_slot` names the active
+   slot is a forged plan and is dropped without revoking anything.
 2. Write a new meta generation: `active_slot` unchanged (it was never moved),
    `plan_state = NONE`, `last_result = TRIAL_FAILED(version)`.
 3. Boot the active slot, which is the image that was running before the update.
@@ -545,9 +552,13 @@ before the slot is ever made bootable:
 * `micro-ecc` verify costs roughly 200–400 ms at 72 MHz — paid once, at commit.
 * `version` is monotonic and the update session refuses a target whose version is
   lower than the running one, unless the plan carries an explicit
-  `allow_downgrade` flag that is itself inside the signed descriptor. (The PoC's
-  bootloader does not repeat that check; see the open risks in
-  `docs/auth_verification.md`.)
+  `allow_downgrade` flag that is itself inside the signed descriptor. The
+  bootloader repeats that check before every apply and every trial boot, so a
+  forged meta cannot stage or trial-boot an older signed image
+  (`docs/auth_open_cases.md`).
+* Because a `TRIAL` meta can be forged, the signature is also re-checked on
+  each trial boot, not only at commit: at most `MAX_TRIES` extra verifies per
+  update.
 
 ### 10.1 Image descriptor and hash domain
 
@@ -1269,9 +1280,13 @@ Measured from the PoC, which counts the operations and models the device time:
 | 5-sector update, whole session | 509–751 ms | 242–484 ms |
 | 12-sector update, whole session | 723–1177 ms | 454–908 ms |
 | Bootloader apply plus verify | 410–504 ms | 91–182 ms |
-| Each further trial boot | 91–182 ms | 91–182 ms |
-| Revert after the last trial | 220–422 ms | 202–403 ms |
+| Each further trial boot | 417–524 ms | 107–215 ms |
+| Revert after the last trial | 426–533 ms | 107–215 ms |
 | Ordinary boot, nothing pending | 18 ms | 0 ms |
+
+The trial-boot and revert rows were re-measured on 2026-10-20, after every
+trial boot started re-verifying the pending image (Section 7 step 5): about
+309 ms of each is that `image_sha256` plus signature check.
 
 ### Savings, both currencies
 
