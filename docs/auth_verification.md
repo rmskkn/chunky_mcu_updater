@@ -305,9 +305,9 @@ or a real port gives the two roles separate code and separate key access.
   before the fix" step was not done: the CRC-32 scheme was replaced in the
   same series, so only the after-fix behaviour is demonstrated.)
 
-Known gaps left: the PoC bootloader does not repeat the downgrade check
-(`version` below the running one) that the update session makes, so a
-compromised application that forges its own meta (it holds `dev_key`) could
-stage a signed older image; and the bootloader's `revert_plan()` trusts the
-meta's `pending_slot` (`unroll_plan()` no longer erases anything but the
-inactive slot).
+Gaps found after this and since fixed (details, tests and verification in
+[`auth_open_cases.md`](auth_open_cases.md)): the bootloader now repeats the
+downgrade check; `revert_plan()`, like `unroll_plan()`, touches only the
+inactive slot; a NAKed descriptor sector can be resent; and every trial boot
+re-verifies the pending slot, so a meta forged straight into `TRIAL` cannot
+boot an unverified or older image.

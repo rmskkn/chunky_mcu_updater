@@ -353,11 +353,11 @@ static int on_step(device_session_t *s, int t, const uint8_t *pay, size_t n)
         if (decompress_sector(we.compress, s->enc, we.enc_len, s->dict, s->sect) < 0) {
             ack(s, MSG_STEP_NAK, we.dst, NAK_DECOMPRESS);
             log_fmt(s->log, s->log_ctx, "device: sector %u does not decompress", we.dst);
-            if (we.dst == DESC_SECTOR) s->desc_seen = 1;
             return DEV_PENDING;
         }
-        if (we.dst == DESC_SECTOR) s->desc_seen = 1;
         stage_sector(s, we.dst);
+        /* Only a staged descriptor closes the plan; a NAKed one may be resent. */
+        if (we.dst == DESC_SECTOR && s->done[DESC_SECTOR]) s->desc_seen = 1;
     } else {
         return fail(s, "protocol: unexpected message %d during plan", t);
     }

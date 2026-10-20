@@ -46,15 +46,29 @@ static int unroll_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx, const c
 static int revert_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx)
 {
     int pending = m->pending_slot;
-    log_fmt(log, log_ctx, "boot: reverting after %d failed trial boots; "
-           "slot %c revoked, staying on slot %c",
-           MAX_TRIES, 'A' + pending, 'A' + m->active_slot);
-    if (image_revoke_flash(f, pending) < 0) return -1;
+    if (pending == OTHER_SLOT(m->active_slot)) {
+        log_fmt(log, log_ctx, "boot: reverting after %d failed trial boots; "
+               "slot %c revoked, staying on slot %c",
+               MAX_TRIES, 'A' + pending, 'A' + m->active_slot);
+        if (image_revoke_flash(f, pending) < 0) return -1;
+    } else {
+        /* Never revoke the running image: a meta naming any other slot is
+         * not a plan this bootloader trial-booted. */
+        log_fmt(log, log_ctx, "boot: dropping a trial plan whose pending slot is not "
+               "the inactive slot; staying on slot %c", 'A' + m->active_slot);
+    }
     m->plan_state    = PLAN_NONE;
     m->pending_slot  = SLOT_NONE;
     m->attempts_left = 0;
     m->last_result   = RES_TRIAL_FAILED;
     return meta_store(f, m);
+}
+
+/* Repeats the updater's check: a dev_key holder can forge meta to stage an
+ * older, genuinely signed image. */
+static int is_downgrade(flash_t *f, const meta_t *m, const image_desc_t *d)
+{
+    return d->version < image_version_flash(f, m->active_slot) && !(d->flags & 1);
 }
 
 /* Whether the staged plan is the one the release key signed, checked before
@@ -75,6 +89,7 @@ static const char *plan_check(flash_t *f, const meta_t *m, const uint8_t root_ke
                                                  return "plan image_len differs from the descriptor's";
     image_desc_mac(&d, root_key, mac);
     if (memcmp(mac, d.mac, SHA256_LEN))          return "release signature mismatch";
+    if (is_downgrade(f, m, &d))                  return "plan would downgrade the active image";
     if (memcmp(d.sha256, m->target_sha256, SHA256_LEN)) return "descriptor differs from the plan";
     image_table_root((const uint8_t *)m->target_hash, d.image_len / SECTOR_SIZE, root);
     *sha_bytes += d.image_len / SECTOR_SIZE * SECTOR_HASH_LEN;
@@ -92,6 +107,29 @@ static void slot_hash(flash_t *f, int slot, size_t *sha_bytes, uint8_t out[SHA25
         *sha_bytes += d.image_len - DESC_LEN;
 }
 
+/* The whole pending image, before it may run (DESIGN.md section 7 step 3).
+ * Runs at the STAGING->TRIAL transition and again on every later trial boot:
+ * a forged TRIAL meta skips the transition. NULL if good, else the reason. */
+static const char *pending_verify(flash_t *f, const meta_t *m, const uint8_t root_key[32],
+                                  device_stats_t *stats)
+{
+    if (m->pending_slot != OTHER_SLOT(m->active_slot)) return "pending slot is not the inactive slot";
+    image_desc_t d;
+    uint8_t hsh[SHA256_LEN];
+    size_t hashed = 0;
+    const char *why = NULL;
+    image_desc_read(f, m->pending_slot, &d);
+    slot_hash(f, m->pending_slot, &hashed, hsh);
+    stats->verify_bytes += hashed;
+    stats->sha_bytes    += hashed;
+    stats->ecdsa_ms     += ECDSA_VERIFY_MS;
+    if (d.image_len != m->image_len)               return "image_len differs from the plan's";
+    if (memcmp(hsh, m->target_sha256, SHA256_LEN)) return "image_sha256 mismatch";
+    if (image_verify_flash(f, m->pending_slot, root_key, hsh, &why) < 0) return why;
+    if (is_downgrade(f, m, &d))                    return "plan would downgrade the active image";
+    return NULL;
+}
+
 /* Applies whatever the session staged into the pending slot, trial-boots
  * it, and otherwise decides whether the active slot is bootable (DESIGN.md
  * sections 7-8). See bootloader.h for the calling contract: one call is one
@@ -106,6 +144,7 @@ int bootloader_boot(flash_t *f, const uint8_t root_key[32],
 
     meta_t m;
     const char *why = NULL;
+    int verified = 0;   /* pending image checked earlier in this same call */
 
     meta_load(f, &m);
 
@@ -197,23 +236,14 @@ int bootloader_boot(flash_t *f, const uint8_t root_key[32],
         if (bad) goto final_boot;
 
         t0 = stats_tick(stats);
-        uint8_t hsh[SHA256_LEN];
-        image_desc_t pd;
-        image_desc_read(f, pending, &pd);
-        slot_hash(f, pending, &stats->verify_bytes, hsh);
-        stats->sha_bytes += stats->verify_bytes;
-        stats->ecdsa_ms += ECDSA_VERIFY_MS;
-        if (pd.image_len != m.image_len)
-            why = "image_len differs from the plan's";
-        if (why || memcmp(hsh, m.target_sha256, SHA256_LEN) ||
-            image_verify_flash(f, pending, root_key, hsh, &why) < 0) {
-            stats->t_verify = stats_tick(stats) - t0;
-            if (unroll_plan(f, &m, log, log_ctx,
-                            why ? why : "image_sha256 mismatch") < 0)
+        why = pending_verify(f, &m, root_key, stats);
+        stats->t_verify = stats_tick(stats) - t0;
+        if (why) {
+            if (unroll_plan(f, &m, log, log_ctx, why) < 0)
                 return boot_flash_fail(f, log, log_ctx);
             goto final_boot;
         }
-        stats->t_verify = stats_tick(stats) - t0;
+        verified = 1;
 
         /* DESIGN.md section 7 steps 4-5: the pending image verified, so it
          * becomes a trial -- MAX_TRIES tokens, then immediately consume one
@@ -227,6 +257,17 @@ int bootloader_boot(flash_t *f, const uint8_t root_key[32],
     }
 
     if (m.plan_state == PLAN_TRIAL) {
+        if (!verified) {
+            double t0 = stats_tick(stats);
+            why = pending_verify(f, &m, root_key, stats);
+            stats->t_verify = stats_tick(stats) - t0;
+            if (why) {
+                if (unroll_plan(f, &m, log, log_ctx, why) < 0)
+                    return boot_flash_fail(f, log, log_ctx);
+                why = NULL;
+                goto final_boot;
+            }
+        }
         if (m.attempts_left == 0) {
             if (revert_plan(f, &m, log, log_ctx) < 0) return boot_flash_fail(f, log, log_ctx);
             goto final_boot;   /* revert leaves nothing pending; boot active_slot */

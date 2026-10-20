@@ -437,6 +437,146 @@ static int t_forged_plan_table(void)
     return 0;
 }
 
+static int t_forged_downgrade(void)
+{
+    /* After an honest v2 update slot A still holds the genuinely signed v1.
+     * A dev_key holder forges a plan that points back at it. */
+    flash_t f;
+    cap_t cap;
+    REQUIRE(stage_armed(&f, &cap, "forged_downgrade") == 0, "cannot stage a plan");
+    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(device_confirm(&f, cap_log, &cap) == 0, "confirm: %s", f.err.msg);
+
+    static uint8_t old[SLOT_SIZE];
+    flash_read(&f, slot_base(SLOT_A), old, SLOT_SIZE);
+    const image_desc_t *d = image_desc(old);
+    REQUIRE(d->magic == IMG_MAGIC && d->version == 1, "slot A does not hold v1");
+
+    meta_t m;
+    meta_load(&f, &m);
+    REQUIRE(m.active_slot == SLOT_B, "the v2 update did not land");
+    m.plan_state     = PLAN_STAGING;
+    m.pending_slot   = SLOT_A;
+    m.target_version = d->version;
+    m.image_len      = d->image_len;
+    memcpy(m.target_sha256, d->sha256, SHA256_LEN);
+    memcpy(m.target_mac, d->mac, SHA256_LEN);
+    image_table(old, d->image_len, (uint8_t *)m.target_hash);
+    memset(m.op, OP_NONE, sizeof m.op);
+    REQUIRE(meta_store(&f, &m) == 0, "cannot store the forged plan: %s", f.err.msg);
+    REQUIRE(journal_set(&f, JRN_ARM_INDEX, 0x0000) == 0, "cannot arm: %s", f.err.msg);
+
+    cap.log[0] = 0;
+    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(strstr(cap.log, "downgrade"), "the forged downgrade was not refused:\n%s", cap.log);
+    REQUIRE(!strstr(cap.log, "trial boot"), "the forged downgrade reached a trial boot");
+    meta_load(&f, &m);
+    REQUIRE(m.active_slot == SLOT_B && m.plan_state == PLAN_NONE, "active %d plan_state %d",
+            m.active_slot, m.plan_state);
+    flash_file_close(&f);
+    return 0;
+}
+
+static int t_revert_active(void)
+{
+    /* A forged trial plan whose pending slot is the running one must not
+     * revoke the running image. */
+    flash_t f;
+    cap_t cap;
+    REQUIRE(open_dev(&f, &cap, "revert_active") == 0, "cannot create the device");
+    meta_t m;
+    meta_load(&f, &m);
+    m.plan_state    = PLAN_TRIAL;
+    m.pending_slot  = m.active_slot;
+    m.attempts_left = 0;
+    REQUIRE(meta_store(&f, &m) == 0, "cannot store the forged plan: %s", f.err.msg);
+
+    cap.log[0] = 0;
+    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(!strstr(cap.log, "revoked"), "the running image was revoked:\n%s", cap.log);
+    REQUIRE(!strstr(cap.log, "does not verify"), "the active slot no longer verifies:\n%s", cap.log);
+    meta_load(&f, &m);
+    REQUIRE(m.plan_state == PLAN_NONE && m.pending_slot == SLOT_NONE, "plan_state %d pending %d",
+            m.plan_state, m.pending_slot);
+    flash_file_close(&f);
+    return 0;
+}
+
+static int forge_trial(flash_t *f, slot_id_t pending)
+{
+    meta_t m;
+    meta_load(f, &m);
+    m.plan_state    = PLAN_TRIAL;
+    m.pending_slot  = pending;
+    m.attempts_left = MAX_TRIES;
+    return meta_store(f, &m);
+}
+
+static int t_forged_trial(void)
+{
+    /* A meta forged straight into TRIAL skips the STAGING->TRIAL verify:
+     * every trial boot must check the pending slot itself. */
+    flash_t f;
+    cap_t cap;
+    meta_t m;
+
+    /* Unsigned bytes: a fresh device's slot B holds no image. */
+    REQUIRE(open_dev(&f, &cap, "forged_trial_empty") == 0, "cannot create the device");
+    REQUIRE(forge_trial(&f, SLOT_B) == 0, "cannot store the forged plan: %s", f.err.msg);
+    cap.log[0] = 0;
+    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(!strstr(cap.log, "trial boot"), "an unverified slot was trial-booted:\n%s", cap.log);
+    meta_load(&f, &m);
+    REQUIRE(m.active_slot == SLOT_A && m.plan_state == PLAN_NONE, "active %d plan_state %d",
+            m.active_slot, m.plan_state);
+    flash_file_close(&f);
+
+    /* An older signed image: after an honest v2 update slot A holds v1. */
+    REQUIRE(stage_armed(&f, &cap, "forged_trial_old") == 0, "cannot stage a plan");
+    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(device_confirm(&f, cap_log, &cap) == 0, "confirm: %s", f.err.msg);
+    meta_load(&f, &m);
+    m.target_version = 1;
+    image_desc_t d;
+    image_desc_read(&f, SLOT_A, &d);
+    m.image_len = d.image_len;
+    memcpy(m.target_sha256, d.sha256, SHA256_LEN);
+    REQUIRE(meta_store(&f, &m) == 0, "cannot store: %s", f.err.msg);
+    REQUIRE(forge_trial(&f, SLOT_A) == 0, "cannot store the forged plan: %s", f.err.msg);
+    cap.log[0] = 0;
+    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(strstr(cap.log, "downgrade"), "the forged rollback was not refused:\n%s", cap.log);
+    REQUIRE(!strstr(cap.log, "trial boot"), "the older image was trial-booted");
+    meta_load(&f, &m);
+    REQUIRE(m.active_slot == SLOT_B && m.plan_state == PLAN_NONE, "active %d plan_state %d",
+            m.active_slot, m.plan_state);
+    flash_file_close(&f);
+    return 0;
+}
+
+static void flip_vector(uint8_t sector[SECTOR_SIZE]) { sector[0] ^= 1; }
+
+static int t_descriptor_resend(void)
+{
+    /* A NAKed descriptor sector does not close the plan: the resend lands. */
+    SETUP("desc_resend", 2);
+    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
+    REQUIRE(send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, -1) == DEV_PENDING,
+            "table refused: %s", drv.s.error);
+    for (int k = 0; k < drv.plan.count; k++) {
+        const step_t *s = &drv.plan.step[k];
+        if (s->dst == DESC_SECTOR) {
+            REQUIRE(send_step(&drv, &tgt, s, flip_vector) == DEV_PENDING, "bad descriptor: %s", drv.s.error);
+            REQUIRE(cap.naks == 1, "a corrupt descriptor sector was not NAKed");
+        }
+        REQUIRE(send_step(&drv, &tgt, s, NULL) == DEV_PENDING, "step %d refused: %s", k, drv.s.error);
+    }
+    REQUIRE(feed(&drv, MSG_PLAN_END, NULL, 0) == DEV_PENDING, "PLAN_END refused: %s", drv.s.error);
+    REQUIRE(feed(&drv, MSG_COMMIT, NULL, 0) == DEV_STAGED, "COMMIT refused: %s", drv.s.error);
+    flash_file_close(&f);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) { fprintf(stderr, "usage: auth_test WORKDIR BASE.bin\n"); return 2; }
@@ -450,7 +590,8 @@ int main(int argc, char **argv)
     static int (*const cases[])(void) = {
         t_honest, t_bad_signature, t_bad_table_root, t_table_mismatch, t_step_before_table,
         t_step_not_in_table, t_descriptor_not_last, t_descriptor_swapped, t_plan_begin_bounds,
-        t_meta_tampered, t_forged_plan_table,
+        t_meta_tampered, t_forged_plan_table, t_forged_downgrade, t_revert_active,
+        t_descriptor_resend, t_forged_trial,
     };
     int bad = 0, n = (int)(sizeof cases / sizeof *cases);
     for (int i = 0; i < n; i++)
