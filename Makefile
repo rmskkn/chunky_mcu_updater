@@ -120,10 +120,53 @@ $(BUILD)/compress_test: tests/compress_test.c $(LIB)/compress.c $(MW)/lz4.c $(GE
 test-compress: $(BUILD)/compress_test
 	ASAN_OPTIONS=verify_asan_link_order=0 $(BUILD)/compress_test
 
+# rust/: the wire format of SPEC.md as Rust types (chunky_format), the C reader
+# generated from them (chunky_format.h) and the golden vectors. Only rust,
+# rust-test, regen and check-regen need cargo; vectors and example are plain C.
+CARGO      ?= cargo
+RUST       := rust
+FMT_C      := $(RUST)/chunky_format/c
+FMT_VEC    := $(RUST)/chunky_format/vectors
+FMT_CFLAGS := -Werror -pedantic -Wconversion -Wsign-conversion
+FMT_GEN    := $(CARGO) run -q --manifest-path $(RUST)/Cargo.toml -p chunky_format_gen --
+
+rust:
+	$(CARGO) build --manifest-path $(RUST)/Cargo.toml
+
+rust-test:
+	$(CARGO) test --manifest-path $(RUST)/Cargo.toml
+
+# the C reader against the golden vectors, signed and unsigned
+$(BUILD)/chunky_format_test: $(FMT_C)/test.c $(FMT_C)/chunky_format.h $(FMT_C)/golden.h | $(BUILD)
+	$(CC) $(CFLAGS) $(FMT_CFLAGS) -iquote $(FMT_C) -o $@ $<
+
+vectors: $(BUILD)/chunky_format_test
+	$(BUILD)/chunky_format_test
+
+# how a C peer reads a plan: build/read_plan PLAN.bin
+$(BUILD)/read_plan: $(FMT_C)/read_plan.c $(FMT_C)/chunky_format.h | $(BUILD)
+	$(CC) $(CFLAGS) $(FMT_CFLAGS) -iquote $(FMT_C) -o $@ $<
+
+example: $(BUILD)/read_plan
+	$(BUILD)/read_plan $(FMT_VEC)/signed/plan.bin
+	$(BUILD)/read_plan $(FMT_VEC)/unsigned/plan.bin
+
+# rewrites chunky_format.h and its stamp; nothing when its inputs did not change
+regen:
+	$(FMT_GEN) regen
+
+# fails when the committed chunky_format.h is stale
+check-regen:
+	$(FMT_GEN) check
+
+# optional: a pre-commit hook that runs check-regen when a commit touches rust/
+hooks:
+	install -m 755 scripts/pre-commit "$$(git rev-parse --git-path hooks)/pre-commit"
+
 clean:
 	rm -rf $(BUILD) run
 
-.PHONY: all clean test-compress FORCE
+.PHONY: all clean test-compress FORCE rust rust-test vectors example regen check-regen hooks
 FORCE:
 
 # must come after every explicit rule: an included .d file's first target
