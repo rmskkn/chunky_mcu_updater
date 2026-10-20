@@ -9,7 +9,6 @@ typedef struct {
     uint8_t      src_slot;    /* OP_COPY only: SLOT_A or SLOT_B */
     sector_idx_t dst;         /* destination-slot-relative */
     sector_idx_t src_index;   /* OP_COPY only: src_slot-relative */
-    uint8_t      hash[SECTOR_HASH_LEN];
 } step_t;
 
 typedef struct {
@@ -18,7 +17,11 @@ typedef struct {
     int    n_skip, n_copy, n_write;
 } plan_t;
 
-/* The three rules of DESIGN.md section 5, against dest_slot (always the
+/* Diffs only the image's own sectors, [0, image_len / SECTOR_SIZE): the
+ * rest of dest_slot is outside the hash domain (DESIGN.md section 10.1), so
+ * a smaller image leaves its stale tail alone.
+ *
+ * The three rules of DESIGN.md section 5, against dest_slot (always the
  * device's reported inactive slot) with active_slot as the other, untouched
  * one. The COPY search (rule 2) spans both slots: it always prefers
  * active_slot (always safe, read-only for the whole update, DESIGN.md
@@ -27,6 +30,6 @@ typedef struct {
  * rewrites is unsafe for the reason DESIGN.md section 18 gives for the
  * single-partition variant, and that reasoning still holds within one slot. */
 void plan_build(const manifest_t *dev, int active_slot, int dest_slot,
-                const uint8_t target[SLOT_SIZE], plan_t *p);
+                const uint8_t target[SLOT_SIZE], size_t image_len, plan_t *p);
 
 #endif

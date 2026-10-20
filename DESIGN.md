@@ -95,13 +95,21 @@ bootloader, the root public key, or the device identity.
 
 | Page | Contents |
 |------|----------|
-| 0    | `MetaHeader`: magic, generation, `active_slot`, `pending_slot`, `plan_state`, `target_version`, target image SHA-256, signature (64 B), `step_count`, and the per-step op/source table (52 × 2 B) |
-| 1    | Target sector manifest: 52 × SHA-256 truncated to `SECTOR_HASH_LEN` (8 B by default), indexed by slot-relative sector |
+| 0    | `MetaHeader`: magic, generation, `mac`, `active_slot`, `pending_slot`, `plan_state`, `target_version`, `image_len`, target image SHA-256, signature (64 B), `step_count`, and the per-step op/source table (52 × 2 B) |
+| 1    | The plan's table: one SHA-256 truncated to `SECTOR_HASH_LEN` (8 B by default) for each of the image's `image_len / SECTOR_SIZE` sectors, indexed by slot-relative sector. Dense: sectors the device already holds are listed too (Section 6) |
 | 2    | Progress journal: 52 × 16-bit state word, advanced by clearing bits (no erase) |
 | 3    | Boot attempt log: 16-bit tokens cleared one per trial boot, plus the last 8 boot outcomes |
 
-Two banks ping-pong. The valid bank is the one with a correct CRC and the higher
-`generation`. A torn write therefore never loses the previous consistent state.
+Two banks ping-pong. The valid bank is the one whose `mac` verifies and that has
+the higher `generation`. A torn write therefore never loses the previous
+consistent state. The `mac` is an HMAC under `dev_key` (the identity page's)
+over the whole header with the field zeroed. It replaced a CRC-32, which catches
+a torn write but is linear and unkeyed: anyone able to write the bank directly
+could set `plan_state` and the plan's hashes and recompute it. The MAC closes
+that case (a write that bypasses the code). It does not close a compromised
+application, which holds `dev_key` too (Section 10); keeping the
+security-relevant fields under a key only the bootloader holds is accepted
+risk.
 
 The reference part, STM32F103CB, programs flash in 16-bit half-words and
 erases per page. Two rules bound what a field written incrementally (journal
@@ -285,14 +293,25 @@ them pure read-only data that also exists in the active slot:
 A retry after an interrupted attempt is cheaper still: the sectors already
 staged now satisfy rule 1, so only the gap is re-sent.
 
-The plan ends with the signed target descriptor: version, `image_sha256` over
-the whole 52 KB destination slot, and an ECDSA P-256 signature over that
-descriptor. Section 10.1 defines the exact hash domain.
+The plan is bound to the signed target descriptor: version, `image_len`,
+`image_sha256` over the image, `table_root` over the plan's table (Section 6),
+and a signature over those. Section 10.1 defines the exact hash domain.
 
-Step ordering: the sector holding the slot header and vector table (`dst=0`) is
-always emitted **last**. The slot header is the commit marker — if a transfer
-dies halfway, sector 0 is still erased, the slot is unmistakably invalid, and
-unroll has nothing to think about.
+**Variable image size.** The image is its real size rounded up to a sector, not
+the whole slot (`image_len <= SLOT_SIZE`), and the planner diffs only
+`[0, image_len / SECTOR_SIZE)`. A bigger firmware sends more steps, a smaller
+one fewer. Sectors past a smaller image are outside the hash domain: no step, no
+erase, never read by the bootloader. Stale code from an older, bigger image
+stays there as unsigned dead bytes; the bootloader does not erase it (wear, and
+nothing reads it). Revisit if that ever matters.
+
+Step ordering: the sector holding the descriptor (`DESC_SECTOR`, sector 0 in
+every supported geometry, together with the vector table) is always emitted
+**last**, and is always a WRITE (the version makes it unique to a build, so
+there is nothing to copy it from). The descriptor is the commit marker — if a
+transfer dies halfway, the slot has no valid header, so it is unmistakably
+invalid and unroll has nothing to think about. The device enforces the order
+(Section 6).
 
 Section 17 quantifies what this saves, where the break-even against
 sending a whole image lies, and the manifest elision that removes the fixed
@@ -323,16 +342,51 @@ encoded-sector buffer and one frame buffer (~300 B).
 | → device | `CHALLENGE` | 16-byte server nonce |
 | → server | `MANIFEST` / `MANIFEST_END` | manifest body, `manifest_digest`, device signature (Section 4) |
 | → device | `MANIFEST_REJECT` | reason (`BAD_SIGNATURE`, `BAD_NONCE`, `UNKNOWN_DEVICE`, `GEOMETRY_MISMATCH`, `MALFORMED`) |
-| → device | `PLAN_BEGIN` | target version, destination slot, step count, target SHA-256, signature |
-| → device | `STEP_COPY` | `dst`, `src_slot`, `src_index`, expected hash |
+| → device | `PLAN_BEGIN` | target version, destination slot, step count, the descriptor's signed fields (`image_len`, `flags`, `image_sha256`, `table_root`) and its signature |
+| → device | `PLAN_TABLE` / `PLAN_TABLE_END` | the target's per-sector hashes, `image_len / SECTOR_SIZE` entries of `SECTOR_HASH_LEN`, in fragments (like `MANIFEST`); `PLAN_TABLE_END` has no payload |
+| → device | `STEP_COPY` | `dst`, `src_slot`, `src_index` |
 | → device | `STEP_WRITE` | `dst`, `offset`, `len`, bytes of the *encoded* sector (offset and len index the encoded stream) |
-| → device | `STEP_WRITE_END` | `dst`, `compress` (u8 id: 0 raw, 1 LZ4, 2 LZ4 with the old sector as dictionary), `enc_len` (u16), hash of the *decoded* sector |
+| → device | `STEP_WRITE_END` | `dst`, `compress` (u8 id: 0 raw, 1 LZ4, 2 LZ4 with the old sector as dictionary), `enc_len` (u16) |
 | → server | `STEP_ACK` / `STEP_NAK` | `dst`, reason (`HASH_MISMATCH`, `FLASH_FAIL`, `BAD_INDEX`, `DECOMPRESS`) |
 | → device | `PLAN_END` | — |
 | → server | `PLAN_READY` | journal digest, count of steps still pending |
 | → device | `COMMIT` | arm the reboot |
 | → server | `STATUS` | plan state, booted version, trial result |
 | → device | `ABORT` | drop the plan and unroll |
+
+**Authenticating a plan before the first byte is written.** `PLAN_BEGIN` carries
+what the release key signed, and the device checks it before any flash write:
+
+1. The signature (`image_mac`) over the descriptor's signed prefix, which
+   includes `table_root`; `image_len` is a sector multiple in
+   `[CODE_OFF, SLOT_SIZE]` and `step_count <= image_len / SECTOR_SIZE`; the
+   version is not lower than the running one unless the signed `flags` allow a
+   downgrade; `dest_slot` is the device's own inactive slot.
+2. The table follows (`PLAN_TABLE`, `PLAN_TABLE_END`). The device checks
+   `SHA256(table) == table_root` and only then accepts steps. A step before
+   that is a protocol error. The table is dense, one entry per sector of the
+   image, so position is implied by the index and a server cannot truncate it:
+   the length comes from the signed `image_len`. About 408 B for a full 51-sector
+   image at 8 B (the manifest is twice that, it covers both slots), in
+   `FRAME_MAX_PAYLOAD` fragments.
+3. Steps carry no hash of their own. A `STEP_WRITE`'s decoded sector must hash to
+   the table's entry for `dst` (`NAK(HASH_MISMATCH)` otherwise, and nothing is
+   written); a `STEP_COPY` records its source and the table's entry, and the
+   bootloader checks the copy against it. A server cannot make a sector
+   "consistent" with a hash of its own choosing.
+4. The descriptor sector is the last step. Once it has arrived only `PLAN_END`
+   is accepted, and a `STEP_COPY` for it is refused. The table's entry for that
+   sector hashes it without the descriptor (Section 10.1: `table_root` is
+   inside the descriptor), so at `PLAN_END` the device compares the descriptor
+   now in the pending slot, byte for byte, with the one rebuilt from
+   `PLAN_BEGIN`. The same check covers a descriptor sector the planner found
+   already in place and skipped.
+
+This is an early reject: a bad plan stops at the first message instead of after
+a whole transfer. The security boundary is still the bootloader's whole-image
+check (Section 7), which does not believe the application: per-chunk checking
+is a liveness property, the full 32 B `image_sha256` under the signature is the
+authenticity one.
 
 There is no `STEP_FILL`: LZ4 encodes a uniform sector in about 14 B, so a
 separate message for it saved nothing. A `NAK(DECOMPRESS)` is logged and the
@@ -375,17 +429,22 @@ NONE ──PLAN_BEGIN──> STAGING ──all steps verified──> READY
 
 ### Boot sequence
 
-1. Select the valid meta bank (CRC + highest generation). If neither is valid,
-   assume `active_slot = A`, `plan_state = NONE`.
-2. **`plan_state == READY` or `APPLYING`** → set `APPLYING`, then for each
-   journal step not yet `0x0000`:
+1. Select the valid meta bank (MAC under `dev_key` + highest generation). If
+   neither is valid, assume `active_slot = A`, `plan_state = NONE`.
+2. **`plan_state == READY` or `APPLYING`** → set `APPLYING`. Before running
+   anything, check the staged plan against the pending slot's descriptor:
+   the signature verifies, `image_len` and `image_sha256` match the plan's, and
+   `SHA256(meta.target_hash[0..N)) == table_root`. The meta plan is believed only
+   through that signed root; a forged or stale one is **unrolled** without a
+   single COPY running. Then for each journal step not yet `0x0000`:
    * `STEP_COPY`: copy `SECTOR_SIZE` bytes from `(src_slot, src_index)` to
      `(pending_slot, dst)` using a RAM-resident program routine, re-hash the
      destination, mark `0x0000`.
    * `STEP_WRITE`: the application already wrote it; re-verify its hash and mark
      `0x0000`. A mismatch means the staged data is bad → **unroll**.
-3. Verify the full pending image against `image_sha256` and the ECDSA
-   signature. Failure → **unroll**.
+3. Verify the full pending image: `[0, image_len)` minus the descriptor hole
+   against the full 32 B `image_sha256`, the ECDSA signature, and that the
+   descriptor is not revoked. Failure → **unroll**.
 4. Set `pending_slot` to trial: write the attempt log with `MAX_TRIES = 3`
    tokens, set `plan_state = TRIAL`, bump generation.
 5. **`plan_state == TRIAL`** → clear one attempt token. If none remain →
@@ -454,6 +513,11 @@ idempotent, so a power cut during unroll just means unroll runs again.
 | Power loss during meta write | The other bank with the lower generation is still consistent |
 | Corrupt blob in transit | Per-sector hash fails → `STEP_NAK` → re-sent |
 | Server sends a wrong target | `image_sha256` or release signature fails → unroll |
+| Forged `PLAN_BEGIN` signature, or a table that does not fold to `table_root` | Session refused before any flash write |
+| Step whose data is not the table's entry for that sector | `STEP_NAK(HASH_MISMATCH)`, nothing written |
+| Step after the descriptor sector, or a staged descriptor that is not the signed one | Session refused; the plan is never persisted |
+| Meta bank written without `dev_key` | Its MAC fails; the previous generation is used |
+| Meta plan whose table does not match the descriptor's `table_root` | Unroll before any COPY |
 | TLS handshake fails or the pin does not match | No session; link fault reported, retry with backoff |
 | Manifest signature or nonce is wrong | `MANIFEST_REJECT`; no plan is generated |
 | Device identity page blank or `factory_cert` bad | Device cannot sign; reports a provisioning fault and does not update |
@@ -479,9 +543,11 @@ before the slot is ever made bootable:
 * The public key lives in the bootloader region, which the update path cannot
   write.
 * `micro-ecc` verify costs roughly 200–400 ms at 72 MHz — paid once, at commit.
-* `version` is monotonic and the bootloader refuses a target whose version is
+* `version` is monotonic and the update session refuses a target whose version is
   lower than the running one, unless the plan carries an explicit
-  `allow_downgrade` flag that is itself inside the signed descriptor.
+  `allow_downgrade` flag that is itself inside the signed descriptor. (The PoC's
+  bootloader does not repeat that check; see the open risks in
+  `docs/auth_verification.md`.)
 
 ### 10.1 Image descriptor and hash domain
 
@@ -495,36 +561,61 @@ base. The descriptor sits immediately after it at a fixed offset:
 |---|---|---|
 | `0x000` | 512 B | Vector table (`VTOR` needs the table 512-byte aligned at this size) |
 | `0x200` | 128 B | `ImageDescriptor` |
-| `0x280` | … | Code and read-only data, `0xFF` padding to the slot end |
+| `0x280` | … | Code and read-only data, `0xFF` padding to `image_len` |
 
 ```c
 typedef struct {                  /* slot_base + 0x200, 128 bytes      */
-    uint32_t magic;               /* 'CBIM'                            */
+    uint32_t magic;               /* 'CBI2'                            */
     uint32_t version;             /* monotonic                         */
-    uint32_t image_len;           /* always SLOT_SIZE (53248)          */
+    uint32_t image_len;           /* sector multiple, <= SLOT_SIZE     */
     uint32_t flags;               /* bit0 allow_downgrade              */
     uint8_t  image_sha256[32];    /* over the domain below             */
-    uint8_t  signature[64];       /* ECDSA P-256 over bytes [0, 0x30)  */
-    uint32_t reserved[2];
-} ImageDescriptor;                /* 0x30 signed prefix + sig + pad    */
+    uint8_t  table_root[32];      /* SHA-256 of the per-sector table   */
+    uint8_t  signature[32];       /* release signature over [0, 0x50)  */
+    uint32_t revoked;             /* outside the signature             */
+    uint8_t  reserved[12];
+} ImageDescriptor;                /* 0x50 signed prefix + sig + pad    */
 ```
 
-**`image_sha256` domain:** slot bytes `[0x000, 0x200)` then `[0x280, 0x0D000)`
-— the whole slot, with the 128-byte descriptor excluded. The vector table *is*
-covered, and so is every padding byte, so the hash is defined even for a
-partially used slot. No circularity: the descriptor covers the image, and the
-signature covers the descriptor's first `0x30` bytes, which include
-`image_sha256`.
+(The PoC's `signature` is a 32 B HMAC under the release key; production uses a
+64 B ECDSA P-256 signature and the reserved bytes shrink accordingly.)
 
-**Signature domain:** `ImageDescriptor` bytes `[0x00, 0x30)` only — magic,
-version, length, flags, and `image_sha256`. Nothing else needs signing, because
-`image_sha256` already commits to the entire image.
+**`image_len`** is the real image size rounded up to a sector:
+`CODE_OFF <= image_len <= SLOT_SIZE`, `image_len % SECTOR_SIZE == 0`. The
+device checks it at `PLAN_BEGIN` and the bootloader before hashing. Slot bytes
+at or past `image_len` are outside every hash, are never read, and may hold
+stale code from a bigger image.
+
+**`image_sha256` domain:** slot bytes `[0x000, 0x200)` then
+`[0x280, image_len)` — the image, with the 128-byte descriptor excluded. The
+vector table *is* covered, and so is every padding byte up to `image_len`. No
+circularity: the descriptor covers the image, and the signature covers the
+descriptor's signed prefix, which includes `image_sha256`. It is the raw
+32 B hash, never truncated or folded from the per-sector hashes: the boot-time
+check keeps its full collision resistance, independent of `SECTOR_HASH_LEN`.
+
+**`table_root`** is `SHA256(h_0 || ... || h_{N-1})` for `N = image_len /
+SECTOR_SIZE`, where `h_i` is sector `i`'s `SECTOR_HASH_LEN`-byte hash exactly as
+`PLAN_TABLE` carries it. Dense and in order, so position is bound by the
+index. Sector `DESC_SECTOR`'s `h_i` is taken over the sector **without** the
+descriptor's 128 bytes (as `image_sha256` does): `table_root` is in the
+descriptor, so including it would make that hash depend on its own result. The
+descriptor itself is checked separately, as a whole, by comparing it with
+`PLAN_BEGIN` (Section 6).
+
+**Signature domain:** `ImageDescriptor` bytes `[0x00, 0x50)` — magic, version,
+length, flags, `image_sha256` and `table_root`. `image_sha256` commits to the
+entire image and `table_root` to the table a plan streams against, so one
+signature, made once at build time, authenticates both. `revoked` is outside it
+on purpose: the bootloader programs it after the fact (Section 8).
 
 **Where it is checked.**
 
 | When | Check | Cost |
 |---|---|---|
-| Server, on `PLAN_BEGIN` | descriptor is relayed to the device | — |
+| Update session, on `PLAN_BEGIN` | signature over the descriptor (so over `table_root`), bounds, version; before any flash write | ~300 ms |
+| Update session, on `PLAN_TABLE_END` | `SHA256(table) == table_root`; then each step against its table entry | one hash of ~0.4 KB, then a lookup per step |
+| Bootloader, before applying (Section 7 step 2) | pending descriptor's signature; `SHA256(meta plan table) == table_root` | one hash of the table |
 | Bootloader, at commit (Section 7 step 3) | `image_sha256` **and** signature | ~18 ms + ~300 ms, once per update |
 | Bootloader, on every normal boot | `image_sha256` only | ~18 ms per boot |
 
@@ -699,7 +790,9 @@ independent of the transport.
 | Forged manifest from a compromised gateway or module | Device manifest signature |
 | Cross-message signature reuse | `domain` field in `ManifestAuth` |
 | Forged or substituted firmware image | Release-key signature over `ImageDescriptor` (Section 10.1) |
-| Rollback to an old vulnerable image | Monotonic `version`, enforced by the bootloader |
+| Unsigned plan or substituted sectors streamed into the pending slot | Signature over `table_root` checked at `PLAN_BEGIN`, every step checked against the table (Section 6); the bootloader re-checks the table before applying and the whole image after |
+| Meta bank written directly, bypassing the code | `mac` under `dev_key` (Section 2) |
+| Rollback to an old vulnerable image | Monotonic `version`, enforced by the update session |
 | Corruption on the MCU-to-module UART | `crc32` in the framing layer |
 
 ---

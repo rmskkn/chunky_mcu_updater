@@ -134,6 +134,7 @@ void meta_reset_plan(meta_t *m)
     m->pending_slot  = SLOT_NONE;
     m->attempts_left = 0;
     m->target_version = 0;
+    m->image_len = 0;
     memset(m->target_sha256, 0, sizeof m->target_sha256);
     memset(m->target_mac, 0, sizeof m->target_mac);
     m->step_count = 0;
@@ -141,18 +142,30 @@ void meta_reset_plan(meta_t *m)
     memset(m->src_slot, 0, sizeof m->src_slot);
     memset(m->src_index, 0, sizeof m->src_index);
     memset(m->target_hash, 0, sizeof m->target_hash);
-    /* active_slot, magic, generation, crc, last_result: untouched. */
+    /* active_slot, magic, generation, mac, last_result: untouched. */
+}
+
+/* mac = HMAC(dev_key, m with mac zeroed). -1 if there is no identity to take
+ * the key from. */
+static int meta_mac(flash_t *f, const meta_t *m, uint8_t out[SHA256_LEN])
+{
+    identity_t id;
+    meta_t z = *m;
+
+    if (identity_get(f, &id) < 0) return -1;
+    memset(z.mac, 0, sizeof z.mac);
+    hmac_sha256(id.dev_key, sizeof id.dev_key, &z, sizeof z, out);
+    return 0;
 }
 
 static int bank_valid(flash_t *f, int bank, meta_t *out)
 {
     meta_t m;
+    uint8_t want[SHA256_LEN];
     flash_read(f, BANK_META(bank), &m, sizeof m);
     if (m.magic != META_MAGIC) return 0;
-    uint32_t want = m.crc;
-    m.crc = 0;
-    if (crc32_buf(&m, sizeof m) != want) return 0;
-    if (out) { memcpy(out, &m, sizeof m); out->crc = want; }
+    if (meta_mac(f, &m, want) < 0 || memcmp(want, m.mac, SHA256_LEN)) return 0;
+    if (out) memcpy(out, &m, sizeof m);
     return 1;
 }
 
@@ -174,8 +187,7 @@ int meta_store(flash_t *f, meta_t *m)
 
     m->magic = META_MAGIC;
     m->generation++;
-    m->crc = 0;
-    m->crc = crc32_buf(m, sizeof *m);
+    if (meta_mac(f, m, m->mac) < 0) { m->generation--; return -1; }
 
     /* On a failure the live bank stays the older one, which is still whole:
      * that is what the ping-pong is for. */

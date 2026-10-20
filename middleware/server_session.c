@@ -185,7 +185,8 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     uint32_t ver = hello.running_version + 1;
     uint8_t *target = malloc(SLOT_SIZE);
     if (!target) { free(bin); return err_set(err, "out of memory for a %d B slot image", SLOT_SIZE); }
-    if (image_build(bin, binlen, ver, root_key, target) < 0) {
+    size_t image_len;
+    if (image_build(bin, binlen, ver, root_key, target, &image_len) < 0) {
         free(bin);
         free(target);
         return err_set(err, "%s is %zu B, over the %d B slot payload",
@@ -197,7 +198,9 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
      * to plain LZ4; from then on every served sector is a future dictionary. */
     snprintf(cpath, sizeof cpath, "%s/sectors", cache_dir);
     mkdir(cpath, 0755);
-    for (int i = 0; i < SECTORS_SLOT; i++)
+    int n_sectors = (int)(image_len / SECTOR_SIZE);
+    out->n_sectors = n_sectors;
+    for (int i = 0; i < n_sectors; i++)
         store_put(cache_dir, target + (size_t)i * SECTOR_SIZE);
 
     /* The device already runs this firmware if its active slot has the same
@@ -211,7 +214,7 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     }
 
     double t_plan = now_ms();
-    plan_build(&dev, active_slot, dest_slot, target, &out->plan);
+    plan_build(&dev, active_slot, dest_slot, target, image_len, &out->plan);
     t_plan = now_ms() - t_plan;
     log_fmt(log, log_ctx, "server: plan built in %.2f ms", t_plan);
 
@@ -221,9 +224,30 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     pb.version    = (uint32_t)ver;
     pb.step_count = (uint16_t)out->plan.count;
     pb.dest_slot  = (slot_id_t)dest_slot;
+    pb.image_len  = (uint32_t)image_len;
+    pb.flags      = d->flags;
     memcpy(pb.image_sha256, d->sha256, SHA256_LEN);
+    memcpy(pb.table_root, d->table_root, SHA256_LEN);
     memcpy(pb.image_mac, d->mac, SHA256_LEN);
     frame_send(&l, MSG_PLAN_BEGIN, &pb, sizeof pb);
+
+    /* The target's sector hashes, authenticated by the table_root PLAN_BEGIN
+     * just carried, so the device checks every step against them. */
+    {
+        uint8_t table[SECTORS_SLOT * SECTOR_HASH_LEN];
+        size_t table_len = (size_t)n_sectors * SECTOR_HASH_LEN;
+        image_table(target, image_len, table);
+        for (size_t off = 0; off < table_len; off += 256) {
+            uint8_t buf[TABLE_HDR + 256];
+            uint16_t len = (uint16_t)(table_len - off < 256 ? table_len - off : 256);
+            uint16_t o16 = (uint16_t)off;
+            memcpy(buf, &o16, 2);
+            memcpy(buf + 2, &len, 2);
+            memcpy(buf + TABLE_HDR, table + off, len);
+            frame_send(&l, MSG_PLAN_TABLE, buf, TABLE_HDR + len);
+        }
+        frame_send(&l, MSG_PLAN_TABLE_END, NULL, 0);
+    }
     log_fmt(log, log_ctx, "server: plan v%d, %d steps (%d skipped), dest slot %c",
            ver, out->plan.count, out->plan.n_skip, 'A' + dest_slot);
 
@@ -237,7 +261,7 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
         if (s->op == OP_COPY) {
             msg_step_copy_t c;
             c.dst = s->dst; c.src_slot = s->src_slot; c.src_index = s->src_index;
-            memcpy(c.hash, s->hash, SECTOR_HASH_LEN);
+            c.pad = 0;
             frame_send(&l, MSG_STEP_COPY, &c, sizeof c);
         } else {
             /* dev.h[.] at dest_slot's own index for dst is the device's
@@ -265,7 +289,6 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
                 out->write_wire += FRAME_OVERHEAD + WRITE_HDR + len;
             }
             msg_step_write_end_t we = { .dst = s->dst, .compress = method, .enc_len = (uint16_t)enc_len };
-            memcpy(we.hash, s->hash, SECTOR_HASH_LEN);
             frame_send(&l, MSG_STEP_WRITE_END, &we, sizeof we);
             out->write_wire += FRAME_OVERHEAD + sizeof we + FRAME_OVERHEAD + sizeof(msg_step_ack_t);
         }
@@ -300,7 +323,7 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
         /* Test-only hook (docs/ab_migration.md's "unroll before any boot
          * attempt" case): simulate the link or server giving up between
          * PLAN_READY and COMMIT. The device never arms the plan, so the
-         * next device_boot() finds it staged but unarmed and unrolls it. */
+         * next bootloader_boot() finds it staged but unarmed and unrolls it. */
         frame_send(&l, MSG_ABORT, NULL, 0);
         log_fmt(log, log_ctx, "server: test hook, sending ABORT instead of COMMIT");
         goto out_report;
@@ -310,6 +333,8 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
     /* The device's next manifest is the one this plan produces: dest_slot
      * becomes the target, sector for sector; active_slot is unchanged
      * (confirming only moves which slot is "active," never a flash byte).
+     * Sectors past the image keep what the device has there: a smaller
+     * image leaves its slot's tail alone.
      * Cache it now so that request elides its body (DESIGN.md 17.1) instead
      * of always missing right after an update. If the update fails, the
      * digests differ and the device sends its manifest in full, which then
@@ -320,7 +345,11 @@ int server_update_session(plat_io_t *io, const char *image_path, const char *cac
         next.sector_size = SECTOR_SIZE;
         next.sectors     = MANIFEST_ENTRIES;
         for (int i = 0; i < SECTORS_SLOT; i++) {
-            sector_hash(target + (size_t)i * SECTOR_SIZE, next.h[manifest_index(dest_slot, i)]);
+            if (i < n_sectors)
+                sector_hash(target + (size_t)i * SECTOR_SIZE, next.h[manifest_index(dest_slot, i)]);
+            else
+                memcpy(next.h[manifest_index(dest_slot, i)],
+                      manifest_hash_at(&dev, manifest_index(dest_slot, i)), SECTOR_HASH_LEN);
             memcpy(next.h[manifest_index(active_slot, i)],
                   manifest_hash_at(&dev, manifest_index(active_slot, i)), SECTOR_HASH_LEN);
         }

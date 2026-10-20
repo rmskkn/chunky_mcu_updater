@@ -9,7 +9,7 @@ static int link_send(void *ctx, uint8_t type, const void *payload, size_t len)
 }
 
 int client_update_session(flash_t *f, plat_io_t *io, const uint8_t dev_key[32],
-                          log_fn log, void *log_ctx, device_stats_t *stats,
+                          const uint8_t root_key[32], log_fn log, void *log_ctx, device_stats_t *stats,
                           cb_err_t *err)
 {
     device_session_t s;
@@ -18,7 +18,7 @@ int client_update_session(flash_t *f, plat_io_t *io, const uint8_t dev_key[32],
     size_t n;
 
     link_init(&l, io);
-    int rc = device_session_start(&s, f, dev_key, link_send, &l, log, log_ctx, stats);
+    int rc = device_session_start(&s, f, dev_key, root_key, link_send, &l, log, log_ctx, stats);
     while (rc == DEV_PENDING) {
         int t = frame_recv(&l, pay, &n);
         if (t == FRAME_BAD)

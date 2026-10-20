@@ -2,6 +2,7 @@
  * actual work - manifest generation, the update session, the bootloader's
  * apply/verify step - lives in lib/device.c, carried over the link by
  * client_session.c; DESIGN.md sections 4, 6, 7, 8. */
+#include "bootloader.h"
 #include "client_session.h"
 #include "cli.h"
 #include "flash_file.h"
@@ -93,7 +94,7 @@ static int cmd_session(void)
     }
 
     double t_start = now_ms();
-    int rc = client_update_session(&f, io, dev_key, cli_log, NULL, &g_stats, &err);
+    int rc = client_update_session(&f, io, dev_key, root_key, cli_log, NULL, &g_stats, &err);
     double session_ms = now_ms() - t_start;
     if (rc < 0) {
         plat_io_close(io);
@@ -130,7 +131,7 @@ static int cmd_boot(void)
         return cli_fail("%s", err.msg);
 
     double t_start = now_ms();
-    int rc = device_boot(&f, root_key, cli_log, NULL, &g_stats);
+    int rc = bootloader_boot(&f, root_key, cli_log, NULL, &g_stats);
     double boot_ms = now_ms() - t_start;
     if (rc < 0) {
         flash_file_close(&f);
@@ -144,7 +145,7 @@ static int cmd_boot(void)
     if (g_stats.t_verify > 0)
         printf("time: verify     host %8.2f ms   F103 %8.1f ms  "
                "(image_sha256 + signature)\n", g_stats.t_verify,
-               (double)(SLOT_SIZE - DESC_LEN) * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0)
+               (double)g_stats.verify_bytes * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0)
                + ECDSA_VERIFY_MS);
     time_report("boot", boot_ms, &f, &g_stats);
     flash_file_close(&f);
@@ -214,11 +215,11 @@ static int cmd_status(void)
         image_desc_t desc;
         uint8_t h[SHA256_LEN];
         image_desc_read(&f, slot, &desc);
-        image_hash_flash(&f, slot, h);
+        image_hash_flash(&f, slot, desc.image_len, h);
         int ok = image_verify_flash(&f, slot, rk, h, &why);
         printf("slot %c          %s  version %u  %s\n", 'A' + slot,
                desc.magic == IMG_MAGIC ? "image   " : "no image",
-               device_app_version(&f, slot), ok == 0 ? "verified" : why);
+               image_version_flash(&f, slot), ok == 0 ? "verified" : why);
     }
 
     manifest_build(&f, &man);

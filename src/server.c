@@ -81,7 +81,7 @@ static void report(const char *label, const server_session_result_t *r)
      * header, closing messages. A full-image transfer pays it too. */
     double fixed = wire - (double)r->write_wire
                         - (double)p->n_copy * COPY_WIRE;
-    double full = fixed + (double)SECTORS_SLOT * SECTOR_WIRE;
+    double full = fixed + (double)r->n_sectors * SECTOR_WIRE;
 
     /* Copies program the destination as well, so both count as sectors
      * written, and flash time is what the device spends on them. */
@@ -94,7 +94,7 @@ static void report(const char *label, const server_session_result_t *r)
     sector_list(p, OP_WRITE, wl, sizeof wl);
     sector_list(p, OP_COPY, cl, sizeof cl);
     printf("sectors: %d of %d differ; %d sent, %d copied on the device, %d already right\n",
-           p->n_copy + p->n_write, SECTORS_SLOT, p->n_write, p->n_copy, p->n_skip);
+           p->n_copy + p->n_write, r->n_sectors, p->n_write, p->n_copy, p->n_skip);
     printf("  sent    %s\n", wl);
     printf("  copied  %s\n", cl);
     printf("  encoded %llu B\n", (unsigned long long)r->enc_bytes);

@@ -3,38 +3,19 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "flash.h"
+#include "image.h"
 #include "manifest.h"
 #include "protocol.h"
+#include "stats.h"
 #include "util.h"
 
-/* The device's functional core: the update session (DESIGN.md sections 4,
- * 6) and the bootloader's apply/verify step (sections 7, 8). No transport,
- * no threads, no printf. The session is driven one message at a time: the
- * caller receives a message however its link delivers one and feeds it in;
- * the core does the flash work for it inline and hands any reply to the
- * send callback before it returns. That runs the same under an RTOS, in a
- * superloop, or in a bootloader. */
-
-/* ECDSA costs are the figures DESIGN.md section 10 budgets, not measurements;
- * the host models a real signature it never actually computes. */
-#define ECDSA_SIGN_MS   250.0
-#define ECDSA_VERIFY_MS 300.0
-
-/* Device-time instrumentation threaded through a session/boot call, so a
- * caller can print its own timing report afterward instead of the library
- * doing it. sha_bytes/ecdsa_ms accumulate across calls on the same struct,
- * matching the device's total hashing/signing cost so far (per-sector hashes
- * and image_sha256 both run through SHA-256, so one byte counter covers
- * both); the t_* phase timings are reset at the start of the call that fills
- * them. The core has no clock of its own: clock_ms is the caller's, and
- * with it NULL every t_* stays 0. */
-typedef struct {
-    double (*clock_ms)(void);   /* monotonic milliseconds; may be NULL */
-    size_t sha_bytes;
-    double ecdsa_ms;
-    double t_manifest, t_auth, t_stage, t_persist;  /* device_session_* */
-    double t_apply, t_verify;                       /* device_boot */
-} device_stats_t;
+/* The device's update session (DESIGN.md sections 4, 6), and the
+ * application's confirm (section 7). The bootloader's apply/verify step is
+ * bootloader.h. No transport, no threads, no printf. The session is driven
+ * one message at a time: the caller receives a message however its link
+ * delivers one and feeds it in; the core does the flash work for it inline
+ * and hands any reply to the send callback before it returns. That runs the
+ * same under an RTOS or in a superloop. */
 
 /* Sends one message to the server. Returns 0, or -1 if the link failed. */
 typedef int (*device_send_fn)(void *ctx, uint8_t type, const void *payload, size_t len);
@@ -53,6 +34,7 @@ typedef struct {
     /* Everything below is the core's own. */
     flash_t        *f;
     const uint8_t  *dev_key;
+    const uint8_t  *root_key;        /* verifies the plan's release signature */
     device_send_fn  send;
     void           *send_ctx;
     log_fn          log;
@@ -63,6 +45,10 @@ typedef struct {
     uint8_t         device_id[16];
     int             active_slot;     /* loaded at session start; never changes mid-session */
     int             pending_slot;    /* OTHER_SLOT(active_slot) once PLAN_BEGIN arrives */
+    int             n_sectors;       /* the plan's image_len / SECTOR_SIZE, once PLAN_BEGIN arrives */
+    image_desc_t    desc;            /* the signed descriptor PLAN_BEGIN carried, rebuilt whole */
+    size_t          table_got;       /* PLAN_TABLE bytes received so far */
+    int             desc_seen;       /* the descriptor sector's step has arrived: only PLAN_END may follow */
     double          t0;
     manifest_t      man;
     msg_manifest_auth_t auth;
@@ -77,7 +63,7 @@ typedef struct {
 /* Starts a session: reads the device's state and sends HELLO. stats may be
  * NULL. Returns DEV_PENDING, or DEV_ERROR. */
 int device_session_start(device_session_t *s, flash_t *f, const uint8_t dev_key[32],
-                         device_send_fn send, void *send_ctx,
+                         const uint8_t root_key[32], device_send_fn send, void *send_ctx,
                          log_fn log, void *log_ctx, device_stats_t *stats);
 
 /* Feeds the next message from the server; type < 0 means the link closed.
@@ -85,31 +71,6 @@ int device_session_start(device_session_t *s, flash_t *f, const uint8_t dev_key[
  * DEV_PENDING while the session wants another message, then one of the
  * other DEV_* codes once it is over. */
 int device_session_feed(device_session_t *s, int type, const uint8_t *payload, size_t len);
-
-uint32_t device_app_version(flash_t *f, int slot);
-
-/* Applies whatever the session staged, then decides whether the result is
- * bootable (DESIGN.md sections 7-8). stats may be NULL. 0, or -1 if the
- * result could not be recorded in flash (the reason in f->err); a plan that
- * fails to apply, an image that fails to verify, or a trial that runs out
- * of attempts is a recorded outcome, not an error.
- *
- * Calling contract (docs/ab_migration.md's open question, resolved this
- * way): the host PoC has no real watchdog or CPU reset, so one call is one
- * simulated boot/reset cycle, and a test drives repeated trial attempts by
- * calling this repeatedly -- the attempt log persists in meta_t across
- * calls, same as it would across real resets. A trial boot that succeeds
- * does *not* auto-confirm; the caller (standing in for the application
- * reaching a working state and talking to the server) must call
- * device_confirm() separately, or call device_boot() again to simulate a
- * reset with no confirm, which consumes another attempt. This is the
- * "closest to the real mechanism" option the migration plan offered,
- * chosen over a single-call simplified resolution because it is what lets
- * a shell-level test (this repo has no unit-test harness in C) exercise
- * the confirm/retry/revert paths with the real cb-client binary: see
- * src/client.c's --boot-only / --confirm-only / --no-confirm flags. */
-int  device_boot(flash_t *f, const uint8_t root_key[32],
-                 log_fn log, void *log_ctx, device_stats_t *stats);
 
 /* The application's "I reached a working state and talked to the server"
  * call (DESIGN.md section 7, "application duties on a trial boot"): only

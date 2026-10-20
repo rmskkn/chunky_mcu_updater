@@ -113,14 +113,14 @@ flash and is the only thing that writes it. Nothing else is shared.
   |                                   |             |             order implicit        |
   | image.c   wrap into an image:     |             | device.c    receive blobs, write  |
   |           descriptor at 0x200,    |             |             them straight into    |
-  |           image_sha256, MAC       |             |             them in place         |
+  |           image_sha256, table_root|             |             them in place         |
   |                                   |             |                                   |
   | plan.c    3 rules against the     |             | flash.c     erase page,           |
   |           device manifest:        |             |             program half-words,   |
   |           skip / copy / write     |             |             refuse to set a bit   |
   |                                   |             |                                   |
-  | cache/    last manifest per       |             | device.c    bootloader: copies,   |
-  |           device, for elision     |             |             verify, trial, confirm|
+  | cache/    last manifest per       |             | bootloader.c  copies, verify,     |
+  |           device, for elision     |             |               trial               |
   +-----------------------------------+             +-----------------------------------+
                     |                                                 |
                     +------------ frame.c over TCP -------------------+
@@ -178,16 +178,23 @@ the progress record, so the next request re-diffs and sends only the gap.
     |-- MANIFEST_END  digest + MAC ------------------------------>|
     |                              verify MAC, nonce, structure   |
     |                      build the target, diff it per sector   |
-    |<-- PLAN_BEGIN  version, steps, sha256 + MAC ----------------|
+    |<-- PLAN_BEGIN  version, steps, signed descriptor fields ----|
+    |   verify the signature, bounds, version: before any write   |
+    |<-- PLAN_TABLE  the target's per-sector hashes, fragmented --|
+    |<-- PLAN_TABLE_END ------------------------------------------|
+    |   SHA-256 of the table must equal the signed table_root     |
     |                                                             |
-    |   every step streamed with no per-step wait:                |
+    |   every step streamed with no per-step wait, the descriptor |
+    |   sector last:                                              |
     |<-- STEP_WRITE  dst, offset, <=256 B of the encoded sector --|
-    |<-- STEP_WRITE_END  dst, compress id, enc_len, hash ---------|
-    |<-- STEP_COPY  dst, src index, hash -------------------------|
+    |<-- STEP_WRITE_END  dst, compress id, enc_len ---------------|
+    |<-- STEP_COPY  dst, src slot, src index ---------------------|
     |   ... (one of the two, once per step, until the plan ends)  |
     |<-- PLAN_END ------------------------------------------------|
+    |   the staged descriptor must be the one PLAN_BEGIN carried  |
     |                                                             |
-    |   per STEP_WRITE_END: decompress, check the hash, then      |
+    |   per STEP_WRITE_END: decompress, check the table's hash,   |
+    |   then                                                      |
     |   erase and program the sector before taking the next       |
     |   message - the link's own buffering absorbs the stall;     |
     |   per STEP_COPY: recorded only, the bootloader copies later |
@@ -199,14 +206,18 @@ the progress record, so the next request re-diffs and sends only the gap.
     |<-- COMMIT --------------------------------------------------|
     |                                                             |
     |   arm the plan: clear one journal half-word, reboot         |
-    |   bootloader: run the copies, re-check every hash,          |
-    |               check image_sha256 and the signature          |
+    |   bootloader: check the plan's table against the signed     |
+    |               table_root, run the copies, re-check every    |
+    |               hash, check image_sha256 and the signature    |
     |   verifies -> boot it; fails -> ask for another release     |
 ```
 
-Sector 0 carries the descriptor and is always sent last, so an interrupted
-request leaves the partition without a valid header: unmistakably not
-bootable, rather than plausibly bootable and wrong.
+The sector carrying the descriptor (sector 0) is always sent last, and the
+device refuses anything but `PLAN_END` after it, so an interrupted request
+leaves the slot without a valid header: unmistakably not bootable, rather than
+plausibly bootable and wrong. The image is its real size rounded up to a
+sector, not the whole slot; a smaller release sends fewer sectors and leaves
+the old tail alone (`DESIGN.md` section 10.1).
 
 ## What a request looks like
 
@@ -256,18 +267,21 @@ stable link order are what keep a one-line fix from costing a full transfer.
 |---|---|
 | `cb-server --image FILE` | serves one release; re-reads the file each request |
 | `cb-client --flash FILE --initial FILE` | the device: one request, start to finish |
+| `build/auth_test` | not a CLI: `tests/case_auth.sh` runs it, to drive the session and bootloader with forged messages |
 | `cb-flash` | `manifest`, `find` (which sector holds a hash), `map`, `geometry`, `mutate` (build a test release) |
 
 | Source | Covers |
 |---|---|
-| `flash.c` | Page erase, half-word program with the bits-only-clear and one-program-per-erase rules, meta bank ping-pong, journal |
+| `flash.c` | Page erase, half-word program with the bits-only-clear and one-program-per-erase rules, meta bank ping-pong (each bank under an HMAC with the device key), journal |
 | `manifest.c` | Canonical manifest body, digest, MAC, structural checks |
 | `plan.c` | The three planner rules of `DESIGN.md` section 5 |
-| `image.c` | Image descriptor at partition offset `0x200`, `image_sha256` with the descriptor hole, building an image |
+| `image.c` | Image descriptor at partition offset `0x200`, `image_sha256` and the per-sector table with the descriptor hole, building an image of its real length |
 | `flash_view.c` | Reading the image and the manifest out of the device's flash, apart from the RAM-only code so a server links no flash port |
 | `compress.c` | Compressor registry; nothing built in. Sectors go out raw, LZ4, or LZ4 with the old sector as dictionary, whichever is smallest |
 | `protocol.h` | The wire protocol on its own: frame layout, message types and records, reason and result codes. No flash model or geometry |
-| `device.c` | The device core, fed one message at a time with no threads, transport or clock: the request, then the bootloader: apply, verify, trial boot, confirm |
+| `device.c` | The update session, fed one message at a time with no threads, transport or clock: authenticates the plan, stages the steps, then the application's confirm |
+| `bootloader.c` | The bootloader step: checks the staged plan against the signed descriptor, applies, verifies, trial boots, unrolls and reverts. Shares nothing with `device.c` but flash and `stats.h` |
+| `stats.h` | `device_stats_t`, the device-time counters both sides fill in |
 | `middleware/frame.c` | `A5 5A \| len \| type \| seq \| payload \| crc32` framing and the byte counters |
 | `middleware/client_session.c`, `middleware/server_session.c` | Each side's session carried over a framed link |
 | `middleware/flash_file.c` | The host's flash port: the part as an mmap'd file. Create, provision, install the factory image, open by path. `lib/` only sees an opaque port |
