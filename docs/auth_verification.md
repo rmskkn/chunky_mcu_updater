@@ -23,6 +23,18 @@ overwrite the running image without any key.
 > because the argument (why the gap was in-place-specific, not an A/B flaw)
 > is the useful part, not a prediction that still needed to come true.
 
+> **Update, 2026-10-20 (implemented, `docs/auth_implementation_plan.md`):**
+> Scheme A and B and the meta MAC landed with these choices, which differ from
+> the proposals below in the ways noted in "Open items". The table is dense
+> (`SECTOR_HASH_LEN` bytes per sector over `[0, image_len / SECTOR_SIZE)`, no
+> `dst` field, position is the index) and its SHA-256, `table_root`, sits in
+> the image descriptor under the release signature, so one build-time
+> signature covers both the table and the whole-image hash. Scheme B keeps the
+> raw 32 B `image_sha256`. `PLAN_BEGIN` carries the signed fields and
+> `PLAN_TABLE`/`PLAN_TABLE_END` the table; the bootloader re-checks the table
+> before applying. The text below is kept as the reasoning, not as the current
+> wire format; `DESIGN.md` sections 5, 6, 10.1 are.
+
 ## The current scheme
 
 `image_mac` (`lib/image.c:40-43`) is `HMAC(root_key, magic || version ||
@@ -244,31 +256,58 @@ or a real port gives the two roles separate code and separate key access.
 
 ## Open items
 
-- [ ] Decide whether scheme B keeps today's raw-image `image_sha256` as is
+- [x] Decide whether scheme B keeps today's raw-image `image_sha256` as is
   (simplest, already works, zero risk) or moves to the full-width fold
-  (unifies the code path, needs the three conditions above).
-- [ ] Protocol: add `PLAN_TABLE`/`PLAN_TABLE_END`, or fold the table into an
+  (unifies the code path, needs the three conditions above). **Kept raw**: the
+  fold's three conditions are not met by anything else here, and
+  `table_root` covers the per-sector side.
+- [x] Protocol: add `PLAN_TABLE`/`PLAN_TABLE_END`, or fold the table into an
   extended `PLAN_BEGIN` if it fits the frame size budget (Section 6).
-- [ ] Enforce ascending `dst` order on the device for both the manifest-diff
+  **Separate messages**: a 51-sector image at 8 B is ~408 B, two fragments of
+  the 256 B payload cap, like `MANIFEST` (the plan's 816 B figure counted both
+  slots). `PLAN_BEGIN` (112 B)
+  carries the signed descriptor fields.
+- [x] Enforce ascending `dst` order on the device for both the manifest-diff
   steps and the new table, matching chunky_mcu_updater's SPEC §5.4.
-- [ ] Thread `root_key` into `device_session_t`/`device_session_start()` —
+  **Not needed in this form**: the table is dense and indexed by position, so
+  there is no fold to keep canonical and steps may arrive in any order, each
+  checked by lookup. What is enforced instead: the table comes first, and the
+  descriptor sector is the last step (nothing but `PLAN_END` after it).
+- [x] Thread `root_key` into `device_session_t`/`device_session_start()` —
   today only `device_boot()` receives it (`lib/device.h`).
-- [ ] `meta_t`: add the "table verified" gate and, if scheme B changes,
+- [x] `meta_t`: add the "table verified" gate and, if scheme B changes,
   the full-width per-sector hash cache needed to recompute `H` without
-  re-reading flash sector by sector twice.
-- [ ] Test: a `PLAN_TABLE_END` with a bad `plan_mac` is rejected before any
-  `stage_sector()` call, and flash is unchanged.
-- [ ] Test: a step whose `(dst, hash)` is not in the verified table is
+  re-reading flash sector by sector twice. **Session state, not `meta_t`**: the
+  gate is the session's `S_TABLE` -> `S_PLAN` transition, and a plan reaches
+  `meta_t` only through `PLAN_END`. The bootloader does not trust the stored
+  table either: it re-folds it against `table_root`. No cache is needed since
+  scheme B did not change.
+- [x] Test: a `PLAN_TABLE_END` with a bad `plan_mac` is rejected before any
+  `stage_sector()` call, and flash is unchanged. (`tests/auth_test.c`:
+  `t_bad_signature`, `t_bad_table_root`, `t_table_mismatch`,
+  `t_step_before_table`; flash write counters stay at zero.)
+- [x] Test: a step whose `(dst, hash)` is not in the verified table is
   rejected, even if its data's own computed hash is internally consistent.
-- [ ] Replace `meta_t`'s CRC-32 (`lib/flash.c:132-156`) with a `dev_key`-HMAC
+  (`t_step_not_in_table`; steps no longer carry a hash at all.)
+- [x] Replace `meta_t`'s CRC-32 (`lib/flash.c:132-156`) with a `dev_key`-HMAC
   over the same range, closing the direct-flash-tampering case described
   above. Bump `meta_t`'s magic alongside the layout change.
-- [ ] Decide whether the bootloader/application key split for `meta_t`'s
+- [x] Decide whether the bootloader/application key split for `meta_t`'s
   security-relevant fields (the deeper fix, above) is worth doing in this
   design, or stays accepted risk alongside the rest of DESIGN.md §10's
-  compromised-application scoping.
-- [ ] Test: a `meta_t` bank with a correct CRC-32 (today) or correct MAC
+  compromised-application scoping. **Accepted risk**, out of scope.
+- [x] Test: a `meta_t` bank with a correct CRC-32 (today) or correct MAC
   (after the fix) but a `plan_state`/`target_hash` that was never produced
-  by `device_session_feed`/`device_boot` is rejected — write the test
-  before the fix to show it currently passes when it should not, then after
-  to show it is caught.
+  by `device_session_feed`/`device_boot` is rejected. (`t_meta_tampered`: a
+  bank edited without the key falls back to the previous generation.
+  `t_forged_plan_table`: a bank with a genuine MAC but a table that is not the
+  descriptor's `table_root` is unrolled before any COPY. The "show it passes
+  before the fix" step was not done: the CRC-32 scheme was replaced in the
+  same series, so only the after-fix behaviour is demonstrated.)
+
+Known gaps left: the PoC bootloader does not repeat the downgrade check
+(`version` below the running one) that the update session makes, so a
+compromised application that forges its own meta (it holds `dev_key`) could
+stage a signed older image; and the bootloader's `revert_plan()` trusts the
+meta's `pending_slot` (`unroll_plan()` no longer erases anything but the
+inactive slot).

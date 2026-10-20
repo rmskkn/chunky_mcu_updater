@@ -24,7 +24,8 @@ enum {
     MSG_MANIFEST_DIGEST, MSG_MANIFEST_NEEDED, MSG_MANIFEST_REJECT,
     MSG_PLAN_BEGIN, MSG_STEP_COPY, MSG_STEP_WRITE, MSG_STEP_WRITE_END,
     MSG_STEP_ACK, MSG_STEP_NAK, MSG_PLAN_END, MSG_PLAN_READY,
-    MSG_COMMIT, MSG_STATUS, MSG_ABORT, MSG_NO_UPDATE
+    MSG_COMMIT, MSG_STATUS, MSG_ABORT, MSG_NO_UPDATE,
+    MSG_PLAN_TABLE, MSG_PLAN_TABLE_END
 };
 
 /* MANIFEST_REJECT reasons */
@@ -117,6 +118,10 @@ typedef struct {
     uint8_t mac[SHA256_LEN];
 } msg_manifest_auth_t;
 
+/* The target descriptor's signed fields and its mac (DESIGN.md section 10.1),
+ * so the device verifies the release signature before the first step. The
+ * rest of the descriptor (revoked, reserved) is fixed by the format, so the
+ * device can rebuild it whole and compare it with what lands in flash. */
 typedef struct {
     uint32_t version;
     uint16_t step_count;
@@ -126,9 +131,20 @@ typedef struct {
                             * (DESIGN.md section 6: "target version, destination
                             * slot, step count..."). */
     uint8_t  pad;
+    uint32_t image_len;    /* the target's real size, DESIGN.md section 10.1 */
+    uint32_t flags;        /* bit0 allow_downgrade */
     uint8_t  image_sha256[SHA256_LEN];
+    uint8_t  table_root[SHA256_LEN];   /* SHA-256 of the PLAN_TABLE body */
     uint8_t  image_mac[SHA256_LEN];
 } msg_plan_begin_t;
+
+/* PLAN_TABLE fragments the target's per-sector hashes, image_len /
+ * SECTOR_SIZE of them, dense and in sector order (like MANIFEST: off:u16,
+ * len:u16, bytes; fragments arrive in order). PLAN_TABLE_END has no payload:
+ * the device checks SHA-256(table) against PLAN_BEGIN's signed table_root.
+ * Steps then name a sector and nothing else; the expected hash is the
+ * table's. */
+#define TABLE_HDR   4
 
 /* A copy from flash the device already has: the bytes dst needs already sit
  * at (src_slot, src_index), so nothing goes over the wire. src_slot may be
@@ -141,7 +157,6 @@ typedef struct {
     slot_id_t    src_slot;
     uint8_t      pad;
     sector_idx_t src_index;
-    uint8_t      hash[SECTOR_HASH_LEN];
 } msg_step_copy_t;
 
 /* STEP_WRITE fragments the encoded sector (offset/len index the encoded
@@ -150,13 +165,12 @@ typedef struct {
 /* Serialised by hand as dst:u16, offset:u16, len:u16, then the bytes. */
 #define WRITE_HDR   6
 
-/* hash is of the decoded sector. */
+/* The decoded sector must hash to the table's entry for dst. */
 typedef struct {
     sector_idx_t dst;
     uint8_t      compress;     /* COMPRESS_* */
     uint8_t      pad;
     uint16_t     enc_len;
-    uint8_t      hash[SECTOR_HASH_LEN];
 } msg_step_write_end_t;
 typedef struct { sector_idx_t dst; uint8_t code; } msg_step_ack_t;
 typedef struct { uint16_t pending; } msg_plan_ready_t;

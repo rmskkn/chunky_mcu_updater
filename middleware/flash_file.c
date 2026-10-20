@@ -102,7 +102,8 @@ static int install_image(flash_t *f, const uint8_t *bin, size_t binlen,
     meta_t m;
 
     if (!img) return err_set(&f->err, "out of memory for a %d B slot image", SLOT_SIZE);
-    if (image_build(bin, binlen, version, root_key, img) < 0) {
+    size_t image_len;
+    if (image_build(bin, binlen, version, root_key, img, &image_len) < 0) {
         free(img);
         return err_set(&f->err, "image is %zu B, over the %d B slot payload",
                        binlen, IMG_MAX_PAYLOAD);
@@ -110,7 +111,7 @@ static int install_image(flash_t *f, const uint8_t *bin, size_t binlen,
 
     /* -1 "active_slot" to flash_write_app_sector(): this is provisioning,
      * before any update exists to protect an active slot from. */
-    for (int i = 0; i < SECTORS_SLOT; i++)
+    for (int i = 0; i < (int)(image_len / SECTOR_SIZE); i++)
         if (flash_write_app_sector(f, SLOT_A, -1, (sector_idx_t)i, img + (size_t)i * SECTOR_SIZE) < 0) {
             free(img);
             return -1;

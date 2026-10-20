@@ -7,6 +7,7 @@
 
 typedef struct {
     uint32_t ver;
+    int      n_sectors;                  /* the target image's size in sectors */
     plan_t   plan;
     uint64_t tx_bytes, rx_bytes;
     int      n_raw, n_lz4, n_lz4_dict;   /* written sectors per compressor */

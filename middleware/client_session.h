@@ -9,7 +9,7 @@
  * to do (no update offered, or the manifest was rejected), or -1 with the
  * reason in *err on a protocol, link or flash fault. */
 int client_update_session(flash_t *f, plat_io_t *io, const uint8_t dev_key[32],
-                          log_fn log, void *log_ctx, device_stats_t *stats,
+                          const uint8_t root_key[32], log_fn log, void *log_ctx, device_stats_t *stats,
                           cb_err_t *err);
 
 #endif

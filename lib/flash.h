@@ -90,7 +90,7 @@ _Static_assert(!(CB_FLASH_PROGRAM_ONCE && !CB_FLASH_ZERO_EXEMPT),
                "one-program-per-erase limit; give it a word per state instead");
 
 /* plan_state, DESIGN.md section 7's state machine. PLAN_APPLYING and
- * PLAN_BAD are transient within one device_boot() call -- PLAN_APPLYING is
+ * PLAN_BAD are transient within one bootloader_boot() call -- PLAN_APPLYING is
  * never itself persisted (a crash mid-apply is found again as PLAN_STAGING
  * with the journal partly done), and PLAN_BAD is resolved to PLAN_NONE by
  * unroll or revert before the call returns, never stored as PLAN_BAD. */
@@ -100,7 +100,7 @@ enum { PLAN_NONE = 0, PLAN_STAGING, PLAN_APPLYING, PLAN_TRIAL, PLAN_COMMITTED, P
 enum { OP_NONE = 0, OP_COPY, OP_WRITE };
 
 #define ID_MAGIC   0x44494243u  /* "CBID" */
-#define META_MAGIC 0x4154454Du  /* "META" */
+#define META_MAGIC 0x3254454Du  /* "MET2": mac in place of the old crc */
 
 typedef struct {
     uint32_t magic;
@@ -134,12 +134,13 @@ typedef struct {
 typedef struct {
     uint32_t magic;
     uint32_t generation;
-    uint32_t crc;            /* over everything that follows */
+    uint8_t  mac[SHA256_LEN]; /* HMAC under dev_key over the whole struct, mac zeroed */
     uint8_t  active_slot;    /* which slot is running; survives every cycle */
     uint8_t  pending_slot;   /* SLOT_NONE, or the slot a plan targets/trials */
     uint8_t  plan_state;
     uint8_t  attempts_left;  /* trial tokens; meaningful only in PLAN_TRIAL */
     uint32_t target_version;
+    uint32_t image_len;      /* the pending image's size; the plan covers image_len / SECTOR_SIZE sectors */
     uint8_t  target_sha256[SHA256_LEN];
     uint8_t  target_mac[SHA256_LEN];
     uint16_t step_count;
@@ -212,14 +213,19 @@ void flash_sector_hash(flash_t *f, int slot, int index, uint8_t out[SECTOR_HASH_
 int  flash_write_app_sector(flash_t *f, int slot, int active_slot,
                             sector_idx_t index, const uint8_t data[SECTOR_SIZE]);
 
-/* Meta bank ping-pong. Returns 0 if a valid bank was found. */
+/* Meta bank ping-pong. A bank is valid if its mac verifies under dev_key
+ * (the identity page's): CRC-32 caught a torn write but not a deliberate one,
+ * which could set plan_state and the plan's hashes and recompute the CRC. The
+ * application holds dev_key too, so this does not stop a compromised
+ * application (DESIGN.md section 10), only a write that bypasses the code.
+ * meta_load returns 0 if a valid bank was found. */
 int  meta_load(flash_t *f, meta_t *m);
 int  meta_store(flash_t *f, meta_t *m);        /* bumps generation, erases the older bank */
 void meta_init(meta_t *m);                     /* fresh device: active_slot = A, no plan */
 /* New plan cycle on an existing device: clears the per-plan scratch fields
- * (target_*, step_count, op/src_slot/src_index/target_hash) and plan_state/
+ * (target_*, image_len, step_count, op/src_slot/src_index/target_hash) and plan_state/
  * pending_slot/attempts_left, but leaves active_slot, magic, generation,
- * crc and last_result alone -- those must survive a plan that never lands,
+ * mac and last_result alone -- those must survive a plan that never lands,
  * including this one. Caller sets plan_state, pending_slot and the target_*
  * fields right after. */
 void meta_reset_plan(meta_t *m);

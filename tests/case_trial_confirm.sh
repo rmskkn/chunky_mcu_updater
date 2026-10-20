@@ -6,7 +6,7 @@
 # cb-client's --confirm-only -- exactly once, which promotes active_slot
 # and clears the attempt log. docs/ab_migration.md's resolution for
 # simulating repeated trial attempts without a real watchdog: one
-# device_boot() call per simulated reset, driven here through cb-client
+# bootloader_boot() call per simulated reset, driven here through cb-client
 # --boot-only / --confirm-only on the real binary.
 source "$(dirname "$0")/common.sh"
 need_build

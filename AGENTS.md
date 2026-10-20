@@ -25,12 +25,14 @@ for the PoC's own map of the demo flow):
   `flash_port.h` (the opaque flash port lib/ needs; a port implements it),
   `flash_view.c` (everything that reads the image or manifest out of flash),
   `manifest.c/h` (body, digest, MAC, checks, `sector_hash`), `plan.c/h`,
-  `device.c/h` (device core: session fed one message at a time, plus the
-  bootloader apply; no threads, transport or clock — `device_stats_t.clock_ms`
-  is the caller's), `protocol.h` (the pure wire protocol), `image.c/h`
-  (descriptor, hash and build over RAM), `compress.c/h` (registry only, no
-  compressor built in), `sha256.c/h`, `util.c/h` (CRC-32, `cb_err_t`, log
-  sink).
+  `device.c/h` (the update session, fed one message at a time, plus the
+  application's confirm; no threads, transport or clock), `bootloader.c/h`
+  (the bootloader's apply/verify/trial boot/unroll/revert; includes no
+  session or protocol code), `stats.h` (`device_stats_t`, shared by both;
+  `clock_ms` is the caller's), `protocol.h` (the pure wire protocol),
+  `image.c/h` (descriptor, hashes, per-sector table and build over RAM),
+  `compress.c/h` (registry only, no compressor built in), `sha256.c/h`,
+  `util.c/h` (CRC-32, `cb_err_t`, log sink).
 - `middleware/` — everything between the core and a host program:
   `frame.c/h` and `platform_io.h` (framing over the transport seam),
   `client_session.c/h` and `server_session.c/h` (each side's session over a
@@ -54,7 +56,9 @@ negative/`DEV_*` code) with the reason in a `cb_err_t` (`lib/util.h`),
 `flash_t.err`, or a `why` string; only a CLI's `main()` turns a failure into
 an exit status. There is no `die()`; don't add one.
 - `tests/` — `case_*.sh` integration cases plus `compress_test.c`
-  (ASan/UBSan decoder test); `run_all.sh` / `run_matrix.sh` drive them.
+  (ASan/UBSan decoder test) and `auth_test.c` (drives the session and the
+  bootloader with forged messages; run by `case_auth.sh`); `run_all.sh` /
+  `run_matrix.sh` drive them.
 - `scripts/` — `lab.sh` (manual two-process demo), `run_demo.sh`
   (scripted walkthrough).
 

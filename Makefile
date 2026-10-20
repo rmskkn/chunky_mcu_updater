@@ -36,7 +36,8 @@ MEM_LD  := $(GEN_DIR)/memory.ld
 # a platform, middleware or host header there is a build error.
 LIB_SRC := $(LIB)/util.c $(LIB)/sha256.c $(LIB)/flash.c \
            $(LIB)/image.c $(LIB)/manifest.c $(LIB)/plan.c \
-           $(LIB)/flash_view.c $(LIB)/device.c $(LIB)/compress.c
+           $(LIB)/flash_view.c $(LIB)/bootloader.c $(LIB)/device.c \
+           $(LIB)/compress.c
 LIB_OBJ := $(LIB_SRC:$(LIB)/%.c=$(OBJ)/%.o)
 LIBCB   := $(BUILD)/libcb.a
 
@@ -68,7 +69,7 @@ ALL_OBJ  := $(LIB_OBJ) $(PLAT_OBJ) $(MW_OBJ) $(SRV_OBJ) $(CLI_OBJ) $(FLS_OBJ)
 # changes only when they do, forcing a regeneration and a rebuild
 STAMP := $(BUILD)/geometry.stamp
 
-all: $(BINS) $(MEM_LD)
+all: $(BINS) $(BUILD)/auth_test $(MEM_LD)
 
 $(BUILD) $(OBJ) $(PLATOBJ) $(MWOBJ) $(BINOBJ):
 	mkdir -p $@
@@ -104,6 +105,11 @@ $(BUILD)/cb-client: $(CLI_OBJ) $(MW_DEV) $(MW_COMMON) $(PLAT_OBJ) $(LIBCB) | $(B
 # inspection only: no link, no compressor
 $(BUILD)/cb-flash: $(FLS_OBJ) $(MWOBJ)/flash_file.o $(MWOBJ)/host.o $(LIBCB) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^
+
+# drives the session and the bootloader message by message (tests/case_auth.sh)
+$(BUILD)/auth_test: tests/auth_test.c $(MWOBJ)/flash_file.o $(MWOBJ)/host.o $(LIBCB) $(GEOM_H) | $(BUILD)
+	$(CC) $(CFLAGS) -iquote $(LIB) -iquote $(MW) -iquote $(SRC) -iquote $(GEN_DIR) -o $@ \
+		tests/auth_test.c $(MWOBJ)/flash_file.o $(MWOBJ)/host.o $(LIBCB)
 
 # the decoder eats unchecked bytes: test it under ASan/UBSan
 $(BUILD)/compress_test: tests/compress_test.c $(LIB)/compress.c $(MW)/lz4.c $(GEOM_H) | $(BUILD)
