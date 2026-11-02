@@ -1,18 +1,30 @@
 /* format2_test.c: format2.c (lib/) against the vendored golden vectors
- * (rust/chunky_format/c/golden.h) and a handful of hand-built negative
- * cases. Run via tests/case_format2.sh, auto-discovered by run_all.sh's
- * case_*.sh glob; nothing in run_all.sh or the Makefile was changed to add
- * it.
+ * (rust/chunky_format/c/golden.h) and a set of hand-built cases, including
+ * chunk-hash verification (SPEC.md 6.2: a WRITE's data and a COPY's source
+ * must have the hash the step names). Run via tests/case_format2.sh,
+ * auto-discovered by run_all.sh's case_*.sh glob; nothing in run_all.sh or
+ * the Makefile was changed to add it.
  *
- * Positive path: both golden plans (signed, unsigned) and both golden
- * manifests decode and every field/step/entry matches golden.h's tables --
- * the same vectors upstream's own rust/chunky_format/c/test.c checks, so
- * this is also a cross-check that lib/format2.c reads the same bytes the
- * same way as the generated reader it is built on.
+ * Why the golden-vector plan walk is split in two:
  *
- * Negative path: a representative case per refusal stage (SPEC.md 4.3,
- * 6.1), confirming format2.c actually stops where it says it does instead
- * of reading further into a bad buffer. */
+ *   - check_plan_walk_prefix() walks only the ERASE + first WRITE of each
+ *     golden plan against real data: format2_chunk_hash() is checked against
+ *     a genuine WRITE hash from the vectors, independently confirmed while
+ *     writing this test (node:crypto: sha256(golden_unsigned_written[0:256])
+ *     [:8] == golden_unsigned_steps[1].hash, and the same for the signed
+ *     vector), not just against format2_chunk_hash() itself.
+ *   - check_plan_walk_noactive_refuses() walks the FULL golden plan with no
+ *     read_active callback and confirms it gets exactly as far as the ERASE
+ *     and WRITE before refusing at the first COPY with FORMAT2_ENOACTIVE --
+ *     the vendored vectors have no ACTIVE bytes to check a COPY source
+ *     against (only golden_*_written, the WRITE side), so this is also the
+ *     only honest way to exercise a COPY step against the real vectors:
+ *     confirming the gap closes by refusing, not by guessing.
+ *
+ * check_hash_checks() then covers a COPY's source hash end to end with a
+ * small synthetic plan and a mock ACTIVE, using hashes computed independently
+ * (node:crypto, not format2_chunk_hash) so a bug in format2_chunk_hash
+ * itself would not go unnoticed. */
 #include <stdio.h>
 #include <string.h>
 
@@ -40,6 +52,11 @@ static int failures;
         }                                                                                    \
     } while (0)
 
+/* The golden fixture's chunk size: GOLDEN_*_CHUNKS (16) chunks fill
+ * GOLDEN_*_IMAGE_LEN + 128 (the descriptor) = 4096 bytes, so chunk = 256.
+ * Not a golden.h constant; derived once here and asserted below. */
+#define GOLDEN_CHUNK_LEN 256u
+
 /* ---- positive path: plan header + descriptor ---- */
 
 static void check_plan_begin(const uint8_t *plan, size_t plan_len, uint32_t version,
@@ -56,7 +73,7 @@ static void check_plan_begin(const uint8_t *plan, size_t plan_len, uint32_t vers
     }
 }
 
-/* ---- positive path: steps, against golden_step_t[] and golden_*_written ---- */
+/* ---- steps: structural fields against golden_step_t[] and golden_*_written ---- */
 
 typedef struct {
     const golden_step_t *want;
@@ -99,24 +116,62 @@ static int on_step(void *ctxp, const format2_step_t *s, uint32_t index) {
     return 0;
 }
 
-static void check_plan_walk(const uint8_t *plan, size_t plan_len, uint32_t step_count,
-                            const golden_step_t *steps, uint32_t count, const uint8_t *written) {
+/* Byte length of this fixture's first two steps' worth of plan body: one
+ * ERASE (1 + 2 bytes) then one WRITE of GOLDEN_CHUNK_LEN bytes (1 + 12 +
+ * GOLDEN_CHUNK_LEN). format2_plan_walk requires len to match step_count
+ * exactly (SPEC.md 5.3: nothing after the declared body is read as steps),
+ * so a genuine prefix walk needs the buffer truncated to match -- unlike
+ * passing the whole plan with a smaller step_count, which would leave
+ * trailing bytes and (correctly) fail with FORMAT2_ELENGTH. */
+#define GOLDEN_PREFIX_LEN (CHUNKY_PLAN_HEADER_LEN + (1u + 2u) + (1u + 12u + GOLDEN_CHUNK_LEN))
+
+/* Walks just the first two steps (ERASE then its first WRITE, true of both
+ * golden plans) with no ACTIVE needed: real data, real hash check. */
+static void check_plan_walk_prefix(const uint8_t *plan, const golden_step_t *steps, const uint8_t *written) {
     step_walk_ctx_t ctx;
     int rc;
 
     ctx.want = steps;
-    ctx.count = count;
+    ctx.count = 2u;
     ctx.written = written;
     ctx.seen = 0;
-    /* chunks_per_block does not affect this vector's order check: its one
-     * ERASE is block 0, position 0 regardless of the ratio. A real caller
-     * passes its device geometry's erase / chunk. */
-    rc = format2_plan_walk(plan, plan_len, step_count, /* chunks_per_block */ 4u, on_step, &ctx);
+    /* blocks=1 is a placeholder, not the device's real erase-block count:
+     * the one ERASE step here is block 0, which is in range for any
+     * blocks >= 1, and nothing after it in this prefix needs the real
+     * value. chunks/chunk_len are the real fixture geometry (16 chunks of
+     * 256 bytes, GOLDEN_UNSIGNED_CHUNKS). */
+    rc = format2_plan_walk(plan, GOLDEN_PREFIX_LEN, 2u, /* blocks */ 1u,
+                           GOLDEN_UNSIGNED_CHUNKS, GOLDEN_CHUNK_LEN,
+                           /* read_active */ NULL, NULL, /* scratch */ NULL,
+                           on_step, &ctx);
     CHECK(rc == 0);
-    CHECK(ctx.seen == count);
+    CHECK(ctx.seen == 2u);
 }
 
-/* ---- positive path: manifest header + entries ---- */
+/* Walks the FULL golden plan with no read_active: must get exactly through
+ * first_copy_index steps (the ERASE and WRITE ahead of the first COPY),
+ * then refuse with FORMAT2_ENOACTIVE rather than silently accepting an
+ * unchecked COPY. */
+static void check_plan_walk_noactive_refuses(const uint8_t *plan, size_t plan_len,
+                                             uint32_t step_count, const golden_step_t *steps,
+                                             const uint8_t *written, uint32_t first_copy_index) {
+    step_walk_ctx_t ctx;
+    int rc;
+
+    ctx.want = steps;
+    ctx.count = step_count;
+    ctx.written = written;
+    ctx.seen = 0;
+    rc = format2_plan_walk(plan, plan_len, step_count, /* blocks */ 1u,
+                           GOLDEN_UNSIGNED_CHUNKS, GOLDEN_CHUNK_LEN,
+                           /* read_active */ NULL, NULL, /* scratch */ NULL,
+                           on_step, &ctx);
+    CHECK(rc == -(int)FORMAT2_ENOACTIVE);
+    CHECK(ctx.seen == first_copy_index);
+}
+
+/* ---- positive path: manifest header + entries (no hash checking: the
+ * manifest is unsigned and untrusted by design, SPEC.md 7.2) ---- */
 
 typedef struct {
     const golden_entry_t *want;
@@ -160,7 +215,7 @@ static void check_manifest(const uint8_t *m, size_t len, const golden_entry_t *e
     CHECK(ctx.seen == count);
 }
 
-/* ---- negative path: one representative case per refusal stage ---- */
+/* ---- negative path: one representative case per format2_plan_begin refusal stage ---- */
 
 static void check_negative(void) {
     uint8_t buf[sizeof golden_unsigned_plan];
@@ -231,10 +286,11 @@ static void check_negative(void) {
 
 /* ---- negative path: step order (SPEC.md 5.4) ----
  *
- * A minimal synthetic body: two WRITEs, chunk 3 then chunk 5 (position
- * strictly increases, SPEC.md 5.4), and the same two steps reversed
- * (position goes backwards). format2_plan_walk only reads the body, so no
- * valid header or seal is needed to exercise it. */
+ * Two WRITEs, chunk 3 then chunk 5 (position strictly increases) and the
+ * same two steps reversed (position goes backwards). Real, independently
+ * computed hashes (node:crypto), not zeros: with chunk-hash checking now
+ * in format2_plan_walk, a wrong hash would stop the walk before the order
+ * check ever ran, which is not what this case means to exercise. */
 static int count_only(void *ctxp, const format2_step_t *s, uint32_t index) {
     (void)s;
     (void)index;
@@ -246,12 +302,14 @@ static int count_only(void *ctxp, const format2_step_t *s, uint32_t index) {
 
 static void check_order_real(void) {
     static const uint8_t ok_body[] = {
-        3, 3,0, 4,0, 0,0,0,0,0,0,0,0, 0xAA,0xBB,0xCC,0xDD,
-        3, 5,0, 4,0, 0,0,0,0,0,0,0,0, 0x11,0x22,0x33,0x44,
+        /* WRITE dst=3, count=4, hash(0xAA,0xBB,0xCC,0xDD), data */
+        3, 3,0, 4,0, 0x8d,0x70,0xd6,0x91,0xc8,0x22,0xd5,0x56, 0xAA,0xBB,0xCC,0xDD,
+        /* WRITE dst=5, count=4, hash(0x11,0x22,0x33,0x44), data */
+        3, 5,0, 4,0, 0x1a,0x83,0x5e,0xd8,0x73,0x4f,0x86,0x35, 0x11,0x22,0x33,0x44,
     };
     static const uint8_t bad_body[] = {
-        3, 5,0, 4,0, 0,0,0,0,0,0,0,0, 0x11,0x22,0x33,0x44,
-        3, 3,0, 4,0, 0,0,0,0,0,0,0,0, 0xAA,0xBB,0xCC,0xDD,
+        3, 5,0, 4,0, 0x1a,0x83,0x5e,0xd8,0x73,0x4f,0x86,0x35, 0x11,0x22,0x33,0x44,
+        3, 3,0, 4,0, 0x8d,0x70,0xd6,0x91,0xc8,0x22,0xd5,0x56, 0xAA,0xBB,0xCC,0xDD,
     };
     uint8_t buf[CHUNKY_PLAN_HEADER_LEN + sizeof ok_body];
     uint32_t seen = 0;
@@ -259,27 +317,178 @@ static void check_order_real(void) {
 
     memset(buf, 0, CHUNKY_PLAN_HEADER_LEN);
     memcpy(buf + CHUNKY_PLAN_HEADER_LEN, ok_body, sizeof ok_body);
-    rc = format2_plan_walk(buf, sizeof buf, 2u, 4u, count_only, &seen);
+    rc = format2_plan_walk(buf, sizeof buf, 2u, /* blocks */ 1u, /* chunks */ 8u, /* chunk_len */ 4u,
+                           NULL, NULL, NULL, count_only, &seen);
     CHECK(rc == 0);
     CHECK(seen == 2u);
 
     memset(buf, 0, CHUNKY_PLAN_HEADER_LEN);
     memcpy(buf + CHUNKY_PLAN_HEADER_LEN, bad_body, sizeof bad_body);
     seen = 0;
-    rc = format2_plan_walk(buf, sizeof buf, 2u, 4u, count_only, &seen);
+    rc = format2_plan_walk(buf, sizeof buf, 2u, 1u, 8u, 4u, NULL, NULL, NULL, count_only, &seen);
     CHECK(rc == -(int)FORMAT2_EORDER);
 }
 
+/* ---- chunk hash verification (SPEC.md 6.2: DataMismatch, SourceMismatch,
+ * SourceUnreadable) and the "no ACTIVE, no silent pass" rule ----
+ *
+ * One synthetic plan body: COPY(dst=2, src=3) then WRITE(dst=5). Both
+ * hashes below are independently computed (node:crypto), not via
+ * format2_chunk_hash, from:
+ *   "active" chunk 3 = DE AD BE EF   -> hash 5f78c33274e43fa9
+ *   WRITE's data     = 99 88 77 66   -> hash dc5db77b8b827c99 */
+static const uint8_t hash_body[] = {
+    2, 2,0, 3,0, 0x5f,0x78,0xc3,0x32,0x74,0xe4,0x3f,0xa9,
+    3, 5,0, 4,0, 0xdc,0x5d,0xb7,0x7b,0x8b,0x82,0x7c,0x99, 0x99,0x88,0x77,0x66,
+};
+#define HASH_BODY_CHUNK_LEN 4u
+
+typedef struct {
+    const uint8_t *data; /* HASH_BODY_CHUNK_LEN bytes, or NULL to fail every read */
+} mock_active_t;
+
+static int mock_read_active(void *ctxp, uint16_t chunk_index, uint8_t *buf, uint16_t chunk_len) {
+    const mock_active_t *m = ctxp;
+    (void)chunk_index; /* this mock only ever serves one chunk, whichever is asked for */
+    if (m->data == NULL) {
+        return -1; /* "unreadable", e.g. an ECC fault */
+    }
+    memcpy(buf, m->data, chunk_len);
+    return 0;
+}
+
+static void check_hash_checks(void) {
+    static const uint8_t active_chunk3[HASH_BODY_CHUNK_LEN] = {0xDE, 0xAD, 0xBE, 0xEF};
+    static const uint8_t wrong_chunk3[HASH_BODY_CHUNK_LEN] = {0xDE, 0xAD, 0xBE, 0xFF};
+    uint8_t buf[CHUNKY_PLAN_HEADER_LEN + sizeof hash_body];
+    uint8_t scratch[HASH_BODY_CHUNK_LEN];
+    mock_active_t active;
+    uint32_t seen;
+    int rc;
+
+    memset(buf, 0, CHUNKY_PLAN_HEADER_LEN);
+    memcpy(buf + CHUNKY_PLAN_HEADER_LEN, hash_body, sizeof hash_body);
+
+    /* 1. correct source and correct data: both steps delivered */
+    active.data = active_chunk3;
+    seen = 0;
+    rc = format2_plan_walk(buf, sizeof buf, 2u, 1u, 8u, HASH_BODY_CHUNK_LEN,
+                           mock_read_active, &active, scratch, count_only, &seen);
+    CHECK(rc == 0);
+    CHECK(seen == 2u);
+
+    /* 2. wrong source bytes: SourceMismatch, before the WRITE is ever reached */
+    active.data = wrong_chunk3;
+    seen = 0;
+    rc = format2_plan_walk(buf, sizeof buf, 2u, 1u, 8u, HASH_BODY_CHUNK_LEN,
+                           mock_read_active, &active, scratch, count_only, &seen);
+    CHECK(rc == -(int)FORMAT2_ESOURCE);
+    CHECK(seen == 0u);
+
+    /* 3. no read_active at all: refuses outright, never silently passes */
+    seen = 0;
+    rc = format2_plan_walk(buf, sizeof buf, 2u, 1u, 8u, HASH_BODY_CHUNK_LEN,
+                           NULL, NULL, scratch, count_only, &seen);
+    CHECK(rc == -(int)FORMAT2_ENOACTIVE);
+    CHECK(seen == 0u);
+
+    /* 4. the source is unreadable (ECC fault stand-in) */
+    active.data = NULL;
+    seen = 0;
+    rc = format2_plan_walk(buf, sizeof buf, 2u, 1u, 8u, HASH_BODY_CHUNK_LEN,
+                           mock_read_active, &active, scratch, count_only, &seen);
+    CHECK(rc == -(int)FORMAT2_ESOURCE_UNREADABLE);
+    CHECK(seen == 0u);
+
+    /* 5. correct source, but the WRITE's own hash is wrong: DataMismatch,
+     * after the COPY (which is still correct) has already been delivered */
+    {
+        uint8_t bad[sizeof buf];
+        memcpy(bad, buf, sizeof buf);
+        bad[CHUNKY_PLAN_HEADER_LEN + 13u + 5u] ^= 0x01u; /* one byte of the WRITE's hash */
+        active.data = active_chunk3;
+        seen = 0;
+        rc = format2_plan_walk(bad, sizeof bad, 2u, 1u, 8u, HASH_BODY_CHUNK_LEN,
+                               mock_read_active, &active, scratch, count_only, &seen);
+        CHECK(rc == -(int)FORMAT2_EDATA);
+        CHECK(seen == 1u);
+    }
+}
+
+/* ---- WRITE byte count must equal the geometry's chunk size (SPEC.md 6.2.4) ---- */
+
+static void check_datalen(void) {
+    /* count=3 in the head, but chunk_len (the geometry's real chunk size)
+     * is 4: chunky_step_tail still frames it (it trusts the head's own
+     * count field), format2_plan_walk is the one that refuses it. */
+    static const uint8_t body[] = {
+        3, 0,0, 3,0, 0,0,0,0,0,0,0,0, 0x01,0x02,0x03,
+    };
+    uint8_t buf[CHUNKY_PLAN_HEADER_LEN + sizeof body];
+    int rc;
+
+    memset(buf, 0, CHUNKY_PLAN_HEADER_LEN);
+    memcpy(buf + CHUNKY_PLAN_HEADER_LEN, body, sizeof body);
+    rc = format2_plan_walk(buf, sizeof buf, 1u, 1u, 8u, /* chunk_len */ 4u,
+                           NULL, NULL, NULL, count_only, NULL);
+    CHECK(rc == -(int)FORMAT2_EDATALEN);
+}
+
+/* ---- index range checks (SPEC.md 6.2.5: block < blocks, dst/src < chunks) ---- */
+
+static void check_range(void) {
+    int rc;
+
+    /* ERASE block 5, but blocks = 1 */
+    {
+        static const uint8_t body[] = {1, 5,0};
+        uint8_t buf[CHUNKY_PLAN_HEADER_LEN + sizeof body];
+        memset(buf, 0, CHUNKY_PLAN_HEADER_LEN);
+        memcpy(buf + CHUNKY_PLAN_HEADER_LEN, body, sizeof body);
+        rc = format2_plan_walk(buf, sizeof buf, 1u, /* blocks */ 1u, 8u, 4u,
+                               NULL, NULL, NULL, count_only, NULL);
+        CHECK(rc == -(int)FORMAT2_ERANGE);
+    }
+    /* COPY src 10, but chunks = 4 */
+    {
+        static const uint8_t body[] = {2, 0,0, 10,0, 0,0,0,0,0,0,0,0};
+        uint8_t buf[CHUNKY_PLAN_HEADER_LEN + sizeof body];
+        memset(buf, 0, CHUNKY_PLAN_HEADER_LEN);
+        memcpy(buf + CHUNKY_PLAN_HEADER_LEN, body, sizeof body);
+        rc = format2_plan_walk(buf, sizeof buf, 1u, 1u, /* chunks */ 4u, 4u,
+                               NULL, NULL, NULL, count_only, NULL);
+        CHECK(rc == -(int)FORMAT2_ERANGE);
+    }
+    /* WRITE dst 10, but chunks = 4 (count is correct, 4, so EDATALEN does not fire first) */
+    {
+        static const uint8_t body[] = {3, 10,0, 4,0, 0,0,0,0,0,0,0,0, 0,0,0,0};
+        uint8_t buf[CHUNKY_PLAN_HEADER_LEN + sizeof body];
+        memset(buf, 0, CHUNKY_PLAN_HEADER_LEN);
+        memcpy(buf + CHUNKY_PLAN_HEADER_LEN, body, sizeof body);
+        rc = format2_plan_walk(buf, sizeof buf, 1u, 1u, /* chunks */ 4u, 4u,
+                               NULL, NULL, NULL, count_only, NULL);
+        CHECK(rc == -(int)FORMAT2_ERANGE);
+    }
+}
+
 int main(void) {
+    /* sanity: the derived GOLDEN_CHUNK_LEN really is this fixture's chunk size */
+    CHECK((uint32_t)GOLDEN_CHUNK_LEN * GOLDEN_UNSIGNED_CHUNKS == GOLDEN_UNSIGNED_IMAGE_LEN + 128u);
+
     check_plan_begin(golden_unsigned_plan, sizeof golden_unsigned_plan,
                      GOLDEN_UNSIGNED_VERSION, GOLDEN_UNSIGNED_SECURITY_COUNTER, FORMAT2_OK);
 
-    check_plan_walk(golden_signed_plan, sizeof golden_signed_plan, GOLDEN_SIGNED_STEP_COUNT,
-                    golden_signed_steps, sizeof golden_signed_steps / sizeof golden_signed_steps[0],
-                    golden_signed_written);
-    check_plan_walk(golden_unsigned_plan, sizeof golden_unsigned_plan, GOLDEN_UNSIGNED_STEP_COUNT,
-                    golden_unsigned_steps, sizeof golden_unsigned_steps / sizeof golden_unsigned_steps[0],
-                    golden_unsigned_written);
+    /* real data, real hash check, no ACTIVE needed (ERASE + first WRITE only) */
+    check_plan_walk_prefix(golden_signed_plan, golden_signed_steps, golden_signed_written);
+    check_plan_walk_prefix(golden_unsigned_plan, golden_unsigned_steps, golden_unsigned_written);
+
+    /* real data, full plan, no read_active: refuses at the first COPY (index 2) */
+    check_plan_walk_noactive_refuses(golden_signed_plan, sizeof golden_signed_plan,
+                                     GOLDEN_SIGNED_STEP_COUNT, golden_signed_steps,
+                                     golden_signed_written, 2u);
+    check_plan_walk_noactive_refuses(golden_unsigned_plan, sizeof golden_unsigned_plan,
+                                     GOLDEN_UNSIGNED_STEP_COUNT, golden_unsigned_steps,
+                                     golden_unsigned_written, 2u);
 
     check_manifest(golden_signed_manifest, sizeof golden_signed_manifest,
                    golden_signed_entries, sizeof golden_signed_entries / sizeof golden_signed_entries[0]);
@@ -288,6 +497,9 @@ int main(void) {
 
     check_negative();
     check_order_real();
+    check_hash_checks();
+    check_datalen();
+    check_range();
 
     if (failures != 0) {
         printf("format2_test: %d failures\n", failures);

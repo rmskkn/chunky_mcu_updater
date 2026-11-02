@@ -19,8 +19,24 @@ const char *format2_err_str(format2_err_t e) {
     case FORMAT2_EROLLBACK:           return "security counter below floor";
     case FORMAT2_ESTEP:               return "a step or entry did not parse";
     case FORMAT2_EORDER:              return "step order did not strictly increase";
+    case FORMAT2_ERANGE:              return "a block/chunk index is out of range";
+    case FORMAT2_EDATALEN:            return "a WRITE's byte count is not one chunk";
+    case FORMAT2_EDATA:               return "a WRITE's data does not have the hash it names";
+    case FORMAT2_ESOURCE:             return "a COPY's source does not have the hash it names";
+    case FORMAT2_ESOURCE_UNREADABLE:  return "a COPY's source is unreadable (ECC fault)";
+    case FORMAT2_ENOACTIVE:           return "a COPY step needs ACTIVE and no read_active callback was given";
     default:                          return "unknown format2 error";
     }
+}
+
+/* SPEC.md section 2: the first 8 bytes of SHA-256, no domain separation.
+ * Matches chunky::hash::ChunkHash::of (github.com/romixlab/chunky_mcu_updater,
+ * main, chunky/src/hash.rs) -- confirmed against the vendored golden vectors:
+ * every WRITE's carried hash equals this computed over its data. */
+void format2_chunk_hash(const uint8_t *data, size_t len, uint8_t out[FORMAT2_CHUNK_HASH_LEN]) {
+    uint8_t full[32];
+    sha256(data, len, full);
+    memcpy(out, full, FORMAT2_CHUNK_HASH_LEN);
 }
 
 static int all_zero(const uint8_t *p, size_t n) {
@@ -134,18 +150,28 @@ format2_err_t format2_plan_begin(const uint8_t *buf, size_t len,
 }
 
 int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
-                      uint32_t chunks_per_block,
+                      uint32_t blocks, uint32_t chunks, uint16_t chunk_len,
+                      format2_read_active_fn read_active, void *active_ctx,
+                      uint8_t *scratch,
                       format2_step_fn fn, void *ctx) {
     const uint8_t *at = buf + CHUNKY_PLAN_HEADER_LEN;
     const uint8_t *end = buf + len;
     /* SPEC.md 5.4: every step's position must be strictly greater than the
      * one before it; -1 sorts before any real position (>= 0). */
     long long last_pos = -1;
+    /* SPEC.md 5.4: chunks = blocks * chunks_per_block exactly (chunks =
+     * slot_len/chunk, blocks = slot_len/erase, chunks_per_block = erase/
+     * chunk), so this is chunks_per_block without a separate parameter. */
+    uint32_t chunks_per_block;
     uint32_t n;
 
     if (len < CHUNKY_PLAN_HEADER_LEN) {
         return -(int)FORMAT2_ESHORT;
     }
+    if (blocks == 0u) {
+        return -(int)FORMAT2_ERANGE; /* no valid geometry has zero erase blocks */
+    }
+    chunks_per_block = chunks / blocks;
 
     for (n = 0; n < step_count; n++) {
         const uint8_t *t;
@@ -168,12 +194,20 @@ int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
         switch (s.op) {
         case CHUNKY_STEP_ERASE:
             s.a = chunky_step_erase_block(tl.head);
+            /* SPEC.md 6.2.5: block < blocks */
+            if (s.a >= blocks) {
+                return -(int)FORMAT2_ERANGE;
+            }
             pos = 2LL * (long long)s.a * (long long)chunks_per_block;
             break;
         case CHUNKY_STEP_COPY:
             s.a = chunky_step_copy_dst(tl.head);
             s.b = chunky_step_copy_src(tl.head);
             s.hash = chunky_step_copy_hash(tl.head);
+            /* SPEC.md 6.2.5: dst < chunks, src < chunks */
+            if (s.a >= chunks || s.b >= chunks) {
+                return -(int)FORMAT2_ERANGE;
+            }
             pos = 2LL * (long long)s.a + 1;
             break;
         case CHUNKY_STEP_WRITE:
@@ -181,15 +215,48 @@ int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
             s.b = chunky_step_write_data_count(tl.head);
             s.hash = chunky_step_write_hash(tl.head);
             s.data = tl.write_data;
+            /* SPEC.md 6.2.4: a WRITE's count MUST equal chunk */
+            if (s.b != chunk_len) {
+                return -(int)FORMAT2_EDATALEN;
+            }
+            /* SPEC.md 6.2.5: dst < chunks */
+            if (s.a >= chunks) {
+                return -(int)FORMAT2_ERANGE;
+            }
             pos = 2LL * (long long)s.a + 1;
             break;
         default:
             return -(int)FORMAT2_ESTEP;
         }
+        /* SPEC.md 5.4/6.2.6 */
         if (pos <= last_pos) {
             return -(int)FORMAT2_EORDER;
         }
         last_pos = pos;
+
+        /* SPEC.md 6.2.7, by op: a WRITE's data and a COPY's source MUST
+         * have the hash the step names. Destination-blank and read-back
+         * checks are the flash port's job (see lib/format2.h's scope
+         * note), not this decoder's. */
+        if (s.op == CHUNKY_STEP_WRITE) {
+            uint8_t got[FORMAT2_CHUNK_HASH_LEN];
+            format2_chunk_hash(s.data, s.b, got);
+            if (memcmp(got, s.hash, FORMAT2_CHUNK_HASH_LEN) != 0) {
+                return -(int)FORMAT2_EDATA;
+            }
+        } else if (s.op == CHUNKY_STEP_COPY) {
+            uint8_t got[FORMAT2_CHUNK_HASH_LEN];
+            if (read_active == NULL) {
+                return -(int)FORMAT2_ENOACTIVE;
+            }
+            if (read_active(active_ctx, s.b, scratch, chunk_len) != 0) {
+                return -(int)FORMAT2_ESOURCE_UNREADABLE;
+            }
+            format2_chunk_hash(scratch, chunk_len, got);
+            if (memcmp(got, s.hash, FORMAT2_CHUNK_HASH_LEN) != 0) {
+                return -(int)FORMAT2_ESOURCE;
+            }
+        }
 
         rc = fn(ctx, &s, n);
         if (rc != 0) {
