@@ -120,10 +120,26 @@ $(BUILD)/compress_test: tests/compress_test.c $(LIB)/compress.c $(MW)/lz4.c $(GE
 test-compress: $(BUILD)/compress_test
 	ASAN_OPTIONS=verify_asan_link_order=0 $(BUILD)/compress_test
 
+# rust/chunky_format/c: the generated C99 reader for chunky's format 2 (SPEC.md),
+# vendored unmodified from github.com/rmskkn/chunky_mcu_updater PR #5. Needs no
+# Rust toolchain (header-only) and no geometry (format 2 is a different wire
+# format from this repo's own, DESIGN.md sections 4-6; lib/format2.c only reads
+# buffers it is handed, so it does not depend on $(GEOM_H)).
+FMT_C      := rust/chunky_format/c
+FMT_CFLAGS := -Werror -pedantic -Wconversion -Wsign-conversion
+
+$(BUILD)/format2_test: tests/format2_test.c $(LIB)/format2.c $(LIB)/format2.h $(LIB)/sha256.c $(LIB)/sha256.h \
+                      $(FMT_C)/chunky_format.h $(FMT_C)/golden.h Makefile | $(BUILD)
+	$(CC) $(CFLAGS) $(FMT_CFLAGS) -iquote $(FMT_C) -iquote $(LIB) -o $@ \
+		tests/format2_test.c $(LIB)/format2.c $(LIB)/sha256.c
+
+test-format2: $(BUILD)/format2_test
+	$(BUILD)/format2_test
+
 clean:
 	rm -rf $(BUILD) run
 
-.PHONY: all clean test-compress FORCE
+.PHONY: all clean test-compress test-format2 FORCE
 FORCE:
 
 # must come after every explicit rule: an included .d file's first target
