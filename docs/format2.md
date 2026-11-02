@@ -1,7 +1,9 @@
 # format 2 (SPEC.md): reading it from this tree, read-only
 
-This is a plain record of what landed as new files, for anyone orienting themselves later: every file below
-is new; nothing in `lib/`, `middleware/`, `src/`, the `Makefile` or `tests/run_all.sh` was changed to add it.
+This is a plain record of what landed, for anyone orienting themselves later. The source files below are
+new; nothing in `lib/manifest.c`, `lib/plan.c`, `middleware/`, or `src/` was touched to add them. The
+`Makefile` and `.github/workflows/poc-tests.yml` *were* later given a `test-format2` target and CI step (see
+"Building it" and the Files table) -- additive lines only, nothing existing in either removed or changed.
 
 ## What this is, and what it is not
 
@@ -96,17 +98,22 @@ descriptor seal's `"chunky image descriptor v2"` prefix) -- was confirmed, not a
 | [`rust/chunky_format/c/read_plan.c`](../rust/chunky_format/c/read_plan.c) | Upstream's example: a C peer reading any format-2 plan file |
 | [`lib/format2.h`](../lib/format2.h) / [`lib/format2.c`](../lib/format2.c) | This integration: `format2_plan_begin/_walk`, `format2_manifest_begin/_walk` |
 | [`tests/format2_test.c`](../tests/format2_test.c) | Golden vectors (plan, manifest, steps, entries incl. real WRITE hash checks) + refusal-stage negatives + step order + chunk-hash verification (WRITE/COPY, synthetic + mocked ACTIVE) + range/data-length cases |
-| [`tests/case_format2.sh`](../tests/case_format2.sh) | Builds and runs the above; picked up automatically by `tests/run_all.sh`'s `case_*.sh` glob |
+| [`tests/case_format2.sh`](../tests/case_format2.sh) | Runs `make test-format2`; picked up automatically by `tests/run_all.sh`'s `case_*.sh` glob |
+| `Makefile` (`test-format2` target, additive) | The single source of truth for the build command above: `$(CC) $(CFLAGS)` plus `-Werror -pedantic -Wconversion -Wsign-conversion`, no `$(GEOM_H)` dependency (format 2 doesn't need a geometry) |
+| `.github/workflows/poc-tests.yml` (additive: one step, two trigger paths) | `make test-format2` as its own CI step, alongside `make test-compress`; `rust/**` and `SPEC.md` added to the path triggers so a vendor-only change still runs CI |
 
 ## Building it
 
-Nothing here needs the Makefile or a Rust toolchain -- `chunky_format.h` is self-contained C99.
+`chunky_format.h` is self-contained C99, so none of this needs a Rust toolchain; `make test-format2` needs
+only what the rest of the Makefile already needs (a device catalog entry to exist, checked unconditionally at
+the top of the Makefile -- the default `stm32f103cb` always does), not a geometry build (format 2 doesn't
+depend on `$(GEOM_H)`).
 
 ```sh
-tests/run_all.sh case_format2.sh      # as part of the normal test glob
-# or directly:
-tests/case_format2.sh
-# or by hand:
+make test-format2                     # the Makefile target; also CI's dedicated step
+tests/run_all.sh case_format2.sh      # same thing, as part of the normal test glob
+tests/case_format2.sh                 # same thing, directly
+# by hand, without the Makefile (what the target above runs):
 cc -std=c99 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion \
    -iquote rust/chunky_format/c -iquote lib \
    -o build/format2_test tests/format2_test.c lib/format2.c lib/sha256.c
