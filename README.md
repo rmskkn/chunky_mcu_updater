@@ -121,6 +121,30 @@ build/format2 dump build/vectors        # vendored golden vectors -> real .bin f
 build/format2 check build/vectors/unsigned_plan.bin
 ```
 
+`gen` plans an upgrade from two full-slot images, the one running now and the
+target, instead of only checking a plan someone else built:
+
+```sh
+build/format2 gen rust/chunky_format/vectors/unsigned/old.bin \
+                   rust/chunky_format/vectors/unsigned/new.bin build/plan.bin
+build/format2 check -g 0x68b7e201 -p 0x434b5931 build/plan.bin \
+                   rust/chunky_format/vectors/unsigned/old.bin
+```
+
+`rust/chunky_format/vectors/` holds a real old/new image pair, vendored from
+upstream, to run this against. `-c`/`-e` set chunk and erase-block size
+(default 256/2048, that vendored pair's geometry) for a different slot.
+
+`check`'s `-g`/`-p` are both `u32`, read at offsets 24 and 8 of the
+descriptor body (SPEC.md section 4.1). Geometry id is FNV-1a 32 over 13
+little-endian `u32` words: family, backend, chunk, erase, write, then the
+offset and length of each of STATE, FLOOR, ACTIVE, DFU (SPEC.md section 2).
+Product id is whatever the device and its releases agree on; the vendored
+vectors' value, `0x434b5931`, is their own fixture, not a format rule. `gen`
+needs neither flag: it reads geometry id straight off NEW's descriptor, so
+`-g`/`-p` on the `check` line above only have to match what that image
+already carries.
+
 ## For Review/ TODO
 1. A/B updates with trial boot and revert (done: `docs/ab_migration.md`, [`DESIGN.md`](DESIGN.md) sections 2-8; section 18 (historical) has the single-partition variant this superseded);
 2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: [`DESIGN.md`](DESIGN.md) 17.2);

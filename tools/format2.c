@@ -1,10 +1,11 @@
 /* format2: a standalone CLI for chunky's "format 2" wire contract (SPEC.md),
  * built on lib/format2.c's reader/verifier and the vendored
- * rust/chunky_format/c accessors and golden vectors. One binary, two
+ * rust/chunky_format/c accessors and golden vectors. One binary, three
  * subcommands, dispatched on argv[1] (same shape as src/cbflash.c):
  *
  *   format2 dump  [DIR]                              write the golden vectors to .bin files
  *   format2 check [-g ID] [-p ID] [-f N] PLAN [ACTIVE]  verify a plan file
+ *   format2 gen   [-c LEN] [-e LEN] ACTIVE NEW PLAN     plan NEW from ACTIVE
  *
  * dump: writes rust/chunky_format/c/golden.h's six vendored byte arrays to
  * real files on disk, so the format-2 vectors can be poked at with
@@ -44,7 +45,28 @@
  * yet exposed as check's own flags -- a plan at a different geometry needs
  * those constants edited to match (the same limitation
  * format2_plan_begin() has: image_len comes from the caller's geometry,
- * not the plan). */
+ * not the plan).
+ *
+ * gen: the planner SPEC.md section 7.3 describes, offline -- it takes
+ * ACTIVE (the slot as it runs today) and NEW (the target image: payload,
+ * 0xFF padding, and NEW's own 128-byte descriptor already in its last
+ * bytes, the same shape as the vendored old.bin/new.bin vectors), and
+ * writes a plan that turns ACTIVE into NEW. NEW's descriptor is copied
+ * into the plan header verbatim (SPEC.md 5.1: "byte for byte the one that
+ * ends the image"); gen does not build or sign one -- that happens at
+ * release time (SPEC.md 12.3), out of scope here. A sanity check (magic,
+ * format, image length, image SHA-256 against NEW's own descriptor)
+ * catches a wrong file or a wrong -c/-e before any plan is written.
+ *
+ * It has no DFU manifest to say which chunks the device already has
+ * right or already blank there (SPEC.md section 7), so it takes the safe
+ * path: every erase block NEW touches is erased (an already-blank block
+ * gets an erase it did not strictly need, which SPEC.md 5.4 allows but
+ * does not require), and every chunk that is not blank after that erase
+ * is programmed -- by COPY when ACTIVE holds the same bytes anywhere
+ * (SPEC.md 7.3's dedup rule), else by WRITE. -c/-e set chunk and erase
+ * block size (default 256/2048, the vendored vectors' geometry); the
+ * geometry id written to the header comes from NEW's own descriptor. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +74,7 @@
 #include "chunky_format.h"
 #include "golden.h"
 #include "format2.h"
+#include "sha256.h"
 
 static int usage(void) {
     fprintf(stderr,
@@ -59,7 +82,10 @@ static int usage(void) {
             "  format2 dump  [DIR]                                 write the golden vectors to .bin files\n"
             "  format2 check [-g GEOMETRY_ID] [-p PRODUCT_ID] [-f FLOOR] PLAN.bin [ACTIVE.bin]\n"
             "                                                      verify a plan file (check's defaults\n"
-            "                                                      match the golden vectors)\n");
+            "                                                      match the golden vectors)\n"
+            "  format2 gen   [-c CHUNK_LEN] [-e ERASE_LEN] ACTIVE.bin NEW.bin PLAN.bin\n"
+            "                                                      plan NEW from ACTIVE (defaults: chunk 256,\n"
+            "                                                      erase 2048, the vendored vectors' geometry)\n");
     return 2;
 }
 
@@ -269,6 +295,263 @@ static int cmd_check(int argc, char **argv) {
     return 0;
 }
 
+/* ---- gen: plan a format-2 upgrade from ACTIVE and the target image ---- */
+
+/* Geometry defaults match the vendored vectors (SPEC.md section 11): chunk
+ * 256 B, erase block 2048 B. Not derived from a device catalog entry
+ * (format 2 has none in this tree); -c/-e override for a different slot. */
+#define GEN_DEFAULT_CHUNK_LEN 256u
+#define GEN_DEFAULT_ERASE_LEN 2048u
+
+static uint8_t *read_whole_file(const char *path, size_t *len_out) {
+    FILE *f = fopen(path, "rb");
+    long sz;
+    uint8_t *buf;
+
+    if (f == NULL) {
+        perror(path);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        perror(path);
+        fclose(f);
+        return NULL;
+    }
+    buf = malloc((size_t)sz > 0u ? (size_t)sz : 1u);
+    if (buf == NULL) {
+        fprintf(stderr, "%s: out of memory\n", path);
+        fclose(f);
+        return NULL;
+    }
+    if (fread(buf, 1u, (size_t)sz, f) != (size_t)sz) {
+        fprintf(stderr, "%s: short read\n", path);
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    *len_out = (size_t)sz;
+    return buf;
+}
+
+static void put_u16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8u) & 0xFFu);
+}
+
+static void put_u32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8u) & 0xFFu);
+    p[2] = (uint8_t)((v >> 16u) & 0xFFu);
+    p[3] = (uint8_t)((v >> 24u) & 0xFFu);
+}
+
+static int is_blank(const uint8_t *p, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        if (p[i] != 0xFFu) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* First ACTIVE chunk whose chunk_len bytes equal target's, -1 if none
+ * (SPEC.md 7.3: "a chunk is programmed by COPY when ACTIVE holds the same
+ * bytes anywhere, else by WRITE"). */
+static long find_active_match(const uint8_t *active, uint32_t chunks, uint32_t chunk_len, const uint8_t *target) {
+    uint32_t i;
+    for (i = 0; i < chunks; i++) {
+        if (memcmp(active + (size_t)i * chunk_len, target, chunk_len) == 0) {
+            return (long)i;
+        }
+    }
+    return -1;
+}
+
+static int cmd_gen(int argc, char **argv) {
+    uint32_t chunk_len = GEN_DEFAULT_CHUNK_LEN;
+    uint32_t erase_len = GEN_DEFAULT_ERASE_LEN;
+    const char *active_path = NULL;
+    const char *new_path = NULL;
+    const char *out_path = NULL;
+    uint8_t *active = NULL;
+    uint8_t *image = NULL;
+    size_t active_len = 0;
+    size_t image_len_total = 0;
+    int i;
+    int rc = 1;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+            chunk_len = (uint32_t)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "-e") == 0 && i + 1 < argc) {
+            erase_len = (uint32_t)strtoul(argv[++i], NULL, 0);
+        } else if (active_path == NULL) {
+            active_path = argv[i];
+        } else if (new_path == NULL) {
+            new_path = argv[i];
+        } else if (out_path == NULL) {
+            out_path = argv[i];
+        } else {
+            return usage();
+        }
+    }
+    if (out_path == NULL) {
+        return usage();
+    }
+
+    active = read_whole_file(active_path, &active_len);
+    if (active == NULL) {
+        return 1;
+    }
+    image = read_whole_file(new_path, &image_len_total);
+    if (image == NULL) {
+        free(active);
+        return 1;
+    }
+
+    if (active_len != image_len_total) {
+        fprintf(stderr, "%s is %zu bytes, %s is %zu bytes: ACTIVE and the target must be the same slot size\n",
+                active_path, active_len, new_path, image_len_total);
+        goto done;
+    }
+    if (chunk_len == 0u || chunk_len > 0xFFFFu || erase_len == 0u || erase_len % chunk_len != 0u) {
+        fprintf(stderr, "bad geometry: chunk %u, erase %u (erase must be a nonzero multiple of chunk, chunk must fit a u16)\n",
+                chunk_len, erase_len);
+        goto done;
+    }
+    if (image_len_total <= (size_t)CHUNKY_SIGNED_DESCRIPTOR_LEN ||
+        image_len_total % chunk_len != 0u || image_len_total % erase_len != 0u) {
+        fprintf(stderr, "%s: %zu bytes does not divide evenly into chunk %u / erase %u, or is too small to hold a descriptor\n",
+                new_path, image_len_total, chunk_len, erase_len);
+        goto done;
+    }
+
+    {
+        uint32_t chunks = (uint32_t)(image_len_total / chunk_len);
+        uint32_t blocks = (uint32_t)(image_len_total / erase_len);
+        uint32_t chunks_per_block = erase_len / chunk_len;
+        const uint8_t *descriptor = image + (image_len_total - (size_t)CHUNKY_SIGNED_DESCRIPTOR_LEN);
+        const uint8_t *body = chunky_signed_descriptor_body(descriptor);
+        uint32_t image_len = (uint32_t)(image_len_total - (size_t)CHUNKY_SIGNED_DESCRIPTOR_LEN);
+        uint32_t geometry_id;
+        uint8_t sha[SHA256_LEN];
+        size_t out_cap;
+        uint8_t *out;
+        uint8_t *p;
+        uint32_t step_count = 0;
+        uint32_t body_len;
+        uint32_t b, c;
+        FILE *f;
+
+        if (chunks == 0u || chunks > 0xFFFFu || blocks == 0u || blocks > 0xFFFFu) {
+            fprintf(stderr, "%s: %u chunks / %u blocks does not fit this format's u16 indices\n", new_path, chunks, blocks);
+            goto done;
+        }
+        if (memcmp(chunky_descriptor_body_magic(body), "CKY2", CHUNKY_DESCRIPTOR_BODY_MAGIC_COUNT) != 0 ||
+            chunky_descriptor_body_format(body) != 2u) {
+            fprintf(stderr, "%s: last %u bytes are not a format-2 descriptor (bad magic/format)\n",
+                    new_path, CHUNKY_SIGNED_DESCRIPTOR_LEN);
+            goto done;
+        }
+        if (chunky_descriptor_body_image_len(body) != image_len) {
+            fprintf(stderr, "%s: descriptor image length %u does not match the slot's image length %u (-c/-e geometry wrong?)\n",
+                    new_path, chunky_descriptor_body_image_len(body), image_len);
+            goto done;
+        }
+        sha256(image, image_len, sha);
+        if (memcmp(sha, chunky_descriptor_body_image_sha256(body), (size_t)CHUNKY_DESCRIPTOR_BODY_IMAGE_SHA256_COUNT) != 0) {
+            fprintf(stderr, "%s: image SHA-256 does not match its own descriptor\n", new_path);
+            goto done;
+        }
+        geometry_id = chunky_descriptor_body_geometry_id(body);
+
+        out_cap = (size_t)CHUNKY_PLAN_HEADER_LEN + (size_t)blocks * 3u + (size_t)chunks * (13u + chunk_len);
+        out = malloc(out_cap);
+        if (out == NULL) {
+            fprintf(stderr, "out of memory (%zu bytes)\n", out_cap);
+            goto done;
+        }
+        p = out + CHUNKY_PLAN_HEADER_LEN;
+
+        /* SPEC.md 5.4/7.3: ascending block, then ascending chunk, erasing
+         * every block it touches (no DFU manifest to say it is already
+         * right or already blank there -- see the file header) and
+         * skipping only a target chunk that erase alone already matches. */
+        for (b = 0; b < blocks; b++) {
+            *p++ = CHUNKY_STEP_ERASE;
+            put_u16(p, (uint16_t)b);
+            p += 2;
+            step_count++;
+
+            for (c = b * chunks_per_block; c < (b + 1u) * chunks_per_block; c++) {
+                const uint8_t *target = image + (size_t)c * chunk_len;
+                long src;
+                uint8_t hash[FORMAT2_CHUNK_HASH_LEN];
+
+                if (is_blank(target, chunk_len)) {
+                    continue;
+                }
+                format2_chunk_hash(target, chunk_len, hash);
+                src = find_active_match(active, chunks, chunk_len, target);
+                if (src >= 0) {
+                    *p++ = CHUNKY_STEP_COPY;
+                    put_u16(p, (uint16_t)c);
+                    p += 2;
+                    put_u16(p, (uint16_t)src);
+                    p += 2;
+                    memcpy(p, hash, FORMAT2_CHUNK_HASH_LEN);
+                    p += FORMAT2_CHUNK_HASH_LEN;
+                } else {
+                    *p++ = CHUNKY_STEP_WRITE;
+                    put_u16(p, (uint16_t)c);
+                    p += 2;
+                    put_u16(p, (uint16_t)chunk_len);
+                    p += 2;
+                    memcpy(p, hash, FORMAT2_CHUNK_HASH_LEN);
+                    p += FORMAT2_CHUNK_HASH_LEN;
+                    memcpy(p, target, chunk_len);
+                    p += chunk_len;
+                }
+                step_count++;
+            }
+        }
+
+        body_len = (uint32_t)(p - (out + CHUNKY_PLAN_HEADER_LEN));
+
+        memcpy(out, "CKP2", 4u);
+        out[4] = 2u;
+        put_u32(out + 5, geometry_id);
+        put_u32(out + 9, step_count);
+        put_u32(out + 13, body_len);
+        memcpy(out + 17, descriptor, CHUNKY_SIGNED_DESCRIPTOR_LEN);
+
+        f = fopen(out_path, "wb");
+        if (f == NULL) {
+            perror(out_path);
+            free(out);
+            goto done;
+        }
+        if (fwrite(out, 1u, (size_t)CHUNKY_PLAN_HEADER_LEN + body_len, f) != (size_t)CHUNKY_PLAN_HEADER_LEN + body_len) {
+            fprintf(stderr, "%s: short write\n", out_path);
+            fclose(f);
+            free(out);
+            goto done;
+        }
+        fclose(f);
+        printf("%s: %u steps, %u body bytes -> %s (geometry 0x%08x)\n",
+               new_path, step_count, body_len, out_path, geometry_id);
+        free(out);
+        rc = 0;
+    }
+
+done:
+    free(active);
+    free(image);
+    return rc;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         return usage();
@@ -278,6 +561,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "check") == 0) {
         return cmd_check(argc - 2, argv + 2);
+    }
+    if (strcmp(argv[1], "gen") == 0) {
+        return cmd_gen(argc - 2, argv + 2);
     }
     return usage();
 }
