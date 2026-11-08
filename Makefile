@@ -136,10 +136,24 @@ $(BUILD)/format2_test: tests/format2_test.c $(LIB)/format2.c $(LIB)/format2.h $(
 test-format2: $(BUILD)/format2_test
 	$(BUILD)/format2_test
 
+# format2-tools: one CLI, two subcommands (dump, check), dispatched on
+# argv[1] -- dumps the vendored golden vectors to real .bin files, and
+# verifies a format-2 plan file through lib/format2.c's real checks (seal,
+# per-step hash, order) rather than a structural parse only. A standalone
+# tool, not a test, so it lives in tools/ (like gen_device.py) rather than
+# tests/. Needs no $(GEOM_H): format 2 is not this repo's own wire format
+# (see above).
+$(BUILD)/format2: tools/format2.c $(LIB)/format2.c $(LIB)/format2.h $(LIB)/sha256.c $(LIB)/sha256.h \
+                  $(FMT_C)/chunky_format.h $(FMT_C)/golden.h Makefile | $(BUILD)
+	$(CC) $(CFLAGS) $(FMT_CFLAGS) -iquote $(FMT_C) -iquote $(LIB) -o $@ \
+		tools/format2.c $(LIB)/format2.c $(LIB)/sha256.c
+
+format2-tools: $(BUILD)/format2
+
 clean:
 	rm -rf $(BUILD) run
 
-.PHONY: all clean test-compress test-format2 FORCE
+.PHONY: all clean test-compress test-format2 format2-tools FORCE
 FORCE:
 
 # must come after every explicit rule: an included .d file's first target

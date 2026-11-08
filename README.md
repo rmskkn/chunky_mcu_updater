@@ -109,6 +109,18 @@ exchange, and what the PoC deliberately leaves out.
 | 16 | Transports: byte stream, Modbus, CAN with ISO-TP, UDS |
 | 17 | Overhead against a full image transfer, and manifest elision |
 
+[`docs/format2.md`](docs/format2.md) covers a second, newer wire contract this repo can read but
+does not speak: a vendored spec ([`SPEC.md`](SPEC.md)) from upstream
+[romixlab/chunky_mcu_updater](https://github.com/romixlab/chunky_mcu_updater), plus a read-only
+verifier (`lib/format2.c`) and a CLI to try it on a plan file:
+
+```sh
+make format2-tools
+mkdir -p build/vectors
+build/format2 dump build/vectors        # vendored golden vectors -> real .bin files
+build/format2 check build/vectors/unsigned_plan.bin
+```
+
 ## For Review/ TODO
 1. A/B updates with trial boot and revert (done: `docs/ab_migration.md`, [`DESIGN.md`](DESIGN.md) sections 2-8; section 18 (historical) has the single-partition variant this superseded);
 2. Binary diffing inside a sector (LZ4, with the old sector as dictionary, is done: [`DESIGN.md`](DESIGN.md) 17.2);

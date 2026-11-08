@@ -101,6 +101,7 @@ descriptor seal's `"chunky image descriptor v2"` prefix) -- was confirmed, not a
 | [`tests/case_format2.sh`](../tests/case_format2.sh) | Runs `make test-format2`; picked up automatically by `tests/run_all.sh`'s `case_*.sh` glob |
 | `Makefile` (`test-format2` target, additive) | The single source of truth for the build command above: `$(CC) $(CFLAGS)` plus `-Werror -pedantic -Wconversion -Wsign-conversion`, no `$(GEOM_H)` dependency (format 2 doesn't need a geometry) |
 | `.github/workflows/poc-tests.yml` (additive: one step, two trigger paths) | `make test-format2` as its own CI step, alongside `make test-compress`; `rust/**` and `SPEC.md` added to the path triggers so a vendor-only change still runs CI |
+| [`tools/format2.c`](../tools/format2.c) | Standalone CLI, two subcommands (`dump`, `check`): `dump` writes `golden.h`'s vectors to real `.bin` files; `check` runs a plan file through `format2_plan_begin`/`_walk`, printing each accepted step and the exact refusal if one fails (`make format2-tools`, see below) |
 
 ## Building it
 
@@ -123,6 +124,44 @@ build/format2_test
 cc -std=c99 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion \
    -o /tmp/t rust/chunky_format/c/test.c && /tmp/t
 ```
+
+## Trying it on disk: dumping vectors and checking a plan file
+
+One CLI, two subcommands (`dump`, `check`), dispatched on `argv[1]` the way `cb-flash` dispatches
+its own subcommands; built with the same `FMT_CFLAGS` as `test-format2`:
+
+| Subcommand | What |
+|---|---|
+| `format2 dump [DIR]` | Writes `golden.h`'s six vendored byte arrays (signed/unsigned plan, manifest, WRITE data) to real files on disk, so they can be inspected with `xxd` or fed to `check` instead of only linked into a test binary |
+| `format2 check [-g ID] [-p ID] [-f N] PLAN [ACTIVE]` | Reads a format-2 plan file and runs it through `format2_plan_begin()` / `format2_plan_walk()`: seal check, per-step chunk hash, index range, step order. Prints each step as it is accepted; stops and reports the exact `format2_err_t` on the first refusal. The optional `ACTIVE` file supplies the bytes a COPY step's source hash is checked against |
+
+```sh
+make format2-tools                                  # builds build/format2
+mkdir -p build/vectors
+./build/format2 dump build/vectors                   # -> six .bin files
+./build/format2 check build/vectors/unsigned_plan.bin
+#   plan_begin: OK  version 2, security counter 2, image 3968 bytes
+#   (no ACTIVE.bin given: a COPY step will stop the walk at FORMAT2_ENOACTIVE)
+#        0  ERASE  block 0
+#        1  WRITE  dst 0, 256 bytes  (hash checked)
+#   plan_walk: REFUSED (a COPY step needs ACTIVE and no read_active callback was given)
+./build/format2 check build/vectors/signed_plan.bin
+#   plan_begin: REFUSED (Ed25519 scheme: known, but not checkable (no Ed25519 in this tree))
+```
+
+The golden plan's geometry (chunk 256 B, erase block 2048 B, 4096 B slot: `chunks=16`,
+`blocks=2`, `image_len=3968`) is `check`'s default, since `dump`'s output is the only
+on-disk plan this tree can currently produce. A plan from elsewhere needs `-g`/`-p`/`-f` for its
+geometry id, product id and rollback floor; `chunk_len`/`blocks`/`image_len` are not yet exposed as
+flags, so a different slot size needs the constants in `tools/format2.c` edited to match (the
+same limitation `format2_plan_begin()` has: `image_len` comes from the caller's geometry, not the
+plan).
+
+An ERASE and the first hash-checked WRITE always walk with no ACTIVE file; a plan whose first step
+is a COPY stops there with `FORMAT2_ENOACTIVE` rather than skipping the check, same as
+`tests/format2_test.c`'s own `check_plan_walk_noactive_refuses()`. Pass a second file (any bytes
+long enough to cover every chunk a COPY step reads) and COPY steps are checked too, with a wrong
+source caught as `SourceMismatch`.
 
 ## If this grows into real wire usage later
 
