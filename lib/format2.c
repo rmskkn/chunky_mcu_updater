@@ -53,16 +53,31 @@ static int all_zero(const uint8_t *p, size_t n) {
 #define SEAL_DOMAIN_LEN 26u
 
 /* SPEC.md 4.3: the three stages against a 128-byte SignedDescriptor's
- * 64-byte body and 64-byte seal, both already located by the caller
+ * 64-byte body and 64-byte seal, its view already made by the caller
  * (either inside a plan header, SPEC.md 5.1, or at the end of a flashed
  * image, SPEC.md section 4). image_len is the device geometry's image_len. */
-static format2_err_t check_descriptor(const uint8_t *body, const uint8_t *seal,
+static format2_err_t check_descriptor(chunky_signed_descriptor_view_t desc,
                                       uint32_t geometry_id, uint32_t product_id,
                                       uint32_t floor, uint32_t image_len,
-                                      const uint8_t **out_body) {
+                                      chunky_descriptor_body_view_t *out_body) {
+    const uint8_t *raw = chunky_signed_descriptor_body(desc);
+    const uint8_t *seal = chunky_signed_descriptor_seal(desc);
+    chunky_descriptor_body_view_t body;
     uint32_t scheme;
 
-    /* stage 1: refusals only, on the raw body bytes as received */
+    /* stage 1: refusals only, on the raw body bytes as received. All 64 are
+     * there, so the view refuses only an unknown scheme; magic and format
+     * are still reported before it, read from the raw bytes at their
+     * offsets, in SPEC.md 4.3's order. */
+    if (chunky_descriptor_body_view(raw, CHUNKY_SIGNED_DESCRIPTOR_BODY_COUNT, &body) != 0) {
+        if (memcmp(raw + CHUNKY_DESCRIPTOR_BODY_MAGIC_OFFSET, "CKY2", CHUNKY_DESCRIPTOR_BODY_MAGIC_COUNT) != 0) {
+            return FORMAT2_EMAGIC;
+        }
+        if (raw[CHUNKY_DESCRIPTOR_BODY_FORMAT_OFFSET] != 2u) {
+            return FORMAT2_EFORMAT;
+        }
+        return FORMAT2_ESCHEME;
+    }
     if (memcmp(chunky_descriptor_body_magic(body), "CKY2", CHUNKY_DESCRIPTOR_BODY_MAGIC_COUNT) != 0) {
         return FORMAT2_EMAGIC;
     }
@@ -70,9 +85,6 @@ static format2_err_t check_descriptor(const uint8_t *body, const uint8_t *seal,
         return FORMAT2_EFORMAT;
     }
     scheme = chunky_scheme_tag(chunky_descriptor_body_scheme(body));
-    if (scheme != CHUNKY_SCHEME_ED25519 && scheme != CHUNKY_SCHEME_UNSIGNED) {
-        return FORMAT2_ESCHEME;
-    }
     if (!all_zero(chunky_descriptor_body_reserved(body), CHUNKY_DESCRIPTOR_BODY_RESERVED_COUNT) ||
         !all_zero(chunky_descriptor_body_reserved_end(body), CHUNKY_DESCRIPTOR_BODY_RESERVED_END_COUNT)) {
         return FORMAT2_ERESERVED;
@@ -94,7 +106,7 @@ static format2_err_t check_descriptor(const uint8_t *body, const uint8_t *seal,
         uint8_t want[32];
 
         memcpy(msg, SEAL_DOMAIN, SEAL_DOMAIN_LEN);
-        memcpy(msg + SEAL_DOMAIN_LEN, body, CHUNKY_DESCRIPTOR_BODY_LEN);
+        memcpy(msg + SEAL_DOMAIN_LEN, raw, CHUNKY_DESCRIPTOR_BODY_LEN);
         sha256(msg, sizeof msg, want);
         if (memcmp(seal, want, 32u) != 0 || !all_zero(seal + 32u, 32u)) {
             return FORMAT2_ESIGNATURE;
@@ -121,32 +133,29 @@ static format2_err_t check_descriptor(const uint8_t *body, const uint8_t *seal,
 format2_err_t format2_plan_begin(const uint8_t *buf, size_t len,
                                  uint32_t geometry_id, uint32_t product_id,
                                  uint32_t floor, uint32_t image_len,
-                                 const uint8_t **descriptor_body) {
-    const uint8_t *desc;
-    const uint8_t *body;
-    const uint8_t *seal;
+                                 chunky_descriptor_body_view_t *descriptor_body) {
+    chunky_plan_header_view_t h;
 
-    /* SPEC.md 6.1.1: refusals on the header, which is outside the seal */
-    if (len < CHUNKY_PLAN_HEADER_LEN) {
+    /* SPEC.md 6.1.1: refusals on the header, which is outside the seal. The
+     * view refuses only a buffer shorter than the header. */
+    if (chunky_plan_header_view(buf, len, &h) != 0) {
         return FORMAT2_ESHORT;
     }
-    if (memcmp(chunky_plan_header_magic(buf), "CKP2", CHUNKY_PLAN_HEADER_MAGIC_COUNT) != 0) {
+    if (memcmp(chunky_plan_header_magic(h), "CKP2", CHUNKY_PLAN_HEADER_MAGIC_COUNT) != 0) {
         return FORMAT2_EMAGIC;
     }
-    if (chunky_plan_header_format(buf) != 2u) {
+    if (chunky_plan_header_format(h) != 2u) {
         return FORMAT2_EFORMAT;
     }
-    if (chunky_plan_header_geometry_id(buf) != geometry_id) {
+    if (chunky_plan_header_geometry_id(h) != geometry_id) {
         return FORMAT2_EGEOMETRY;
     }
-    if ((size_t)chunky_plan_header_body_len(buf) != len - CHUNKY_PLAN_HEADER_LEN) {
+    if ((size_t)chunky_plan_header_body_len(h) != len - h.len) {
         return FORMAT2_ELENGTH;
     }
 
-    desc = chunky_plan_header_descriptor(buf);
-    body = chunky_signed_descriptor_body(desc);
-    seal = chunky_signed_descriptor_seal(desc);
-    return check_descriptor(body, seal, geometry_id, product_id, floor, image_len, descriptor_body);
+    return check_descriptor(chunky_plan_header_descriptor(h), geometry_id, product_id, floor, image_len,
+                            descriptor_body);
 }
 
 int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
@@ -154,8 +163,7 @@ int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
                       format2_read_active_fn read_active, void *active_ctx,
                       uint8_t *scratch,
                       format2_step_fn fn, void *ctx) {
-    const uint8_t *at = buf + CHUNKY_PLAN_HEADER_LEN;
-    const uint8_t *end = buf + len;
+    size_t at = CHUNKY_PLAN_HEADER_LEN;
     /* SPEC.md 5.4: every step's position must be strictly greater than the
      * one before it; -1 sorts before any real position (>= 0). */
     long long last_pos = -1;
@@ -174,47 +182,45 @@ int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
     chunks_per_block = chunks / blocks;
 
     for (n = 0; n < step_count; n++) {
-        const uint8_t *t;
-        chunky_step_tail_t tl;
+        chunky_step_view_t v;
+        const chunky_step_erase_view_t *erase;
+        const chunky_step_copy_view_t *copy;
+        const chunky_step_write_view_t *write;
         format2_step_t s;
         long long pos;
         int rc;
 
-        if (at >= end) {
+        if (at == len) {
             return -(int)FORMAT2_ESTEP;
         }
-        t = at + CHUNKY_STEP_TAG_LEN;
-        memset(&tl, 0, sizeof tl); /* chunky_step_tail only sets write_data for a WRITE */
-        if (chunky_step_tail(at, &t, end, &tl) != 0) {
+        /* checks that the step, a WRITE's data included, ends inside buf */
+        if (chunky_step_view(buf + at, len - at, &v) != 0) {
             return -(int)FORMAT2_ESTEP;
         }
 
         memset(&s, 0, sizeof s);
-        s.op = chunky_step_tag(at);
-        switch (s.op) {
-        case CHUNKY_STEP_ERASE:
-            s.a = chunky_step_erase_block(tl.head);
+        s.op = chunky_step_tag(&v);
+        if (chunky_step_as_erase(&v, &erase) == 0) {
+            s.a = chunky_step_erase_block(erase);
             /* SPEC.md 6.2.5: block < blocks */
             if (s.a >= blocks) {
                 return -(int)FORMAT2_ERANGE;
             }
             pos = 2LL * (long long)s.a * (long long)chunks_per_block;
-            break;
-        case CHUNKY_STEP_COPY:
-            s.a = chunky_step_copy_dst(tl.head);
-            s.b = chunky_step_copy_src(tl.head);
-            s.hash = chunky_step_copy_hash(tl.head);
+        } else if (chunky_step_as_copy(&v, &copy) == 0) {
+            s.a = chunky_step_copy_dst(copy);
+            s.b = chunky_step_copy_src(copy);
+            s.hash = chunky_step_copy_hash(copy);
             /* SPEC.md 6.2.5: dst < chunks, src < chunks */
             if (s.a >= chunks || s.b >= chunks) {
                 return -(int)FORMAT2_ERANGE;
             }
             pos = 2LL * (long long)s.a + 1;
-            break;
-        case CHUNKY_STEP_WRITE:
-            s.a = chunky_step_write_dst(tl.head);
-            s.b = chunky_step_write_data_count(tl.head);
-            s.hash = chunky_step_write_hash(tl.head);
-            s.data = tl.write_data;
+        } else if (chunky_step_as_write(&v, &write) == 0) {
+            s.a = chunky_step_write_dst(write);
+            s.b = chunky_step_write_data_count(write);
+            s.hash = chunky_step_write_hash(write);
+            s.data = chunky_step_write_data(write);
             /* SPEC.md 6.2.4: a WRITE's count MUST equal chunk */
             if (s.b != chunk_len) {
                 return -(int)FORMAT2_EDATALEN;
@@ -224,8 +230,7 @@ int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
                 return -(int)FORMAT2_ERANGE;
             }
             pos = 2LL * (long long)s.a + 1;
-            break;
-        default:
+        } else {
             return -(int)FORMAT2_ESTEP;
         }
         /* SPEC.md 5.4/6.2.6 */
@@ -262,9 +267,9 @@ int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
         if (rc != 0) {
             return rc;
         }
-        at = t;
+        at += v.len;
     }
-    if (at != end) {
+    if (at != len) {
         return -(int)FORMAT2_ELENGTH; /* SPEC.md 5.3: never read past body length as steps */
     }
     return 0;
@@ -272,28 +277,41 @@ int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,
 
 format2_err_t format2_manifest_begin(const uint8_t *buf, size_t len,
                                      uint32_t geometry_id, uint16_t *chunks_out) {
+    chunky_manifest_header_view_t h;
+
     if (len < CHUNKY_MANIFEST_HEADER_LEN) {
         return FORMAT2_ESHORT;
     }
-    if (memcmp(chunky_manifest_header_magic(buf), "CKM2", CHUNKY_MANIFEST_HEADER_MAGIC_COUNT) != 0) {
+    /* All 13 bytes are there, so the view refuses only an unknown scheme
+     * (SPEC.md section 3); magic and format are still reported before it,
+     * read from the raw bytes at their offsets. */
+    if (chunky_manifest_header_view(buf, len, &h) != 0) {
+        if (memcmp(buf + CHUNKY_MANIFEST_HEADER_MAGIC_OFFSET, "CKM2", CHUNKY_MANIFEST_HEADER_MAGIC_COUNT) != 0) {
+            return FORMAT2_EMAGIC;
+        }
+        if (buf[CHUNKY_MANIFEST_HEADER_FORMAT_OFFSET] != 2u) {
+            return FORMAT2_EFORMAT;
+        }
+        return FORMAT2_ESCHEME;
+    }
+    if (memcmp(chunky_manifest_header_magic(h), "CKM2", CHUNKY_MANIFEST_HEADER_MAGIC_COUNT) != 0) {
         return FORMAT2_EMAGIC;
     }
-    if (chunky_manifest_header_format(buf) != 2u) {
+    if (chunky_manifest_header_format(h) != 2u) {
         return FORMAT2_EFORMAT;
     }
-    if (chunky_manifest_header_geometry_id(buf) != geometry_id) {
+    if (chunky_manifest_header_geometry_id(h) != geometry_id) {
         return FORMAT2_EGEOMETRY;
     }
     if (chunks_out != NULL) {
-        *chunks_out = chunky_manifest_header_chunks(buf);
+        *chunks_out = chunky_manifest_header_chunks(h);
     }
     return FORMAT2_OK;
 }
 
 int format2_manifest_walk(const uint8_t *buf, size_t len, uint32_t entry_count,
                           format2_entry_fn fn, void *ctx) {
-    const uint8_t *at = buf + CHUNKY_MANIFEST_HEADER_LEN;
-    const uint8_t *end = buf + len;
+    size_t at = CHUNKY_MANIFEST_HEADER_LEN;
     uint32_t n;
 
     if (len < CHUNKY_MANIFEST_HEADER_LEN) {
@@ -301,29 +319,28 @@ int format2_manifest_walk(const uint8_t *buf, size_t len, uint32_t entry_count,
     }
 
     for (n = 0; n < entry_count; n++) {
-        const uint8_t *t;
-        chunky_chunk_entry_tail_t tl;
+        chunky_chunk_entry_view_t v;
+        const chunky_chunk_entry_hash_view_t *hash;
         format2_entry_t e;
         int rc;
 
-        if (at >= end) {
+        if (at == len) {
             return -(int)FORMAT2_ESTEP;
         }
-        t = at + CHUNKY_CHUNK_ENTRY_TAG_LEN;
-        if (chunky_chunk_entry_tail(at, &t, end, &tl) != 0) {
+        if (chunky_chunk_entry_view(buf + at, len - at, &v) != 0) {
             return -(int)FORMAT2_ESTEP;
         }
 
-        e.tag = chunky_chunk_entry_tag(at);
-        e.hash = (e.tag == CHUNKY_CHUNK_ENTRY_HASH) ? chunky_chunk_entry_hash_hash(tl.head) : NULL;
+        e.tag = chunky_chunk_entry_tag(&v);
+        e.hash = chunky_chunk_entry_as_hash(&v, &hash) == 0 ? chunky_chunk_entry_hash_hash(hash) : NULL;
 
         rc = fn(ctx, &e, n);
         if (rc != 0) {
             return rc;
         }
-        at = t;
+        at += v.len;
     }
-    if (at != end) {
+    if (at != len) {
         return -(int)FORMAT2_ELENGTH;
     }
     return 0;

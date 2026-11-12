@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # format2.c (lib/) against the golden vectors and the negative cases of
 # tests/format2_test.c: the read-only decoder for chunky's "format 2" wire
-# contract (SPEC.md; rust/chunky_format/c holds the generated accessors it
+# contract (SPEC.md; rust/chunky_format/c holds the generated views it
 # is built on, vendored unmodified from github.com/rmskkn/chunky_mcu_updater
 # PR #5). A unit test, like tests/compress_test.c (test-compress), not an
 # end-to-end server/client case, so it does not source common.sh; builds

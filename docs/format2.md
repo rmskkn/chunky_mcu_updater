@@ -10,15 +10,18 @@ new; nothing in `lib/manifest.c`, `lib/plan.c`, `middleware/`, or `src/` was tou
 [`SPEC.md`](../SPEC.md) and [`rust/chunky_format/c/chunky_format.h`](../rust/chunky_format/c/chunky_format.h)
 are vendored, byte-for-byte, from
 [romixlab/chunky_mcu_updater PR #5](https://github.com/rmskkn/chunky_mcu_updater/pull/5) (commit
-`b2c3f4b0e96090f183095b61cb6680cda66dba10`): the "format 2" wire contract -- a different, newer protocol
+`e9eca9b595d1ae3520aca0741732563e6640851d`): the "format 2" wire contract -- a different, newer protocol
 than the one this repo implements today (`lib/manifest.h`'s `manifest_t`, `lib/plan.h`'s `plan_t`,
 `lib/protocol.h` -- DESIGN.md sections 4-6). The two are not byte-compatible and this integration does not
 try to make them so: `manifest_build()`, `plan_build()`, `bootloader_boot()` and everything that calls them
 are untouched and unaware format 2 exists.
 
 [`lib/format2.h`](../lib/format2.h) / [`lib/format2.c`](../lib/format2.c) is new, additive code: a reader and
-verifier for format-2 buffers, built only on `chunky_format.h`'s offset accessors and the SHA-256 already in
-`lib/sha256.h`. It exists so a format-2 buffer -- a plan or manifest from a format-2-capable peer -- can be
+verifier for format-2 buffers, built only on `chunky_format.h`'s length-checked views and the SHA-256 already
+in `lib/sha256.h`. Every field is read through a view, which checks that the bytes hold the whole value (an
+unknown scheme, op or entry tag refused) before a field can be read, so no read passes the end of the buffer
+it was given; `tests/format2_test.c` checks that on every shorter prefix of the golden plans and manifests,
+under ASan. It exists so a format-2 buffer -- a plan or manifest from a format-2-capable peer -- can be
 decoded and checked in this tree; it is not wired into `device.c`, `bootloader.c` or either session layer,
 and does not need to be to be useful (it also works as a one-off inspection/validation tool).
 
@@ -99,7 +102,7 @@ descriptor seal's `"chunky image descriptor v2"` prefix) -- was confirmed, not a
 | [`lib/format2.h`](../lib/format2.h) / [`lib/format2.c`](../lib/format2.c) | This integration: `format2_plan_begin/_walk`, `format2_manifest_begin/_walk` |
 | [`tests/format2_test.c`](../tests/format2_test.c) | Golden vectors (plan, manifest, steps, entries incl. real WRITE hash checks) + refusal-stage negatives + step order + chunk-hash verification (WRITE/COPY, synthetic + mocked ACTIVE) + range/data-length cases |
 | [`tests/case_format2.sh`](../tests/case_format2.sh) | Runs `make test-format2`; picked up automatically by `tests/run_all.sh`'s `case_*.sh` glob |
-| `Makefile` (`test-format2` target, additive) | The single source of truth for the build command above: `$(CC) $(CFLAGS)` plus `-Werror -pedantic -Wconversion -Wsign-conversion`, no `$(GEOM_H)` dependency (format 2 doesn't need a geometry) |
+| `Makefile` (`test-format2` target, additive) | The single source of truth for the build command above: `$(CC) $(CFLAGS)` plus `-Werror -pedantic -Wconversion -Wsign-conversion`, under ASan/UBSan like `test-compress`, no `$(GEOM_H)` dependency (format 2 doesn't need a geometry) |
 | `.github/workflows/poc-tests.yml` (additive: one step, two trigger paths) | `make test-format2` as its own CI step, alongside `make test-compress`; `rust/**` and `SPEC.md` added to the path triggers so a vendor-only change still runs CI |
 | [`tools/format2.c`](../tools/format2.c) | Standalone CLI, two subcommands (`dump`, `check`): `dump` writes `golden.h`'s vectors to real `.bin` files; `check` runs a plan file through `format2_plan_begin`/`_walk`, printing each accepted step and the exact refusal if one fails (`make format2-tools`, see below) |
 
@@ -116,9 +119,10 @@ tests/run_all.sh case_format2.sh      # same thing, as part of the normal test g
 tests/case_format2.sh                 # same thing, directly
 # by hand, without the Makefile (what the target above runs):
 cc -std=c99 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion \
+   -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all \
    -iquote rust/chunky_format/c -iquote lib \
    -o build/format2_test tests/format2_test.c lib/format2.c lib/sha256.c
-build/format2_test
+ASAN_OPTIONS=verify_asan_link_order=0 build/format2_test
 
 # upstream's own reader/tests, for a from-scratch parity check:
 cc -std=c99 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion \
