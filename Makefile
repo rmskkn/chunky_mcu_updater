@@ -136,12 +136,14 @@ rust:
 rust-test:
 	$(CARGO) test --manifest-path $(RUST)/Cargo.toml
 
-# the C reader against the golden vectors, signed and unsigned
+# the C reader against the golden vectors, signed and unsigned, and every
+# shorter buffer refused, under ASan/UBSan so a read past a buffer fails
 $(BUILD)/chunky_format_test: $(FMT_C)/test.c $(FMT_C)/chunky_format.h $(FMT_C)/golden.h | $(BUILD)
-	$(CC) $(CFLAGS) $(FMT_CFLAGS) -iquote $(FMT_C) -o $@ $<
+	$(CC) $(CFLAGS) $(FMT_CFLAGS) -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-iquote $(FMT_C) -o $@ $<
 
 vectors: $(BUILD)/chunky_format_test
-	$(BUILD)/chunky_format_test
+	ASAN_OPTIONS=verify_asan_link_order=0 $(BUILD)/chunky_format_test
 
 # how a C peer reads a plan: build/read_plan PLAN.bin
 $(BUILD)/read_plan: $(FMT_C)/read_plan.c $(FMT_C)/chunky_format.h | $(BUILD)
