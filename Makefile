@@ -128,13 +128,15 @@ test-compress: $(BUILD)/compress_test
 FMT_C      := rust/chunky_format/c
 FMT_CFLAGS := -Werror -pedantic -Wconversion -Wsign-conversion
 
+# format2_test feeds lib/format2.c every shorter prefix of the golden
+# vectors: under ASan/UBSan, like compress_test, so a read past one fails
 $(BUILD)/format2_test: tests/format2_test.c $(LIB)/format2.c $(LIB)/format2.h $(LIB)/sha256.c $(LIB)/sha256.h \
                       $(FMT_C)/chunky_format.h $(FMT_C)/golden.h Makefile | $(BUILD)
-	$(CC) $(CFLAGS) $(FMT_CFLAGS) -iquote $(FMT_C) -iquote $(LIB) -o $@ \
-		tests/format2_test.c $(LIB)/format2.c $(LIB)/sha256.c
+	$(CC) $(CFLAGS) $(FMT_CFLAGS) -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-iquote $(FMT_C) -iquote $(LIB) -o $@ tests/format2_test.c $(LIB)/format2.c $(LIB)/sha256.c
 
 test-format2: $(BUILD)/format2_test
-	$(BUILD)/format2_test
+	ASAN_OPTIONS=verify_asan_link_order=0 $(BUILD)/format2_test
 
 # format2-tools: one CLI, two subcommands (dump, check), dispatched on
 # argv[1] -- dumps the vendored golden vectors to real .bin files, and

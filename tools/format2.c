@@ -1,6 +1,6 @@
 /* format2: a standalone CLI for chunky's "format 2" wire contract (SPEC.md),
  * built on lib/format2.c's reader/verifier and the vendored
- * rust/chunky_format/c accessors and golden vectors. One binary, three
+ * rust/chunky_format/c views and golden vectors. One binary, three
  * subcommands, dispatched on argv[1] (same shape as src/cbflash.c):
  *
  *   format2 dump  [DIR]                              write the golden vectors to .bin files
@@ -254,7 +254,8 @@ static int cmd_check(int argc, char **argv) {
         const uint32_t chunks = GOLDEN_UNSIGNED_CHUNKS;
         const uint32_t blocks = 2;
         const uint32_t image_len = GOLDEN_UNSIGNED_IMAGE_LEN;
-        const uint8_t *body = NULL;
+        chunky_descriptor_body_view_t body;
+        chunky_plan_header_view_t h;
         format2_err_t e;
         int rc;
 
@@ -271,8 +272,12 @@ static int cmd_check(int argc, char **argv) {
                chunky_descriptor_body_security_counter(body),
                chunky_descriptor_body_image_len(body));
 
+        if (chunky_plan_header_view(plan_buf, plan_len, &h) != 0) {
+            printf("plan header: too short\n"); /* plan_begin already refused that */
+            return 1;
+        }
         {
-            uint32_t step_count = chunky_plan_header_step_count(plan_buf);
+            uint32_t step_count = chunky_plan_header_step_count(h);
             uint8_t scratch[256];
 
             if (!have_active) {
@@ -432,8 +437,8 @@ static int cmd_gen(int argc, char **argv) {
         uint32_t chunks = (uint32_t)(image_len_total / chunk_len);
         uint32_t blocks = (uint32_t)(image_len_total / erase_len);
         uint32_t chunks_per_block = erase_len / chunk_len;
-        const uint8_t *descriptor = image + (image_len_total - (size_t)CHUNKY_SIGNED_DESCRIPTOR_LEN);
-        const uint8_t *body = chunky_signed_descriptor_body(descriptor);
+        chunky_signed_descriptor_view_t descriptor;
+        chunky_descriptor_body_view_t body;
         uint32_t image_len = (uint32_t)(image_len_total - (size_t)CHUNKY_SIGNED_DESCRIPTOR_LEN);
         uint32_t geometry_id;
         uint8_t sha[SHA256_LEN];
@@ -449,9 +454,15 @@ static int cmd_gen(int argc, char **argv) {
             fprintf(stderr, "%s: %u chunks / %u blocks does not fit this format's u16 indices\n", new_path, chunks, blocks);
             goto done;
         }
-        if (memcmp(chunky_descriptor_body_magic(body), "CKY2", CHUNKY_DESCRIPTOR_BODY_MAGIC_COUNT) != 0 ||
+        /* the last 128 bytes are there (checked above); the body's view
+         * refuses an unknown scheme */
+        if (chunky_signed_descriptor_view(image + (image_len_total - (size_t)CHUNKY_SIGNED_DESCRIPTOR_LEN),
+                                          (size_t)CHUNKY_SIGNED_DESCRIPTOR_LEN, &descriptor) != 0 ||
+            chunky_descriptor_body_view(chunky_signed_descriptor_body(descriptor), CHUNKY_SIGNED_DESCRIPTOR_BODY_COUNT,
+                                        &body) != 0 ||
+            memcmp(chunky_descriptor_body_magic(body), "CKY2", CHUNKY_DESCRIPTOR_BODY_MAGIC_COUNT) != 0 ||
             chunky_descriptor_body_format(body) != 2u) {
-            fprintf(stderr, "%s: last %u bytes are not a format-2 descriptor (bad magic/format)\n",
+            fprintf(stderr, "%s: last %u bytes are not a format-2 descriptor (bad magic, format or scheme)\n",
                     new_path, CHUNKY_SIGNED_DESCRIPTOR_LEN);
             goto done;
         }
@@ -525,7 +536,7 @@ static int cmd_gen(int argc, char **argv) {
         put_u32(out + 5, geometry_id);
         put_u32(out + 9, step_count);
         put_u32(out + 13, body_len);
-        memcpy(out + 17, descriptor, CHUNKY_SIGNED_DESCRIPTOR_LEN);
+        memcpy(out + 17, descriptor.p, CHUNKY_SIGNED_DESCRIPTOR_LEN);
 
         f = fopen(out_path, "wb");
         if (f == NULL) {
