@@ -8,6 +8,12 @@
 
 #ifndef SW_FIXED_LOADS
 #define SW_FIXED_LOADS
+/* a result that must be checked: a warning (an error with -Werror) where it is dropped */
+#if defined(__GNUC__) || defined(__clang__)
+#define SW_NODISCARD __attribute__((warn_unused_result))
+#else
+#define SW_NODISCARD
+#endif
 static inline uint8_t sw_fixed_u8(const uint8_t *p) { return p[0]; }
 static inline uint16_t sw_fixed_u16(const uint8_t *p) { return (uint16_t)((unsigned)p[0] | ((unsigned)p[1] << 8u)); }
 static inline uint32_t sw_fixed_u32(const uint8_t *p) {
@@ -58,190 +64,424 @@ static inline const uint8_t *sw_ht_take(const uint8_t **t, const uint8_t *end, s
     *t = at + n;
     return at;
 }
+/* the next count items of size bytes each: sw_ht_take of count * size, refused before the product could wrap
+   (a 16-bit size_t) */
+static inline const uint8_t *sw_ht_take_items(const uint8_t **t, const uint8_t *end, size_t count, size_t size) {
+    if (*t == NULL || (size != 0u && count > (size_t)(end - *t) / size)) {
+        return NULL;
+    }
+    return sw_ht_take(t, end, count * size);
+}
 #endif
 
 /* Scheme: a 1-byte tag, then the fields of its variant */
 #define CHUNKY_SCHEME_TAG_LEN 1u
-static inline uint8_t chunky_scheme_tag(const uint8_t *p) { return sw_fixed_u8(p); }
+/* a checked view of a Scheme: made by chunky_scheme_view(), the only way to read one; len bytes at p */
+typedef struct { const uint8_t *p; size_t len; } chunky_scheme_view_t;
+static inline uint8_t chunky_scheme_tag(chunky_scheme_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u8(v.p); }
+/* checks that the len bytes at buf start with a Scheme of a known tag and makes *v its view (v->len: its length); 0, or -1 (*v empty) when they are too short or malformed */
+SW_NODISCARD static inline int chunky_scheme_view(const uint8_t *buf, size_t len, chunky_scheme_view_t *v) {
+    size_t n;
+    v->p = NULL;
+    v->len = 0u;
+    if (buf == NULL || len < 1u) { return -1; }
+    switch (sw_fixed_u8(buf)) {
+    case 1u:
+        n = 1u;
+        if (len < n) { return -1; }
+        break;
+    case 2u:
+        n = 1u;
+        if (len < n) { return -1; }
+        break;
+    default:
+        return -1;
+    }
+    v->p = buf;
+    v->len = n;
+    return 0;
+}
 #define CHUNKY_SCHEME_ED25519 1u
 #define CHUNKY_SCHEME_ED25519_LEN 1u
 #define CHUNKY_SCHEME_UNSIGNED 2u
 #define CHUNKY_SCHEME_UNSIGNED_LEN 1u
-/* length of the value with this tag before a variable last field (the whole value when there is none), 0 for an unknown tag */
-static inline size_t chunky_scheme_len(uint32_t tag) {
-    switch (tag) {
-    case 1u: return 1u;
-    case 2u: return 1u;
-    default: return 0u;
-    }
-}
 
 /* DescriptorBody: 64 to 64 bytes */
 #define CHUNKY_DESCRIPTOR_BODY_LEN 64u
 #define CHUNKY_DESCRIPTOR_BODY_MIN_LEN 64u
+/* a checked view of a DescriptorBody: made by chunky_descriptor_body_view(), the only way to read one; len bytes at p */
+typedef struct { const uint8_t *p; size_t len; } chunky_descriptor_body_view_t;
+/* checks that the len bytes at buf start with a DescriptorBody and makes *v its view (v->len: its length); 0, or -1 (*v empty) when they are too short or malformed */
+SW_NODISCARD static inline int chunky_descriptor_body_view(const uint8_t *buf, size_t len, chunky_descriptor_body_view_t *v) {
+    size_t n;
+    v->p = NULL;
+    v->len = 0u;
+    if (buf == NULL) { return -1; }
+    n = 64u;
+    if (len < n) { return -1; }
+    { chunky_scheme_view_t nv; if (chunky_scheme_view(buf + 5u, 1u, &nv) != 0) { return -1; } }
+    v->p = buf;
+    v->len = n;
+    return 0;
+}
 #define CHUNKY_DESCRIPTOR_BODY_MAGIC_OFFSET 0u
-static inline const uint8_t *chunky_descriptor_body_magic(const uint8_t *p) { return p + 0u; }
+static inline const uint8_t *chunky_descriptor_body_magic(chunky_descriptor_body_view_t v) { return v.p == NULL ? NULL : v.p + 0u; }
 #define CHUNKY_DESCRIPTOR_BODY_MAGIC_COUNT 4u
 #define CHUNKY_DESCRIPTOR_BODY_FORMAT_OFFSET 4u
-static inline uint8_t chunky_descriptor_body_format(const uint8_t *p) { return sw_fixed_u8(p + 4u); }
+static inline uint8_t chunky_descriptor_body_format(chunky_descriptor_body_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u8(v.p + 4u); }
 #define CHUNKY_DESCRIPTOR_BODY_SCHEME_OFFSET 5u
-static inline const uint8_t *chunky_descriptor_body_scheme(const uint8_t *p) { return p + 5u; }
+static inline chunky_scheme_view_t chunky_descriptor_body_scheme(chunky_descriptor_body_view_t v) {
+    chunky_scheme_view_t r;
+    if (v.p == NULL) { r.p = NULL; r.len = 0u; return r; }
+    r.p = v.p + 5u;
+    r.len = 1u;
+    return r;
+}
 #define CHUNKY_DESCRIPTOR_BODY_RESERVED_OFFSET 6u
-static inline const uint8_t *chunky_descriptor_body_reserved(const uint8_t *p) { return p + 6u; }
+static inline const uint8_t *chunky_descriptor_body_reserved(chunky_descriptor_body_view_t v) { return v.p == NULL ? NULL : v.p + 6u; }
 #define CHUNKY_DESCRIPTOR_BODY_RESERVED_COUNT 2u
 #define CHUNKY_DESCRIPTOR_BODY_PRODUCT_ID_OFFSET 8u
-static inline uint32_t chunky_descriptor_body_product_id(const uint8_t *p) { return sw_fixed_u32(p + 8u); }
+static inline uint32_t chunky_descriptor_body_product_id(chunky_descriptor_body_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 8u); }
 #define CHUNKY_DESCRIPTOR_BODY_VERSION_OFFSET 12u
-static inline uint32_t chunky_descriptor_body_version(const uint8_t *p) { return sw_fixed_u32(p + 12u); }
+static inline uint32_t chunky_descriptor_body_version(chunky_descriptor_body_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 12u); }
 #define CHUNKY_DESCRIPTOR_BODY_SECURITY_COUNTER_OFFSET 16u
-static inline uint32_t chunky_descriptor_body_security_counter(const uint8_t *p) { return sw_fixed_u32(p + 16u); }
+static inline uint32_t chunky_descriptor_body_security_counter(chunky_descriptor_body_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 16u); }
 #define CHUNKY_DESCRIPTOR_BODY_IMAGE_LEN_OFFSET 20u
-static inline uint32_t chunky_descriptor_body_image_len(const uint8_t *p) { return sw_fixed_u32(p + 20u); }
+static inline uint32_t chunky_descriptor_body_image_len(chunky_descriptor_body_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 20u); }
 #define CHUNKY_DESCRIPTOR_BODY_GEOMETRY_ID_OFFSET 24u
-static inline uint32_t chunky_descriptor_body_geometry_id(const uint8_t *p) { return sw_fixed_u32(p + 24u); }
+static inline uint32_t chunky_descriptor_body_geometry_id(chunky_descriptor_body_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 24u); }
 #define CHUNKY_DESCRIPTOR_BODY_IMAGE_SHA256_OFFSET 28u
-static inline const uint8_t *chunky_descriptor_body_image_sha256(const uint8_t *p) { return p + 28u; }
+static inline const uint8_t *chunky_descriptor_body_image_sha256(chunky_descriptor_body_view_t v) { return v.p == NULL ? NULL : v.p + 28u; }
 #define CHUNKY_DESCRIPTOR_BODY_IMAGE_SHA256_COUNT 32u
 #define CHUNKY_DESCRIPTOR_BODY_RESERVED_END_OFFSET 60u
-static inline const uint8_t *chunky_descriptor_body_reserved_end(const uint8_t *p) { return p + 60u; }
+static inline const uint8_t *chunky_descriptor_body_reserved_end(chunky_descriptor_body_view_t v) { return v.p == NULL ? NULL : v.p + 60u; }
 #define CHUNKY_DESCRIPTOR_BODY_RESERVED_END_COUNT 4u
 
 /* SignedDescriptor: 128 to 128 bytes */
 #define CHUNKY_SIGNED_DESCRIPTOR_LEN 128u
 #define CHUNKY_SIGNED_DESCRIPTOR_MIN_LEN 128u
+/* a checked view of a SignedDescriptor: made by chunky_signed_descriptor_view(), the only way to read one; len bytes at p */
+typedef struct { const uint8_t *p; size_t len; } chunky_signed_descriptor_view_t;
+/* checks that the len bytes at buf start with a SignedDescriptor and makes *v its view (v->len: its length); 0, or -1 (*v empty) when they are too short or malformed */
+SW_NODISCARD static inline int chunky_signed_descriptor_view(const uint8_t *buf, size_t len, chunky_signed_descriptor_view_t *v) {
+    size_t n;
+    v->p = NULL;
+    v->len = 0u;
+    if (buf == NULL) { return -1; }
+    n = 128u;
+    if (len < n) { return -1; }
+    v->p = buf;
+    v->len = n;
+    return 0;
+}
 #define CHUNKY_SIGNED_DESCRIPTOR_BODY_OFFSET 0u
-static inline const uint8_t *chunky_signed_descriptor_body(const uint8_t *p) { return p + 0u; }
+static inline const uint8_t *chunky_signed_descriptor_body(chunky_signed_descriptor_view_t v) { return v.p == NULL ? NULL : v.p + 0u; }
 #define CHUNKY_SIGNED_DESCRIPTOR_BODY_COUNT 64u
 #define CHUNKY_SIGNED_DESCRIPTOR_SEAL_OFFSET 64u
-static inline const uint8_t *chunky_signed_descriptor_seal(const uint8_t *p) { return p + 64u; }
+static inline const uint8_t *chunky_signed_descriptor_seal(chunky_signed_descriptor_view_t v) { return v.p == NULL ? NULL : v.p + 64u; }
 #define CHUNKY_SIGNED_DESCRIPTOR_SEAL_COUNT 64u
 
 /* PlanHeader: 145 to 145 bytes */
 #define CHUNKY_PLAN_HEADER_LEN 145u
 #define CHUNKY_PLAN_HEADER_MIN_LEN 145u
+/* a checked view of a PlanHeader: made by chunky_plan_header_view(), the only way to read one; len bytes at p */
+typedef struct { const uint8_t *p; size_t len; } chunky_plan_header_view_t;
+/* checks that the len bytes at buf start with a PlanHeader and makes *v its view (v->len: its length); 0, or -1 (*v empty) when they are too short or malformed */
+SW_NODISCARD static inline int chunky_plan_header_view(const uint8_t *buf, size_t len, chunky_plan_header_view_t *v) {
+    size_t n;
+    v->p = NULL;
+    v->len = 0u;
+    if (buf == NULL) { return -1; }
+    n = 17u;
+    if (len < n) { return -1; }
+    { chunky_signed_descriptor_view_t nv; if (chunky_signed_descriptor_view(buf + 17u, len - 17u, &nv) != 0) { return -1; } n = 17u + nv.len; }
+    v->p = buf;
+    v->len = n;
+    return 0;
+}
 #define CHUNKY_PLAN_HEADER_MAGIC_OFFSET 0u
-static inline const uint8_t *chunky_plan_header_magic(const uint8_t *p) { return p + 0u; }
+static inline const uint8_t *chunky_plan_header_magic(chunky_plan_header_view_t v) { return v.p == NULL ? NULL : v.p + 0u; }
 #define CHUNKY_PLAN_HEADER_MAGIC_COUNT 4u
 #define CHUNKY_PLAN_HEADER_FORMAT_OFFSET 4u
-static inline uint8_t chunky_plan_header_format(const uint8_t *p) { return sw_fixed_u8(p + 4u); }
+static inline uint8_t chunky_plan_header_format(chunky_plan_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u8(v.p + 4u); }
 #define CHUNKY_PLAN_HEADER_GEOMETRY_ID_OFFSET 5u
-static inline uint32_t chunky_plan_header_geometry_id(const uint8_t *p) { return sw_fixed_u32(p + 5u); }
+static inline uint32_t chunky_plan_header_geometry_id(chunky_plan_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 5u); }
 #define CHUNKY_PLAN_HEADER_STEP_COUNT_OFFSET 9u
-static inline uint32_t chunky_plan_header_step_count(const uint8_t *p) { return sw_fixed_u32(p + 9u); }
+static inline uint32_t chunky_plan_header_step_count(chunky_plan_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 9u); }
 #define CHUNKY_PLAN_HEADER_BODY_LEN_OFFSET 13u
-static inline uint32_t chunky_plan_header_body_len(const uint8_t *p) { return sw_fixed_u32(p + 13u); }
+static inline uint32_t chunky_plan_header_body_len(chunky_plan_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 13u); }
 #define CHUNKY_PLAN_HEADER_DESCRIPTOR_OFFSET 17u
-static inline const uint8_t *chunky_plan_header_descriptor(const uint8_t *p) { return p + 17u; }
+static inline chunky_signed_descriptor_view_t chunky_plan_header_descriptor(chunky_plan_header_view_t v) {
+    chunky_signed_descriptor_view_t r;
+    if (v.p == NULL) { r.p = NULL; r.len = 0u; return r; }
+    r.p = v.p + 17u;
+    r.len = v.len - 17u;
+    return r;
+}
 
 /* Step: a 1-byte tag (the head), then the head and tail of its variant */
 #define CHUNKY_STEP_TAG_LEN 1u
-static inline uint8_t chunky_step_tag(const uint8_t *p) { return sw_fixed_u8(p); }
 #define CHUNKY_STEP_ERASE 1u
 #define CHUNKY_STEP_ERASE_HEAD_LEN 2u
+/* a checked view of a Step::Erase: its head at p, len bytes in all (head and tail), and its variable parts; made by chunky_step_as_erase() */
+typedef struct {
+    const uint8_t *p;
+    size_t len;
+} chunky_step_erase_view_t;
+/* checks the tail of a Step::Erase whose head (already checked) is at h and tail at *t (ending at end), fills *v and moves *t past it; 0, or -1 when the bytes are short or malformed. For the views of the types that hold it */
+SW_NODISCARD static inline int chunky_step_erase__walk(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_step_erase_view_t *v) {
+    const uint8_t *t0 = *t;
+    (void)h;
+    (void)end;
+    v->p = h;
+    v->len = 2u + (size_t)(*t - t0);
+    return 0;
+}
 #define CHUNKY_STEP_ERASE_BLOCK_OFFSET 0u
-static inline uint16_t chunky_step_erase_block(const uint8_t *p) { return sw_fixed_u16(p + 0u); }
+static inline uint16_t chunky_step_erase_block(const chunky_step_erase_view_t *v) { if (v->p == NULL) { return 0; } return sw_fixed_u16(v->p + 0u); }
 #define CHUNKY_STEP_COPY 2u
 #define CHUNKY_STEP_COPY_HEAD_LEN 12u
+/* a checked view of a Step::Copy: its head at p, len bytes in all (head and tail), and its variable parts; made by chunky_step_as_copy() */
+typedef struct {
+    const uint8_t *p;
+    size_t len;
+} chunky_step_copy_view_t;
+/* checks the tail of a Step::Copy whose head (already checked) is at h and tail at *t (ending at end), fills *v and moves *t past it; 0, or -1 when the bytes are short or malformed. For the views of the types that hold it */
+SW_NODISCARD static inline int chunky_step_copy__walk(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_step_copy_view_t *v) {
+    const uint8_t *t0 = *t;
+    (void)h;
+    (void)end;
+    v->p = h;
+    v->len = 12u + (size_t)(*t - t0);
+    return 0;
+}
 #define CHUNKY_STEP_COPY_DST_OFFSET 0u
-static inline uint16_t chunky_step_copy_dst(const uint8_t *p) { return sw_fixed_u16(p + 0u); }
+static inline uint16_t chunky_step_copy_dst(const chunky_step_copy_view_t *v) { if (v->p == NULL) { return 0; } return sw_fixed_u16(v->p + 0u); }
 #define CHUNKY_STEP_COPY_SRC_OFFSET 2u
-static inline uint16_t chunky_step_copy_src(const uint8_t *p) { return sw_fixed_u16(p + 2u); }
+static inline uint16_t chunky_step_copy_src(const chunky_step_copy_view_t *v) { if (v->p == NULL) { return 0; } return sw_fixed_u16(v->p + 2u); }
 #define CHUNKY_STEP_COPY_HASH_OFFSET 4u
-static inline const uint8_t *chunky_step_copy_hash(const uint8_t *p) { return p + 4u; }
+static inline const uint8_t *chunky_step_copy_hash(const chunky_step_copy_view_t *v) { return v->p == NULL ? NULL : v->p + 4u; }
 #define CHUNKY_STEP_COPY_HASH_COUNT 8u
 #define CHUNKY_STEP_WRITE 3u
 #define CHUNKY_STEP_WRITE_HEAD_LEN 12u
-#define CHUNKY_STEP_WRITE_DST_OFFSET 0u
-static inline uint16_t chunky_step_write_dst(const uint8_t *p) { return sw_fixed_u16(p + 0u); }
-#define CHUNKY_STEP_WRITE_DATA_OFFSET 2u
-static inline uint16_t chunky_step_write_data_count(const uint8_t *p) { return sw_fixed_u16(p + 2u); }
-#define CHUNKY_STEP_WRITE_HASH_OFFSET 4u
-static inline const uint8_t *chunky_step_write_hash(const uint8_t *p) { return p + 4u; }
-#define CHUNKY_STEP_WRITE_HASH_COUNT 8u
+/* a checked view of a Step::Write: its head at p, len bytes in all (head and tail), and its variable parts; made by chunky_step_as_write() */
 typedef struct {
-    const uint8_t *head; /* the head of the variant */
-    const uint8_t *write_data; /* the items */
-} chunky_step_tail_t;
-/* walks the tail of a Step whose tag is at h and tail at *t (ending at end): fills tl and moves *t past it; 0, or -1 when the bytes are short or the tag unknown */
-static inline int chunky_step_tail(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_step_tail_t *tl) {
-    const uint8_t *vh;
-    switch (chunky_step_tag(h)) {
+    const uint8_t *p;
+    size_t len;
+    const uint8_t *data; /* the items */
+} chunky_step_write_view_t;
+/* checks the tail of a Step::Write whose head (already checked) is at h and tail at *t (ending at end), fills *v and moves *t past it; 0, or -1 when the bytes are short or malformed. For the views of the types that hold it */
+SW_NODISCARD static inline int chunky_step_write__walk(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_step_write_view_t *v) {
+    const uint8_t *t0 = *t;
+    (void)h;
+    (void)end;
+    v->data = sw_ht_take_items(t, end, (size_t)sw_fixed_u16(h + 2u), 1u);
+    if (v->data == NULL) { return -1; }
+    v->p = h;
+    v->len = 12u + (size_t)(*t - t0);
+    return 0;
+}
+#define CHUNKY_STEP_WRITE_DST_OFFSET 0u
+static inline uint16_t chunky_step_write_dst(const chunky_step_write_view_t *v) { if (v->p == NULL) { return 0; } return sw_fixed_u16(v->p + 0u); }
+#define CHUNKY_STEP_WRITE_DATA_OFFSET 2u
+static inline uint16_t chunky_step_write_data_count(const chunky_step_write_view_t *v) { if (v->p == NULL) { return 0; } return sw_fixed_u16(v->p + 2u); }
+static inline const uint8_t *chunky_step_write_data(const chunky_step_write_view_t *v) { return v->data; }
+#define CHUNKY_STEP_WRITE_HASH_OFFSET 4u
+static inline const uint8_t *chunky_step_write_hash(const chunky_step_write_view_t *v) { return v->p == NULL ? NULL : v->p + 4u; }
+#define CHUNKY_STEP_WRITE_HASH_COUNT 8u
+/* a checked view of a Step: its tag at p, len bytes in all, the view of its variant in u; made by chunky_step_view() or by the view of the value that holds it */
+typedef struct {
+    const uint8_t *p;
+    size_t len;
+    union {
+        char none; /* for variants without fields */
+        chunky_step_erase_view_t erase;
+        chunky_step_copy_view_t copy;
+        chunky_step_write_view_t write;
+    } u;
+} chunky_step_view_t;
+static inline uint8_t chunky_step_tag(const chunky_step_view_t *v) { if (v->p == NULL) { return 0; } return sw_fixed_u8(v->p); }
+/* makes *out the view of v's Erase variant and returns 0, or returns -1 (*out an empty view) for another tag */
+SW_NODISCARD static inline int chunky_step_as_erase(const chunky_step_view_t *v, const chunky_step_erase_view_t **out) {
+    static const chunky_step_erase_view_t empty;
+    if (v->p == NULL || chunky_step_tag(v) != 1u) { *out = &empty; return -1; }
+    *out = &v->u.erase;
+    return 0;
+}
+/* makes *out the view of v's Copy variant and returns 0, or returns -1 (*out an empty view) for another tag */
+SW_NODISCARD static inline int chunky_step_as_copy(const chunky_step_view_t *v, const chunky_step_copy_view_t **out) {
+    static const chunky_step_copy_view_t empty;
+    if (v->p == NULL || chunky_step_tag(v) != 2u) { *out = &empty; return -1; }
+    *out = &v->u.copy;
+    return 0;
+}
+/* makes *out the view of v's Write variant and returns 0, or returns -1 (*out an empty view) for another tag */
+SW_NODISCARD static inline int chunky_step_as_write(const chunky_step_view_t *v, const chunky_step_write_view_t **out) {
+    static const chunky_step_write_view_t empty;
+    if (v->p == NULL || chunky_step_tag(v) != 3u) { *out = &empty; return -1; }
+    *out = &v->u.write;
+    return 0;
+}
+/* checks the variant of a Step whose tag (already checked) is at h, and its tail at *t (ending at end), fills *v and moves *t past it; 0, or -1 when the bytes are short or the tag unknown. For the views of the types that hold it */
+SW_NODISCARD static inline int chunky_step__walk(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_step_view_t *v) {
+    const uint8_t *t0 = *t;
+    switch (sw_fixed_u8(h)) {
     case 1u:
-        vh = sw_ht_take(t, end, 2u);
-        if (vh == NULL) { return -1; }
-        tl->head = vh;
-        return 0;
+        {
+            const uint8_t *vh = sw_ht_take(t, end, 2u);
+            if (vh == NULL) { return -1; }
+            if (chunky_step_erase__walk(vh, t, end, &v->u.erase) != 0) { return -1; }
+        }
+        break;
     case 2u:
-        vh = sw_ht_take(t, end, 12u);
-        if (vh == NULL) { return -1; }
-        tl->head = vh;
-        return 0;
+        {
+            const uint8_t *vh = sw_ht_take(t, end, 12u);
+            if (vh == NULL) { return -1; }
+            if (chunky_step_copy__walk(vh, t, end, &v->u.copy) != 0) { return -1; }
+        }
+        break;
     case 3u:
-        vh = sw_ht_take(t, end, 12u);
-        if (vh == NULL) { return -1; }
-        tl->head = vh;
-    tl->write_data = sw_ht_take(t, end, (size_t)chunky_step_write_data_count(vh) * 1u);
-    if (tl->write_data == NULL) { return -1; }
-        return 0;
+        {
+            const uint8_t *vh = sw_ht_take(t, end, 12u);
+            if (vh == NULL) { return -1; }
+            if (chunky_step_write__walk(vh, t, end, &v->u.write) != 0) { return -1; }
+        }
+        break;
     default:
         return -1;
     }
+    v->p = h;
+    v->len = 1u + (size_t)(*t - t0);
+    return 0;
+}
+/* checks that the len bytes at buf start with a Step of a known tag and makes *v its view (v->len: its length); 0, or -1 (*v zeroed) when they are too short or malformed */
+SW_NODISCARD static inline int chunky_step_view(const uint8_t *buf, size_t len, chunky_step_view_t *v) {
+    const uint8_t *t;
+    memset(v, 0, sizeof *v);
+    if (buf == NULL || len < 1u) { return -1; }
+    t = buf + 1u;
+    if (chunky_step__walk(buf, &t, buf + len, v) != 0) {
+        memset(v, 0, sizeof *v);
+        return -1;
+    }
+    return 0;
 }
 
 /* ManifestHeader: 13 to 13 bytes */
 #define CHUNKY_MANIFEST_HEADER_LEN 13u
 #define CHUNKY_MANIFEST_HEADER_MIN_LEN 13u
+/* a checked view of a ManifestHeader: made by chunky_manifest_header_view(), the only way to read one; len bytes at p */
+typedef struct { const uint8_t *p; size_t len; } chunky_manifest_header_view_t;
+/* checks that the len bytes at buf start with a ManifestHeader and makes *v its view (v->len: its length); 0, or -1 (*v empty) when they are too short or malformed */
+SW_NODISCARD static inline int chunky_manifest_header_view(const uint8_t *buf, size_t len, chunky_manifest_header_view_t *v) {
+    size_t n;
+    v->p = NULL;
+    v->len = 0u;
+    if (buf == NULL) { return -1; }
+    n = 13u;
+    if (len < n) { return -1; }
+    { chunky_scheme_view_t nv; if (chunky_scheme_view(buf + 6u, 1u, &nv) != 0) { return -1; } }
+    v->p = buf;
+    v->len = n;
+    return 0;
+}
 #define CHUNKY_MANIFEST_HEADER_MAGIC_OFFSET 0u
-static inline const uint8_t *chunky_manifest_header_magic(const uint8_t *p) { return p + 0u; }
+static inline const uint8_t *chunky_manifest_header_magic(chunky_manifest_header_view_t v) { return v.p == NULL ? NULL : v.p + 0u; }
 #define CHUNKY_MANIFEST_HEADER_MAGIC_COUNT 4u
 #define CHUNKY_MANIFEST_HEADER_FORMAT_OFFSET 4u
-static inline uint8_t chunky_manifest_header_format(const uint8_t *p) { return sw_fixed_u8(p + 4u); }
+static inline uint8_t chunky_manifest_header_format(chunky_manifest_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u8(v.p + 4u); }
 #define CHUNKY_MANIFEST_HEADER_BACKEND_OFFSET 5u
-static inline uint8_t chunky_manifest_header_backend(const uint8_t *p) { return sw_fixed_u8(p + 5u); }
+static inline uint8_t chunky_manifest_header_backend(chunky_manifest_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u8(v.p + 5u); }
 #define CHUNKY_MANIFEST_HEADER_SCHEME_OFFSET 6u
-static inline const uint8_t *chunky_manifest_header_scheme(const uint8_t *p) { return p + 6u; }
+static inline chunky_scheme_view_t chunky_manifest_header_scheme(chunky_manifest_header_view_t v) {
+    chunky_scheme_view_t r;
+    if (v.p == NULL) { r.p = NULL; r.len = 0u; return r; }
+    r.p = v.p + 6u;
+    r.len = 1u;
+    return r;
+}
 #define CHUNKY_MANIFEST_HEADER_GEOMETRY_ID_OFFSET 7u
-static inline uint32_t chunky_manifest_header_geometry_id(const uint8_t *p) { return sw_fixed_u32(p + 7u); }
+static inline uint32_t chunky_manifest_header_geometry_id(chunky_manifest_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u32(v.p + 7u); }
 #define CHUNKY_MANIFEST_HEADER_CHUNKS_OFFSET 11u
-static inline uint16_t chunky_manifest_header_chunks(const uint8_t *p) { return sw_fixed_u16(p + 11u); }
+static inline uint16_t chunky_manifest_header_chunks(chunky_manifest_header_view_t v) { if (v.p == NULL) { return 0; } return sw_fixed_u16(v.p + 11u); }
 
 /* ChunkEntry: a 1-byte tag (the head), then the head and tail of its variant */
 #define CHUNKY_CHUNK_ENTRY_TAG_LEN 1u
-static inline uint8_t chunky_chunk_entry_tag(const uint8_t *p) { return sw_fixed_u8(p); }
 #define CHUNKY_CHUNK_ENTRY_HASH 0u
 #define CHUNKY_CHUNK_ENTRY_HASH_HEAD_LEN 8u
+/* a checked view of a ChunkEntry::Hash: its head at p, len bytes in all (head and tail), and its variable parts; made by chunky_chunk_entry_as_hash() */
+typedef struct {
+    const uint8_t *p;
+    size_t len;
+} chunky_chunk_entry_hash_view_t;
+/* checks the tail of a ChunkEntry::Hash whose head (already checked) is at h and tail at *t (ending at end), fills *v and moves *t past it; 0, or -1 when the bytes are short or malformed. For the views of the types that hold it */
+SW_NODISCARD static inline int chunky_chunk_entry_hash__walk(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_chunk_entry_hash_view_t *v) {
+    const uint8_t *t0 = *t;
+    (void)h;
+    (void)end;
+    v->p = h;
+    v->len = 8u + (size_t)(*t - t0);
+    return 0;
+}
 #define CHUNKY_CHUNK_ENTRY_HASH_HASH_OFFSET 0u
-static inline const uint8_t *chunky_chunk_entry_hash_hash(const uint8_t *p) { return p + 0u; }
+static inline const uint8_t *chunky_chunk_entry_hash_hash(const chunky_chunk_entry_hash_view_t *v) { return v->p == NULL ? NULL : v->p + 0u; }
 #define CHUNKY_CHUNK_ENTRY_HASH_HASH_COUNT 8u
 #define CHUNKY_CHUNK_ENTRY_BLANK 1u
 #define CHUNKY_CHUNK_ENTRY_BLANK_HEAD_LEN 0u
 #define CHUNKY_CHUNK_ENTRY_UNREADABLE 2u
 #define CHUNKY_CHUNK_ENTRY_UNREADABLE_HEAD_LEN 0u
+/* a checked view of a ChunkEntry: its tag at p, len bytes in all, the view of its variant in u; made by chunky_chunk_entry_view() or by the view of the value that holds it */
 typedef struct {
-    const uint8_t *head; /* the head of the variant */
-} chunky_chunk_entry_tail_t;
-/* walks the tail of a ChunkEntry whose tag is at h and tail at *t (ending at end): fills tl and moves *t past it; 0, or -1 when the bytes are short or the tag unknown */
-static inline int chunky_chunk_entry_tail(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_chunk_entry_tail_t *tl) {
-    const uint8_t *vh;
-    switch (chunky_chunk_entry_tag(h)) {
+    const uint8_t *p;
+    size_t len;
+    union {
+        char none; /* for variants without fields */
+        chunky_chunk_entry_hash_view_t hash;
+    } u;
+} chunky_chunk_entry_view_t;
+static inline uint8_t chunky_chunk_entry_tag(const chunky_chunk_entry_view_t *v) { if (v->p == NULL) { return 0; } return sw_fixed_u8(v->p); }
+/* makes *out the view of v's Hash variant and returns 0, or returns -1 (*out an empty view) for another tag */
+SW_NODISCARD static inline int chunky_chunk_entry_as_hash(const chunky_chunk_entry_view_t *v, const chunky_chunk_entry_hash_view_t **out) {
+    static const chunky_chunk_entry_hash_view_t empty;
+    if (v->p == NULL || chunky_chunk_entry_tag(v) != 0u) { *out = &empty; return -1; }
+    *out = &v->u.hash;
+    return 0;
+}
+/* checks the variant of a ChunkEntry whose tag (already checked) is at h, and its tail at *t (ending at end), fills *v and moves *t past it; 0, or -1 when the bytes are short or the tag unknown. For the views of the types that hold it */
+SW_NODISCARD static inline int chunky_chunk_entry__walk(const uint8_t *h, const uint8_t **t, const uint8_t *end, chunky_chunk_entry_view_t *v) {
+    const uint8_t *t0 = *t;
+    switch (sw_fixed_u8(h)) {
     case 0u:
-        vh = sw_ht_take(t, end, 8u);
-        if (vh == NULL) { return -1; }
-        tl->head = vh;
-        return 0;
+        {
+            const uint8_t *vh = sw_ht_take(t, end, 8u);
+            if (vh == NULL) { return -1; }
+            if (chunky_chunk_entry_hash__walk(vh, t, end, &v->u.hash) != 0) { return -1; }
+        }
+        break;
     case 1u:
-        vh = sw_ht_take(t, end, 0u);
-        if (vh == NULL) { return -1; }
-        tl->head = vh;
-        return 0;
+        if (sw_ht_take(t, end, 0u) == NULL) { return -1; }
+        break;
     case 2u:
-        vh = sw_ht_take(t, end, 0u);
-        if (vh == NULL) { return -1; }
-        tl->head = vh;
-        return 0;
+        if (sw_ht_take(t, end, 0u) == NULL) { return -1; }
+        break;
     default:
         return -1;
     }
+    v->p = h;
+    v->len = 1u + (size_t)(*t - t0);
+    return 0;
+}
+/* checks that the len bytes at buf start with a ChunkEntry of a known tag and makes *v its view (v->len: its length); 0, or -1 (*v zeroed) when they are too short or malformed */
+SW_NODISCARD static inline int chunky_chunk_entry_view(const uint8_t *buf, size_t len, chunky_chunk_entry_view_t *v) {
+    const uint8_t *t;
+    memset(v, 0, sizeof *v);
+    if (buf == NULL || len < 1u) { return -1; }
+    t = buf + 1u;
+    if (chunky_chunk_entry__walk(buf, &t, buf + len, v) != 0) {
+        memset(v, 0, sizeof *v);
+        return -1;
+    }
+    return 0;
 }
 
 #endif /* CHUNKY_FORMAT_H */
