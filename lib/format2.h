@@ -3,13 +3,16 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "chunky_format.h"
+
 /* An independent reader/verifier for chunky's "format 2" wire contract:
  * SPEC.md (vendored at the repo root) is the spec in prose; chunky_format.h
  * (rust/chunky_format/c, generated and vendored unmodified from
- * github.com/romixlab/chunky_mcu_updater PR #5) holds the byte-offset
- * accessors this module calls. Section numbers in comments below are
- * SPEC.md's. Per-chunk hashing matches the reference Rust implementation's
- * definition byte for byte (github.com/romixlab/chunky_mcu_updater, main,
+ * github.com/romixlab/chunky_mcu_updater PR #5) holds the length-checked
+ * views and field readers this module calls. Section numbers in comments
+ * below are SPEC.md's. Per-chunk hashing matches the reference Rust
+ * implementation's definition byte for byte
+ * (github.com/romixlab/chunky_mcu_updater, main,
  * chunky/src/hash.rs's ChunkHash::of / chunky/src/apply.rs's Applier::run):
  * confirmed against the vendored golden vectors (every WRITE's carried hash
  * equals the first 8 bytes of SHA-256 of its data, computed independently
@@ -100,13 +103,13 @@ void format2_chunk_hash(const uint8_t *data, size_t len, uint8_t out[FORMAT2_CHU
  * image_len is the device geometry's image_len (SPEC.md section 2:
  * slot_len - 128), the value the descriptor's image length field must equal.
  *
- * On FORMAT2_OK, *descriptor_body (if non-NULL) receives a pointer to the
+ * On FORMAT2_OK, *descriptor_body (if non-NULL) receives the view of the
  * 64 sealed body bytes inside buf, so a caller can read further fields
  * (version, image SHA-256) with chunky_format.h's own accessors. */
 format2_err_t format2_plan_begin(const uint8_t *buf, size_t len,
                                  uint32_t geometry_id, uint32_t product_id,
                                  uint32_t floor, uint32_t image_len,
-                                 const uint8_t **descriptor_body);
+                                 chunky_descriptor_body_view_t *descriptor_body);
 
 /* One decoded step (SPEC.md section 5.2), already checked against its
  * carried hash by the time format2_plan_walk's callback sees it: a WRITE's
@@ -177,7 +180,8 @@ typedef struct {
 
 typedef int (*format2_entry_fn)(void *ctx, const format2_entry_t *entry, uint32_t index);
 
-/* Checks the 13-byte manifest header: magic CKM2, format 2, geometry id.
+/* Checks the 13-byte manifest header: magic CKM2, format 2, a known scheme
+ * (FORMAT2_ESCHEME otherwise, SPEC.md section 3), geometry id.
  * *chunks_out (if non-NULL) receives the header's chunk count; a manifest
  * carries 2 * chunks entries (ACTIVE's, then DFU's, SPEC.md section 7). */
 format2_err_t format2_manifest_begin(const uint8_t *buf, size_t len,

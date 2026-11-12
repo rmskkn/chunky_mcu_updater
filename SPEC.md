@@ -57,7 +57,11 @@ format.
 
 The types are defined once, in `chunky_format` (shrink_wrap `fixed_layout` and `head_tail` types). The C reader
 `rust/chunky_format/c/chunky_format.h` is generated from them and has every offset and length below as a `#define`
-(`CHUNKY_DESCRIPTOR_BODY_PRODUCT_ID_OFFSET`, ...).
+(`CHUNKY_DESCRIPTOR_BODY_PRODUCT_ID_OFFSET`, ...). Its readers take checked views: a field is read through a view,
+made by `chunky_<type>_view(buf, len, &v)` (0 when the `len` bytes hold the whole value, an unknown tag refused)
+or by the reader of a checked view that holds it; `v.len` is the value's length, where the next step or entry
+starts. A step's variant is reached
+with `chunky_step_as_<op>`, which returns -1 for another op.
 
 ## 4. Image descriptor (128 bytes)
 
@@ -420,7 +424,8 @@ manifest.
 them, made by one generator (`chunky_server::vectors` in [romixlab/chunky_mcu_updater](https://github.com/romixlab/chunky_mcu_updater)). `chunky_server/tests/vectors.rs` fails when the files
 differ from what it makes; `chunky_sim/tests/vectors.rs` applies the plans to a simulated device and boots the
 result; `chunky_format/tests/golden.rs` reads them with both Rust readers and `c/test.c` with the C reader
-(`make vectors`, `rust/chunky_format/c/golden.h`).
+(`make vectors`, `rust/chunky_format/c/golden.h`), which also refuses every shorter prefix of each plan, step and
+manifest.
 
 Geometry: STM32G0 rules, erase block 2048, write unit 8, chunk 256, a 4096-byte slot (2 blocks, 16 chunks), swap
 backend; geometry id `0x68b7e201`. Product `0x434b5931`. The device runs `old`; its DFU holds leftovers in block 0

@@ -26,6 +26,7 @@
  * (node:crypto, not format2_chunk_hash) so a bug in format2_chunk_hash
  * itself would not go unnoticed. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "chunky_format.h"
@@ -61,13 +62,14 @@ static int failures;
 
 static void check_plan_begin(const uint8_t *plan, size_t plan_len, uint32_t version,
                              uint32_t counter, format2_err_t want) {
-    const uint8_t *body = NULL;
+    chunky_descriptor_body_view_t body;
     format2_err_t e = format2_plan_begin(plan, plan_len, GOLDEN_SIGNED_GEOMETRY_ID,
                                         GOLDEN_SIGNED_PRODUCT_ID, /* floor */ 0u,
                                         GOLDEN_SIGNED_IMAGE_LEN, &body);
     CHECK_EQ_ERR(e, want);
     if (e == FORMAT2_OK) {
-        CHECK(body != NULL);
+        CHECK(body.p == plan + CHUNKY_PLAN_HEADER_DESCRIPTOR_OFFSET);
+        CHECK(body.len == CHUNKY_DESCRIPTOR_BODY_LEN);
         CHECK(chunky_descriptor_body_version(body) == version);
         CHECK(chunky_descriptor_body_security_counter(body) == counter);
     }
@@ -219,7 +221,7 @@ static void check_manifest(const uint8_t *m, size_t len, const golden_entry_t *e
 
 static void check_negative(void) {
     uint8_t buf[sizeof golden_unsigned_plan];
-    const uint8_t *body;
+    chunky_descriptor_body_view_t body;
     format2_err_t e;
 
     /* unmodified: sanity, must still pass (every mutation below starts from this) */
@@ -282,6 +284,23 @@ static void check_negative(void) {
     e = format2_plan_begin(golden_signed_plan, sizeof golden_signed_plan, GOLDEN_SIGNED_GEOMETRY_ID,
                            GOLDEN_SIGNED_PRODUCT_ID, 0u, GOLDEN_SIGNED_IMAGE_LEN, NULL);
     CHECK_EQ_ERR(e, FORMAT2_ESCHEME_UNSUPPORTED);
+
+    /* descriptor stage 1, scheme: neither Ed25519 nor unsigned (SPEC.md
+     * 4.3 stage 1.3 names it BadFormat; this reader has FORMAT2_ESCHEME
+     * for it); a bad magic or format is still reported first */
+    memcpy(buf, golden_unsigned_plan, sizeof buf);
+    buf[CHUNKY_PLAN_HEADER_DESCRIPTOR_OFFSET + CHUNKY_DESCRIPTOR_BODY_SCHEME_OFFSET] = 3u;
+    e = format2_plan_begin(buf, sizeof buf, GOLDEN_UNSIGNED_GEOMETRY_ID,
+                           GOLDEN_UNSIGNED_PRODUCT_ID, 0u, GOLDEN_UNSIGNED_IMAGE_LEN, NULL);
+    CHECK_EQ_ERR(e, FORMAT2_ESCHEME);
+    buf[CHUNKY_PLAN_HEADER_DESCRIPTOR_OFFSET + CHUNKY_DESCRIPTOR_BODY_FORMAT_OFFSET] = 3u;
+    e = format2_plan_begin(buf, sizeof buf, GOLDEN_UNSIGNED_GEOMETRY_ID,
+                           GOLDEN_UNSIGNED_PRODUCT_ID, 0u, GOLDEN_UNSIGNED_IMAGE_LEN, NULL);
+    CHECK_EQ_ERR(e, FORMAT2_EFORMAT);
+    buf[CHUNKY_PLAN_HEADER_DESCRIPTOR_OFFSET + CHUNKY_DESCRIPTOR_BODY_MAGIC_OFFSET] ^= 0xFFu;
+    e = format2_plan_begin(buf, sizeof buf, GOLDEN_UNSIGNED_GEOMETRY_ID,
+                           GOLDEN_UNSIGNED_PRODUCT_ID, 0u, GOLDEN_UNSIGNED_IMAGE_LEN, NULL);
+    CHECK_EQ_ERR(e, FORMAT2_EMAGIC);
 }
 
 /* ---- negative path: step order (SPEC.md 5.4) ----
@@ -419,7 +438,7 @@ static void check_hash_checks(void) {
 
 static void check_datalen(void) {
     /* count=3 in the head, but chunk_len (the geometry's real chunk size)
-     * is 4: chunky_step_tail still frames it (it trusts the head's own
+     * is 4: chunky_step_view still frames it (it trusts the head's own
      * count field), format2_plan_walk is the one that refuses it. */
     static const uint8_t body[] = {
         3, 0,0, 3,0, 0,0,0,0,0,0,0,0, 0x01,0x02,0x03,
@@ -471,6 +490,141 @@ static void check_range(void) {
     }
 }
 
+static int count_only_entry(void *ctxp, const format2_entry_t *e, uint32_t index) {
+    (void)ctxp;
+    (void)e;
+    (void)index;
+    return 0;
+}
+
+/* ---- the manifest header's refusals: magic, format, scheme, geometry ---- */
+
+static void check_manifest_negative(void) {
+    uint8_t buf[sizeof golden_unsigned_manifest];
+    uint16_t chunks;
+
+    memcpy(buf, golden_unsigned_manifest, sizeof buf);
+    CHECK_EQ_ERR(format2_manifest_begin(buf, sizeof buf, GOLDEN_UNSIGNED_GEOMETRY_ID ^ 1u, &chunks),
+                 FORMAT2_EGEOMETRY);
+    /* an unknown scheme (SPEC.md section 3), and before it magic and format */
+    buf[CHUNKY_MANIFEST_HEADER_SCHEME_OFFSET] = 3u;
+    CHECK_EQ_ERR(format2_manifest_begin(buf, sizeof buf, GOLDEN_UNSIGNED_GEOMETRY_ID, &chunks), FORMAT2_ESCHEME);
+    buf[CHUNKY_MANIFEST_HEADER_FORMAT_OFFSET] = 3u;
+    CHECK_EQ_ERR(format2_manifest_begin(buf, sizeof buf, GOLDEN_UNSIGNED_GEOMETRY_ID, &chunks), FORMAT2_EFORMAT);
+    buf[CHUNKY_MANIFEST_HEADER_MAGIC_OFFSET] ^= 0xFFu;
+    CHECK_EQ_ERR(format2_manifest_begin(buf, sizeof buf, GOLDEN_UNSIGNED_GEOMETRY_ID, &chunks), FORMAT2_EMAGIC);
+    /* an unknown entry tag */
+    memcpy(buf, golden_unsigned_manifest, sizeof buf);
+    buf[CHUNKY_MANIFEST_HEADER_LEN] = 3u;
+    CHECK(format2_manifest_walk(buf, sizeof buf, 2u * GOLDEN_UNSIGNED_CHUNKS, count_only_entry, NULL) ==
+          -(int)FORMAT2_ESTEP);
+}
+
+/* ---- cut short: every prefix of a golden plan and manifest, each in a
+ * buffer of exactly its length (the test runs under ASan, so a read past
+ * it stops the test). ---- */
+
+static uint8_t *exact_copy(const uint8_t *src, size_t len) {
+    uint8_t *b = malloc(len == 0u ? 1u : len);
+    if (b == NULL) {
+        printf("out of memory\n");
+        exit(1);
+    }
+    memcpy(b, src, len);
+    return b;
+}
+
+static void put_u32_le(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8u);
+    p[2] = (uint8_t)(v >> 16u);
+    p[3] = (uint8_t)(v >> 24u);
+}
+
+/* The golden plan without its COPY steps, so it walks to the end with no
+ * ACTIVE: the header (step count and body length made to agree) and the
+ * other steps in order (ERASE block 0, WRITE 0, WRITE 6, WRITE 15, whose
+ * positions still increase). Returns its length, 0 on a failure. */
+static size_t copy_free_plan(const uint8_t *plan, size_t plan_len, uint8_t *out, uint32_t *step_count) {
+    size_t at = CHUNKY_PLAN_HEADER_LEN;
+    size_t o = CHUNKY_PLAN_HEADER_LEN;
+    uint32_t n = 0;
+
+    memcpy(out, plan, CHUNKY_PLAN_HEADER_LEN);
+    while (at < plan_len) {
+        chunky_step_view_t v;
+        if (chunky_step_view(plan + at, plan_len - at, &v) != 0) {
+            return 0u;
+        }
+        if (chunky_step_tag(&v) != CHUNKY_STEP_COPY) {
+            memcpy(out + o, plan + at, v.len);
+            o += v.len;
+            n++;
+        }
+        at += v.len;
+    }
+    put_u32_le(out + CHUNKY_PLAN_HEADER_STEP_COUNT_OFFSET, n);
+    put_u32_le(out + CHUNKY_PLAN_HEADER_BODY_LEN_OFFSET, (uint32_t)(o - CHUNKY_PLAN_HEADER_LEN));
+    *step_count = n;
+    return o;
+}
+
+static void check_short_plan(const uint8_t *plan, size_t plan_len, uint32_t geometry_id, uint32_t product_id,
+                             uint32_t image_len) {
+    uint8_t whole[sizeof golden_unsigned_plan];
+    uint8_t scratch[GOLDEN_CHUNK_LEN];
+    uint32_t steps = 0;
+    size_t whole_len;
+    size_t len;
+
+    /* plan_begin on every prefix of the plan as it is */
+    for (len = 0u; len < plan_len; len++) {
+        uint8_t *b = exact_copy(plan, len);
+        CHECK_EQ_ERR(format2_plan_begin(b, len, geometry_id, product_id, 0u, image_len, NULL),
+                     len < CHUNKY_PLAN_HEADER_LEN ? FORMAT2_ESHORT : FORMAT2_ELENGTH);
+        free(b);
+    }
+
+    /* plan_walk on every prefix of its COPY-free version, the body length
+     * made to agree with the cut: it walks whole, and every cut is a step
+     * that does not parse (or a step count the body runs out before) */
+    CHECK(plan_len <= sizeof whole);
+    whole_len = copy_free_plan(plan, plan_len, whole, &steps);
+    CHECK(whole_len > CHUNKY_PLAN_HEADER_LEN && steps == 4u);
+    if (whole_len == 0u) {
+        return;
+    }
+    CHECK(format2_plan_walk(whole, whole_len, steps, /* blocks */ 2u, GOLDEN_UNSIGNED_CHUNKS, GOLDEN_CHUNK_LEN,
+                            NULL, NULL, scratch, count_only, NULL) == 0);
+    for (len = CHUNKY_PLAN_HEADER_LEN; len < whole_len; len++) {
+        uint8_t *b = exact_copy(whole, len);
+        put_u32_le(b + CHUNKY_PLAN_HEADER_BODY_LEN_OFFSET, (uint32_t)(len - CHUNKY_PLAN_HEADER_LEN));
+        CHECK(format2_plan_walk(b, len, steps, 2u, GOLDEN_UNSIGNED_CHUNKS, GOLDEN_CHUNK_LEN, NULL, NULL, scratch,
+                                count_only, NULL) == -(int)FORMAT2_ESTEP);
+        free(b);
+    }
+    for (len = 0u; len < CHUNKY_PLAN_HEADER_LEN; len++) {
+        uint8_t *b = exact_copy(whole, len);
+        CHECK(format2_plan_walk(b, len, steps, 2u, GOLDEN_UNSIGNED_CHUNKS, GOLDEN_CHUNK_LEN, NULL, NULL, scratch,
+                                count_only, NULL) == -(int)FORMAT2_ESHORT);
+        free(b);
+    }
+}
+
+static void check_short_manifest(const uint8_t *m, size_t m_len) {
+    size_t len;
+
+    for (len = 0u; len < m_len; len++) {
+        uint8_t *b = exact_copy(m, len);
+        uint16_t chunks;
+        CHECK_EQ_ERR(format2_manifest_begin(b, len, GOLDEN_UNSIGNED_GEOMETRY_ID, &chunks),
+                     len < CHUNKY_MANIFEST_HEADER_LEN ? FORMAT2_ESHORT : FORMAT2_OK);
+        CHECK(format2_manifest_walk(b, len, 2u * GOLDEN_UNSIGNED_CHUNKS, count_only_entry, NULL) ==
+              -(int)(len < CHUNKY_MANIFEST_HEADER_LEN ? FORMAT2_ESHORT : FORMAT2_ESTEP));
+        free(b);
+    }
+}
+
 int main(void) {
     /* sanity: the derived GOLDEN_CHUNK_LEN really is this fixture's chunk size */
     CHECK((uint32_t)GOLDEN_CHUNK_LEN * GOLDEN_UNSIGNED_CHUNKS == GOLDEN_UNSIGNED_IMAGE_LEN + 128u);
@@ -500,6 +654,13 @@ int main(void) {
     check_hash_checks();
     check_datalen();
     check_range();
+    check_manifest_negative();
+    check_short_plan(golden_signed_plan, sizeof golden_signed_plan, GOLDEN_SIGNED_GEOMETRY_ID,
+                     GOLDEN_SIGNED_PRODUCT_ID, GOLDEN_SIGNED_IMAGE_LEN);
+    check_short_plan(golden_unsigned_plan, sizeof golden_unsigned_plan, GOLDEN_UNSIGNED_GEOMETRY_ID,
+                     GOLDEN_UNSIGNED_PRODUCT_ID, GOLDEN_UNSIGNED_IMAGE_LEN);
+    check_short_manifest(golden_signed_manifest, sizeof golden_signed_manifest);
+    check_short_manifest(golden_unsigned_manifest, sizeof golden_unsigned_manifest);
 
     if (failures != 0) {
         printf("format2_test: %d failures\n", failures);
