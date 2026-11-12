@@ -59,6 +59,11 @@ an exit status. There is no `die()`; don't add one.
   (ASan/UBSan decoder test) and `auth_test.c` (drives the session and the
   bootloader with forged messages; run by `case_auth.sh`); `run_all.sh` /
   `run_matrix.sh` drive them.
+- `SPEC.md`, `rust/` — format 2 in octets, and its Rust types: `rust/chunky_format` (the types, the golden
+  `vectors/`, the generated C reader `c/chunky_format.h` with its stamp, `c/test.c` and the example
+  `c/read_plan.c`) and `rust/chunky_format_gen` (writes and checks the header). Never edit
+  `chunky_format.h` by hand: change the types, `make regen`, commit header and stamp; `make check-regen` and
+  `make rust-test` say when it is stale.
 - `scripts/` — `lab.sh` (manual two-process demo), `run_demo.sh`
   (scripted walkthrough).
 

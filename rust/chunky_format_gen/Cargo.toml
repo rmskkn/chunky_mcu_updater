@@ -1,0 +1,11 @@
+[package]
+name = "chunky_format_gen"
+description = "Writes and checks chunky_format's generated C reader, regenerating it only when its inputs change"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chunky_format.workspace = true
+sha2.workspace = true
