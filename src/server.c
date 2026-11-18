@@ -25,6 +25,7 @@ static const char *opt_image = NULL;   /* the release to serve */
 static const char *opt_cache  = "cache";
 static int opt_port    = 7700;
 static int opt_abort    = 0;   /* test-only: ABORT instead of COMMIT, see --abort-after-plan */
+static const char *opt_hold = NULL;   /* test-only: see --hold-session-end */
 
 static uint8_t dev_key[32], root_key[32];
 
@@ -123,6 +124,13 @@ static void session(plat_io_t *io)
     /* The server's own fault ends this session, not the server: the
      * release may be fixed before the next device connects. */
     if (rc < 0) cli_fail("%s", err.msg);
+    /* Test-only hook (tests/case_server_log_settled.sh): hold the session's
+     * end, after the device has moved on, until the test opens the FIFO for
+     * writing (opening it for reading blocks until then). */
+    if (opt_hold) {
+        FILE *gate = fopen(opt_hold, "r");
+        if (gate) fclose(gate);
+    }
     if (rc > 0) {
         char label[32];
         snprintf(label, sizeof label, "v%u", res.ver);
@@ -141,6 +149,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--image") && i + 1 < argc)  opt_image = argv[++i];
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc)  opt_cache = argv[++i];
         else if (!strcmp(argv[i], "--abort-after-plan"))       opt_abort = 1;
+        else if (!strcmp(argv[i], "--hold-session-end") && i + 1 < argc)
+            opt_hold = argv[++i];
         else { cli_fail("unknown option %s", argv[i]); return 2; }
     }
 
@@ -178,8 +188,17 @@ int main(int argc, char **argv)
     for (;;) {
         plat_io_t *io = plat_io_tcp_accept(srv);
         if (!io) continue;
+        /* Under the tests stdout is a file, so block-buffered, and a
+         * session's last lines (its report) are written after COMMIT, when
+         * the device waits for nothing more. These two flushed lines let a
+         * reader of the log wait for a session to end (tests/common.sh,
+         * server_idle). */
+        printf("server: session start\n");
+        fflush(stdout);
         session(io);
         plat_io_close(io);
+        printf("server: session end\n");
+        fflush(stdout);
     }
     plat_io_close(srv);
     return 0;

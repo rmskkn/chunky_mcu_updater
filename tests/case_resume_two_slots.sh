@@ -30,6 +30,7 @@ for _ in $(seq 50); do grep -q listening "$RUN/server.log" 2>/dev/null && break;
 # Interrupted attempt: sectors land in slot B, the plan is staged, the
 # server aborts before COMMIT, and the device never boots it.
 "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --port "$PORT" --session-only >/dev/null 2>&1
+server_idle
 grep -q "device staged the plan" "$RUN/server.log" || fail "setup" "the interrupted plan was not staged"
 server_stop
 
