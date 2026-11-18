@@ -24,6 +24,7 @@ for _ in $(seq 50); do grep -q listening "$RUN/server.log" 2>/dev/null && break;
 # Session only: the server aborts before COMMIT, so the client never calls
 # bootloader_boot() itself (--boot-only below is the first boot call).
 out="$("$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --port "$PORT" --session-only 2>&1)"
+server_idle
 grep -q "device staged the plan" "$RUN/server.log" || fail "server log" "the plan did not reach PLAN_END and get persisted"
 grep -q "sending ABORT instead of COMMIT" "$RUN/server.log" || fail "server hook" "the test server did not abort before commit"
 
