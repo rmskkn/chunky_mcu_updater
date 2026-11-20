@@ -69,6 +69,17 @@ Run the whole suite across every supported geometry (clean rebuild per entry, re
 bash tests/run_matrix.sh
 ```
 
+## Wire format (rust/, SPEC.md)
+
+```sh
+make vectors                 # C reader (rust/chunky_format/c/chunky_format.h) against the golden vectors
+make example                 # rust/chunky_format/c/read_plan.c on the golden plans; build/read_plan PLAN.bin
+make rust rust-test          # cargo build / test of rust/ (needs cargo)
+make regen                   # regenerate chunky_format.h + stamp after changing the Rust types (skips when unchanged)
+make check-regen             # fails when the committed header is stale
+make hooks                   # optional pre-commit hook running check-regen on commits touching rust/
+```
+
 ## Notes
 
 - `make` has no header-dependency bug to work around: object rules depend on every included header, the `Makefile` itself, and a geometry stamp — a plain `make` after editing any `.h` or the `Makefile` recompiles exactly what's needed.

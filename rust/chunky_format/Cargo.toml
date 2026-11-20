@@ -1,0 +1,14 @@
+[package]
+name = "chunky_format"
+description = "The chunky wire format as shrink_wrap types with a fixed little-endian layout, and a constant-offset reader for minimal bootloaders (no_std)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# ShrinkWrap from the WireWeaver release tag: a fresh clone builds on its own.
+shrink_wrap = { git = "https://github.com/vhrdtech/wire_weaver", rev = "deda93f9c4d02e72c62349c4bbae7c7fa92baa73", default-features = false }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+sha2.workspace = true

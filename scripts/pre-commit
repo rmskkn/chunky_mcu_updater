@@ -1,0 +1,6 @@
+#!/bin/sh
+# Optional pre-commit hook, installed by `make hooks`: refuses a commit while the
+# generated C reader rust/chunky_format/c/chunky_format.h is stale (it checks
+# the working tree). Commits that do not touch rust/ skip it, and need no cargo.
+git diff --cached --quiet -- rust/ && exit 0
+exec make -s check-regen
