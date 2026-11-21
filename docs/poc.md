@@ -222,6 +222,7 @@ the old tail alone (`DESIGN.md` section 10.1).
 ## What a request looks like
 
 ```
+server: session start
 server: HELLO running_version=1 last_result=0
 server: manifest received and verified, 836 B of body
 server: plan v2, 6 steps (98 skipped)
@@ -232,6 +233,7 @@ sectors: 6 of 104 differ; 6 sent, 0 copied on the device, 98 already right
 case                       skip copy write     wire of full   saved B   saved      flash ms
 -------------------------- ---- ---- ----- -------- ------- --------- ------- -------------
 v2                           98    0     6     7992    6.8%    109956   93.2%       181-363
+server: session end
 ```
 
 `wire` is every byte of the session, framing included. `of full` compares it

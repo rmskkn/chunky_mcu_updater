@@ -44,8 +44,13 @@ test_init() {
     mkdir -p "$CACHE"
 }
 
+# The case's own stderr: a failure inside update() still reaches it although
+# callers capture update's output with 2>&1.
+exec 3>&2
+
+# server_start [ARGS...]: ARGS go to cb-server (test hooks).
 server_start() {
-    "$CB_SERVER" --port "$PORT" --image "$IMAGE" --cache "$CACHE" \
+    "$CB_SERVER" --port "$PORT" --image "$IMAGE" --cache "$CACHE" "$@" \
         >"$RUN/server.log" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 50); do
@@ -62,7 +67,33 @@ server_stop() {
     SERVER_PID=
 }
 
-update() { "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --port "$PORT" "$@"; }
+# server_idle: wait until the server has ended every session it started.
+# The device side is done at COMMIT (or ABORT) and does not wait for the
+# server, which writes the rest of that session's log, its report last,
+# after that. A case that reads server.log after a session calls this first;
+# update() does. A client that received any frame was accepted, and the
+# server logs "session start" before it reads HELLO. IDLE_MARK, when a case
+# sets it, names a file created once this has seen a session still open:
+# proof that the caller waited (case_server_log_settled.sh).
+server_idle() {
+    local log="$RUN/server.log"
+    for _ in $(seq 200); do
+        [ "$(grep -c '^server: session start' "$log")" -eq "$(grep -c '^server: session end' "$log")" ] && return 0
+        [ -z "${IDLE_MARK:-}" ] || : >"$IDLE_MARK"
+        if [ -n "${SERVER_PID:-}" ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            fail "server" "the server exited inside a session; see $log" 2>&3
+        fi
+        sleep 0.05
+    done
+    fail "server" "a session did not end within 10 s; see $log" 2>&3
+}
+
+update() {
+    local rc=0
+    "$CB_CLIENT" --flash "$FLASH" --initial "$BASE" --port "$PORT" "$@" || rc=$?
+    server_idle
+    return $rc
+}
 
 # wire_stats TEXT: parses the client's "device: wire tx=.. rx=.. bytes
 # (framing overhead tx=.. rx=.. B over ../.. frames)" line out of TEXT (as
