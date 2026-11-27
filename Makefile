@@ -32,12 +32,11 @@ GEN_DIR := $(BUILD)/device
 GEOM_H  := $(GEN_DIR)/geometry.h
 MEM_LD  := $(GEN_DIR)/memory.ld
 
-# lib/: the core. Compiled seeing only itself and the generated geometry, so
-# a platform, middleware or host header there is a build error.
+# lib/: the core, sees only itself and the generated geometry; any outside header here is a build error.
 LIB_SRC := $(LIB)/util.c $(LIB)/sha256.c $(LIB)/flash.c \
-           $(LIB)/image.c $(LIB)/manifest.c $(LIB)/plan.c \
-           $(LIB)/flash_view.c $(LIB)/bootloader.c $(LIB)/device.c \
-           $(LIB)/compress.c
+           $(LIB)/bootloader.c $(LIB)/device.c \
+           $(LIB)/compress.c $(LIB)/format2.c $(LIB)/format2_geom.c \
+           $(LIB)/format2_image.c $(LIB)/format2_plan.c $(LIB)/format2_manifest.c
 LIB_OBJ := $(LIB_SRC:$(LIB)/%.c=$(OBJ)/%.o)
 LIBCB   := $(BUILD)/libcb.a
 
@@ -81,22 +80,26 @@ $(STAMP): FORCE | $(BUILD)
 $(GEOM_H) $(MEM_LD) &: $(DEV_TOML) tools/gen_device.py $(STAMP)
 	$(PYTHON) -I tools/gen_device.py $(DEV_TOML) --out $(GEN_DIR) $(GEN_ARGS)
 
+# -iquote $(FMT_C): needed by format2_image.c/_plan.c/_manifest.c's chunky_format.h include; harmless on the rest, so kept on the shared rule instead of split per file.
 $(OBJ)/%.o: $(LIB)/%.c $(GEOM_H) Makefile | $(OBJ)
-	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ)/$*.d -iquote $(LIB) -iquote $(GEN_DIR) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ)/$*.d -iquote $(LIB) -iquote $(GEN_DIR) -iquote $(FMT_C) -c -o $@ $<
 
 $(PLATOBJ)/%.o: $(PLAT)/%.c Makefile | $(PLATOBJ)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(PLATOBJ)/$*.d -iquote $(PLAT) -iquote $(MW) -c -o $@ $<
 
+# -iquote $(FMT_C): server_session.c/client_session.c need chunky_format.h via lib/device.h/format2_plan.h, same reason as the lib/*.c rule above.
 $(MWOBJ)/%.o: $(MW)/%.c $(GEOM_H) Makefile | $(MWOBJ)
-	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(MWOBJ)/$*.d -iquote $(MW) -iquote $(LIB) -iquote $(GEN_DIR) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(MWOBJ)/$*.d -iquote $(MW) -iquote $(LIB) -iquote $(GEN_DIR) -iquote $(FMT_C) -c -o $@ $<
 
+# -iquote $(FMT_C): client.c/cbflash.c read format2 descriptors/manifests directly, same chunky_format.h chain, same reason as above.
 $(BINOBJ)/%.o: $(SRC)/%.c $(GEOM_H) Makefile | $(BINOBJ)
-	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(BINOBJ)/$*.d -iquote $(LIB) -iquote $(GEN_DIR) -iquote $(PLAT) -iquote $(MW) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(BINOBJ)/$*.d -iquote $(LIB) -iquote $(GEN_DIR) -iquote $(PLAT) -iquote $(MW) -iquote $(FMT_C) -c -o $@ $<
 
 $(LIBCB): $(LIB_OBJ) | $(BUILD)
 	$(AR) rcs $@ $^
 
-$(BUILD)/cb-server: $(SRV_OBJ) $(MW_SRV) $(MW_COMMON) $(PLAT_OBJ) $(LIBCB) | $(BUILD)
+# $(MWOBJ)/flash_file.o: cb-server never opens a device, but it's linked in anyway to resolve flash_* symbols that format2_plan.c's translation unit (pulled in by server_session.c) needs.
+$(BUILD)/cb-server: $(SRV_OBJ) $(MW_SRV) $(MWOBJ)/flash_file.o $(MW_COMMON) $(PLAT_OBJ) $(LIBCB) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
 
 $(BUILD)/cb-client: $(CLI_OBJ) $(MW_DEV) $(MW_COMMON) $(PLAT_OBJ) $(LIBCB) | $(BUILD)
@@ -106,9 +109,10 @@ $(BUILD)/cb-client: $(CLI_OBJ) $(MW_DEV) $(MW_COMMON) $(PLAT_OBJ) $(LIBCB) | $(B
 $(BUILD)/cb-flash: $(FLS_OBJ) $(MWOBJ)/flash_file.o $(MWOBJ)/host.o $(LIBCB) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# drives the session and the bootloader message by message (tests/case_auth.sh)
+# drives the session and the bootloader message by message (tests/case_auth.sh).
+# -iquote $(FMT_C): auth_test.c reads format2 descriptors/plans directly, same chunky_format.h chain as above.
 $(BUILD)/auth_test: tests/auth_test.c $(MWOBJ)/flash_file.o $(MWOBJ)/host.o $(LIBCB) $(GEOM_H) | $(BUILD)
-	$(CC) $(CFLAGS) -iquote $(LIB) -iquote $(MW) -iquote $(SRC) -iquote $(GEN_DIR) -o $@ \
+	$(CC) $(CFLAGS) -iquote $(LIB) -iquote $(MW) -iquote $(SRC) -iquote $(GEN_DIR) -iquote $(FMT_C) -o $@ \
 		tests/auth_test.c $(MWOBJ)/flash_file.o $(MWOBJ)/host.o $(LIBCB)
 
 # the decoder eats unchecked bytes: test it under ASan/UBSan

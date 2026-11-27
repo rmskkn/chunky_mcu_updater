@@ -25,6 +25,7 @@ const char *format2_err_str(format2_err_t e) {
     case FORMAT2_ESOURCE:             return "a COPY's source does not have the hash it names";
     case FORMAT2_ESOURCE_UNREADABLE:  return "a COPY's source is unreadable (ECC fault)";
     case FORMAT2_ENOACTIVE:           return "a COPY step needs ACTIVE and no read_active callback was given";
+    case FORMAT2_EIMAGE:              return "whole-image hash does not match the sealed descriptor";
     default:                          return "unknown format2 error";
     }
 }
@@ -56,10 +57,10 @@ static int all_zero(const uint8_t *p, size_t n) {
  * 64-byte body and 64-byte seal, its view already made by the caller
  * (either inside a plan header, SPEC.md 5.1, or at the end of a flashed
  * image, SPEC.md section 4). image_len is the device geometry's image_len. */
-static format2_err_t check_descriptor(chunky_signed_descriptor_view_t desc,
-                                      uint32_t geometry_id, uint32_t product_id,
-                                      uint32_t floor, uint32_t image_len,
-                                      chunky_descriptor_body_view_t *out_body) {
+format2_err_t format2_descriptor_verify(chunky_signed_descriptor_view_t desc,
+                                        uint32_t geometry_id, uint32_t product_id,
+                                        uint32_t floor, uint32_t image_len,
+                                        chunky_descriptor_body_view_t *out_body) {
     const uint8_t *raw = chunky_signed_descriptor_body(desc);
     const uint8_t *seal = chunky_signed_descriptor_seal(desc);
     chunky_descriptor_body_view_t body;
@@ -154,8 +155,8 @@ format2_err_t format2_plan_begin(const uint8_t *buf, size_t len,
         return FORMAT2_ELENGTH;
     }
 
-    return check_descriptor(chunky_plan_header_descriptor(h), geometry_id, product_id, floor, image_len,
-                            descriptor_body);
+    return format2_descriptor_verify(chunky_plan_header_descriptor(h), geometry_id, product_id, floor, image_len,
+                                     descriptor_body);
 }
 
 int format2_plan_walk(const uint8_t *buf, size_t len, uint32_t step_count,

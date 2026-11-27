@@ -1,14 +1,12 @@
 #include "device.h"
-#include "image.h"
-#include "compress.h"
+#include "format2_image.h"
+#include "chunky_format.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
-/* Session states: which message the session expects next. */
-enum { S_CHALLENGE, S_OFFER, S_OFFER_FULL, S_TABLE, S_PLAN, S_COMMIT, S_DONE };
-
-_Static_assert(SECTORS_SLOT * SECTOR_HASH_LEN <= 0xFFFF, "PLAN_TABLE offsets are u16");
+/* Session states: which message comes next; S_OFFER covers both "nothing offered" and the first PLAN fragment. */
+enum { S_OFFER, S_PLAN, S_COMMIT, S_DONE };
 
 static int fail(device_session_t *s, const char *fmt, ...)
 {
@@ -27,20 +25,18 @@ static void reply(device_session_t *s, uint8_t type, const void *payload, size_t
     (void)s->send(s->send_ctx, type, payload, len);
 }
 
-static void ack(device_session_t *s, uint8_t type, sector_idx_t dst, uint8_t code)
+static void ack(device_session_t *s, uint8_t code)
 {
-    msg_step_ack_t a = { dst, code };
-    reply(s, type, &a, sizeof a);
+    msg2_step_ack_t a = { code };
+    reply(s, code == 0 ? MSG2_STEP_ACK : MSG2_STEP_NAK, &a, sizeof a);
 }
 
-int device_session_start(device_session_t *s, flash_t *f, const uint8_t dev_key[32],
-                         const uint8_t root_key[32], device_send_fn send_fn, void *send_ctx,
-                         log_fn log, void *log_ctx, device_stats_t *stats)
+int device_session_start(device_session_t *s, flash_t *f,
+                          device_send_fn send_fn, void *send_ctx,
+                          log_fn log, void *log_ctx, device_stats_t *stats)
 {
     memset(s, 0, sizeof *s);
     s->f = f;
-    s->dev_key = dev_key;
-    s->root_key = root_key;
     s->send = send_fn;
     s->send_ctx = send_ctx;
     s->log = log;
@@ -55,325 +51,162 @@ int device_session_start(device_session_t *s, flash_t *f, const uint8_t dev_key[
     meta_t m;
     meta_load(f, &m);
     s->active_slot = m.active_slot;
+    s->security_floor = m.security_floor;
 
-    msg_hello_t h;
+    msg2_hello_t h;
     memset(&h, 0, sizeof h);
     memcpy(h.device_id, s->device_id, 16);
-    h.sector_size     = SECTOR_SIZE;
-    h.sectors         = SECTORS_SLOT;
-    h.last_result     = (uint8_t)m.last_result;
-    h.sector_hash_len = SECTOR_HASH_LEN;
-    h.active_slot     = (slot_id_t)s->active_slot;
-    image_desc_t d;
-    image_desc_read(f, s->active_slot, &d);
-    h.running_version = d.magic == IMG_MAGIC ? d.version : 0;
-    if (d.magic == IMG_MAGIC) image_hash_flash(f, s->active_slot, d.image_len, h.running_sha256);
-    reply(s, MSG_HELLO, &h, sizeof h);
-
-    s->state = S_CHALLENGE;
-    return DEV_PENDING;
-}
-
-static int on_challenge(device_session_t *s, const uint8_t *pay, size_t n)
-{
-    msg_challenge_t ch;
-    if (n < sizeof ch) return fail(s, "short CHALLENGE (%zu B)", n);
-    memcpy(&ch, pay, sizeof ch);
+    h.geometry_id = format2_geometry_id();
+    h.product_id  = CB_PRODUCT_ID;
+    h.active_slot = (slot_id_t)s->active_slot;
+    h.last_result = (uint8_t)m.last_result;
+    {
+        /* running_version/running_sha256 stay 0/all-zero if the active slot doesn't hold a verifying image (floor 0: a report, not a gate). */
+        uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+        chunky_descriptor_body_view_t body;
+        if (format2_image_verify_flash(f, s->active_slot, 0u, desc_raw, &body) == FORMAT2_OK) {
+            h.running_version = chunky_descriptor_body_version(body);
+            format2_image_hash_flash(f, s->active_slot, h.running_sha256);
+        }
+    }
+    reply(s, MSG2_HELLO, &h, sizeof h);
 
     double t0 = stats_tick(s->stats);
-    manifest_build(s->f, &s->man);
+    size_t mlen = format2_manifest_build(f, s->active_slot, OTHER_SLOT(s->active_slot),
+                                         s->manifest_buf, sizeof s->manifest_buf);
     s->stats->t_manifest = stats_tick(s->stats) - t0;
-    s->stats->sha_bytes += (size_t)MANIFEST_ENTRIES * SECTOR_SIZE;
-
-    t0 = stats_tick(s->stats);
-    manifest_digest(&s->man, s->auth.manifest_digest);
-    manifest_mac(s->dev_key, s->device_id, ch.nonce, s->auth.manifest_digest, s->auth.mac);
-    s->stats->t_auth = stats_tick(s->stats) - t0;
-    s->stats->sha_bytes += MANIFEST_BODY_LEN;
-    s->stats->ecdsa_ms += ECDSA_SIGN_MS;        /* the real signature, not this HMAC */
-    reply(s, MSG_MANIFEST_DIGEST, &s->auth, sizeof s->auth);
+    if (mlen == 0) return fail(s, "format2: manifest build failed (out_cap too small)");
+    s->stats->sha_bytes += (size_t)2 * (size_t)FORMAT2_CHUNKS * (size_t)FORMAT2_CHUNK_LEN;
+    /* mlen can exceed FRAME_MAX_PAYLOAD, so this fragments like a PLAN body (off:u16, len:u16, PLAN2_FRAG_HDR), closed by MSG2_MANIFEST_END. */
+    {
+        size_t off = 0;
+        const size_t max_body = FRAME_MAX_PAYLOAD - PLAN2_FRAG_HDR;
+        while (off < mlen) {
+            uint8_t frag[FRAME_MAX_PAYLOAD];
+            uint16_t o16 = (uint16_t)off;
+            uint16_t flen = (uint16_t)(mlen - off < max_body ? mlen - off : max_body);
+            memcpy(frag, &o16, 2);
+            memcpy(frag + 2, &flen, 2);
+            memcpy(frag + PLAN2_FRAG_HDR, s->manifest_buf + off, flen);
+            reply(s, MSG2_MANIFEST, frag, PLAN2_FRAG_HDR + flen);
+            off += flen;
+        }
+        reply(s, MSG2_MANIFEST_END, NULL, 0);
+    }
+    log_fmt(s->log, s->log_ctx, "device: HELLO + manifest sent (%zu B)", mlen);
 
     s->state = S_OFFER;
     return DEV_PENDING;
 }
 
-static void send_manifest(device_session_t *s)
+/* Buffers one MSG2_PLAN fragment: off:u16, len:u16, then the bytes (PLAN2_FRAG_HDR, lib/protocol.h). */
+static int on_plan_frag(device_session_t *s, const uint8_t *pay, size_t n)
 {
-    const uint8_t *body = (const uint8_t *)&s->man;
-    for (size_t off = 0; off < MANIFEST_BODY_LEN; off += 256) {
-        uint8_t buf[4 + 256];
-        uint16_t len = (uint16_t)(MANIFEST_BODY_LEN - off < 256 ? MANIFEST_BODY_LEN - off : 256);
-        uint16_t o16 = (uint16_t)off;
-        memcpy(buf, &o16, 2);
-        memcpy(buf + 2, &len, 2);
-        memcpy(buf + 4, body + off, len);
-        reply(s, MSG_MANIFEST, buf, 4 + len);
-    }
-    reply(s, MSG_MANIFEST_END, &s->auth, sizeof s->auth);
-    log_fmt(s->log, s->log_ctx, "device: full manifest sent (%zu B of body)", MANIFEST_BODY_LEN);
-}
-
-/* The server's answer to the manifest: nothing, a rejection, or a plan. */
-static int on_offer(device_session_t *s, int t, const uint8_t *pay, size_t n)
-{
-    if (t == MSG_NO_UPDATE) {
-        log_fmt(s->log, s->log_ctx, "device: no update offered");
-        s->state = S_DONE;
-        return DEV_NO_UPDATE;
-    }
-    if (t == MSG_MANIFEST_REJECT) {
-        log_fmt(s->log, s->log_ctx, "device: manifest rejected, reason %u", n ? pay[0] : 0);
-        s->state = S_DONE;
-        return DEV_NO_UPDATE;
-    }
-    if (t != MSG_PLAN_BEGIN) return fail(s, "protocol: expected PLAN_BEGIN, got %d", t);
-
-    msg_plan_begin_t pb;
-    if (n < sizeof pb) return fail(s, "short PLAN_BEGIN (%zu B)", n);
-    memcpy(&pb, pay, sizeof pb);
-
-    /* pending_slot is always "the slot not currently active," computed from
-     * our own stored active_slot -- never from pb.dest_slot, which is only
-     * cross-checked below (docs/ab_migration.md: "never from anything the
-     * wire sends"). */
-    s->pending_slot = OTHER_SLOT(s->active_slot);
-    if (pb.dest_slot != s->pending_slot)
-        return fail(s, "server's plan targets slot %d, this device's inactive slot is %d",
-                   pb.dest_slot, s->pending_slot);
-    if (!image_len_ok(pb.image_len))
-        return fail(s, "plan image_len %u is not a sector multiple in [%d, %d]",
-                   pb.image_len, CODE_OFF, SLOT_SIZE);
-    if (pb.step_count > pb.image_len / SECTOR_SIZE)
-        return fail(s, "plan has %u steps for a %u-sector image",
-                   pb.step_count, pb.image_len / SECTOR_SIZE);
-    s->n_sectors = (int)(pb.image_len / SECTOR_SIZE);
-
-    /* The release signature, before the first step: the descriptor's other
-     * fields are fixed by the format, so the device rebuilds it whole, and
-     * PLAN_END compares it with what lands in flash. */
-    image_desc_t *d = &s->desc;
-    uint8_t mac[SHA256_LEN];
-    memset(d, 0, sizeof *d);
-    d->magic     = IMG_MAGIC;
-    d->version   = pb.version;
-    d->image_len = pb.image_len;
-    d->flags     = pb.flags;
-    d->revoked   = IMG_NOT_REVOKED;
-    memcpy(d->sha256, pb.image_sha256, SHA256_LEN);
-    memcpy(d->table_root, pb.table_root, SHA256_LEN);
-    memcpy(d->mac, pb.image_mac, SHA256_LEN);
-    image_desc_mac(d, s->root_key, mac);
-    s->stats->ecdsa_ms += ECDSA_VERIFY_MS;
-    if (memcmp(mac, pb.image_mac, SHA256_LEN))
-        return fail(s, "plan's release signature does not verify");
-    if (pb.version < image_version_flash(s->f, s->active_slot) && !(pb.flags & 1))
-        return fail(s, "plan v%u would downgrade the running v%u",
-                   pb.version, image_version_flash(s->f, s->active_slot));
-    log_fmt(s->log, s->log_ctx, "device: plan v%u, %u steps over %d sectors, into slot %c",
-           pb.version, pb.step_count, s->n_sectors, 'A' + s->pending_slot);
-
-    /* Reload rather than meta_init(): a fresh plan is per-cycle scratch, but
-     * active_slot (and, once a plan exists, the attempt log) must survive
-     * every cycle including this one if it never lands -- meta_reset_plan()
-     * clears only the scratch fields. */
-    meta_load(s->f, &s->np);
-    meta_reset_plan(&s->np);
-    s->np.plan_state     = PLAN_STAGING;
-    s->np.pending_slot   = (uint8_t)s->pending_slot;
-    s->np.target_version = pb.version;
-    s->np.step_count     = pb.step_count;
-    s->np.image_len      = pb.image_len;
-    memcpy(s->np.target_sha256, pb.image_sha256, SHA256_LEN);
-    memcpy(s->np.target_mac, pb.image_mac, SHA256_LEN);
-    memset(s->done, 0, sizeof s->done);
-    s->pending_copies = 0;
-    s->table_got = 0;
-    s->desc_seen = 0;
-    s->t0 = stats_tick(s->stats);
-
-    s->state = S_TABLE;
-    return DEV_PENDING;
-}
-
-/* The target's per-sector hashes, straight into the plan's dense
- * target_hash array, then authenticated as a whole against the signed
- * table_root. No step is accepted before that. */
-static int on_table(device_session_t *s, int t, const uint8_t *pay, size_t n)
-{
-    size_t table_len = (size_t)s->n_sectors * SECTOR_HASH_LEN;
-
-    if (t < 0) return fail(s, "link closed before the plan's table was complete");
-    if (t == MSG_PLAN_TABLE) {
-        uint16_t off, len;
-        if (n < TABLE_HDR) return fail(s, "short PLAN_TABLE (%zu B)", n);
-        memcpy(&off, pay, 2);
-        memcpy(&len, pay + 2, 2);
-        if (off != s->table_got || (size_t)off + len > table_len || len > n - TABLE_HDR)
-            return fail(s, "bad PLAN_TABLE fragment");
-        memcpy((uint8_t *)s->np.target_hash + off, pay + TABLE_HDR, len);
-        s->table_got += len;
-        return DEV_PENDING;
-    }
-    if (t != MSG_PLAN_TABLE_END)
-        return fail(s, "protocol: expected the plan's table before any step, got %d", t);
-
-    uint8_t root[SHA256_LEN];
-    image_table_root((const uint8_t *)s->np.target_hash, (size_t)s->n_sectors, root);
-    s->stats->sha_bytes += table_len;
-    if (s->table_got != table_len || memcmp(root, s->desc.table_root, SHA256_LEN))
-        return fail(s, "the plan's table does not match the signed table_root");
+    uint16_t off, len;
+    if (n < PLAN2_FRAG_HDR) return fail(s, "short PLAN fragment (%zu B)", n);
+    memcpy(&off, pay, 2);
+    memcpy(&len, pay + 2, 2);
+    if (off != s->plan_got || (size_t)off + len > sizeof s->plan_buf || len > n - PLAN2_FRAG_HDR)
+        return fail(s, "bad PLAN fragment (off=%u len=%u, have %zu B)", off, len, s->plan_got);
+    memcpy(s->plan_buf + off, pay + PLAN2_FRAG_HDR, len);
+    s->plan_got += len;
     s->state = S_PLAN;
     return DEV_PENDING;
 }
 
-/* Writes the decoded sector to dst once its hash matches the authenticated
- * table's entry. */
-static void stage_sector(device_session_t *s, sector_idx_t dst)
-{
-    const uint8_t *hash = s->np.target_hash[dst];
-    uint8_t got[SECTOR_HASH_LEN], raw[SECTOR_HASH_LEN];
-    image_sector_hash(dst, s->sect, got);
-    if (memcmp(got, hash, SECTOR_HASH_LEN)) {
-        ack(s, MSG_STEP_NAK, dst, NAK_HASH_MISMATCH);
-        log_fmt(s->log, s->log_ctx, "device: sector %u hash mismatch", dst);
-        return;
-    }
-
-    /* The sector may already hold this exact content - a stale manifest
-     * cache or a re-sent step, say. Check before erasing: an erase/program
-     * cycle is real wear and the slow part of this step, a hash is neither.
-     * This compares every byte, which image_sector_hash() does not for the
-     * descriptor sector. */
-    sector_hash(s->sect, raw);
-    flash_sector_hash(s->f, s->pending_slot, dst, got);
-    if (memcmp(got, raw, SECTOR_HASH_LEN)) {
-        if (flash_write_app_sector(s->f, s->pending_slot, s->active_slot, dst, s->sect) < 0) {
-            ack(s, MSG_STEP_NAK, dst, NAK_FLASH_FAIL);
-            log_fmt(s->log, s->log_ctx, "device: sector %u: %s", dst, s->f->err.msg);
-            return;
-        }
-        flash_sector_hash(s->f, s->pending_slot, dst, got);
-    }
-
-    if (memcmp(got, raw, SECTOR_HASH_LEN)) {
-        ack(s, MSG_STEP_NAK, dst, NAK_FLASH_FAIL);
-        return;
-    }
-    s->np.op[dst] = OP_WRITE;
-    s->done[dst] = 1;
-    s->stats->sha_bytes += 2 * SECTOR_SIZE;   /* hash of the buffer and of the sector in flash */
-    ack(s, MSG_STEP_ACK, dst, 0);
-}
-
 static int on_plan_end(device_session_t *s)
 {
-    s->stats->t_stage = stats_tick(s->stats) - s->t0;
+    chunky_descriptor_body_view_t body;
+    chunky_plan_header_view_t h;
+    format2_apply_ctx_t actx;
+    format2_err_t e;
+    uint32_t step_count;
+    int rc;
 
-    /* Whether the descriptor sector was written this session or the planner
-     * found it already in place, what the pending slot now holds must be the
-     * signed descriptor and a sector the table vouches for. */
-    image_desc_t fd;
-    uint8_t h[SECTOR_HASH_LEN];
-    image_desc_read(s->f, s->pending_slot, &fd);
-    image_sector_hash_flash(s->f, s->pending_slot, DESC_SECTOR, h);
-    if (memcmp(&fd, &s->desc, sizeof fd))
-        return fail(s, "the staged descriptor differs from the plan's signed one");
-    if (memcmp(h, s->np.target_hash[DESC_SECTOR], SECTOR_HASH_LEN))
-        return fail(s, "the staged descriptor sector does not match the plan's table");
+    e = format2_plan_begin(s->plan_buf, s->plan_got, format2_geometry_id(), CB_PRODUCT_ID,
+                           s->security_floor, (uint32_t)FORMAT2_IMAGE_LEN, &body);
+    if (e != FORMAT2_OK) {
+        ack(s, (uint8_t)e);
+        return fail(s, "format2: plan refused: %s", format2_err_str(e));
+    }
 
-    /* Persist the plan once, then mark the sectors already in flash.
-     * meta_store() erases the target bank, so it must come first. */
+    /* format2_plan_begin() already confirmed the header is long enough; this view is defensive, not reachable. */
+    if (chunky_plan_header_view(s->plan_buf, s->plan_got, &h) != 0)
+        return fail(s, "format2: plan header too short");
+    step_count = chunky_plan_header_step_count(h);
+
+    s->pending_slot = OTHER_SLOT(s->active_slot);
+    actx.f = s->f;
+    actx.dfu_slot = s->pending_slot;
+    actx.active_slot = s->active_slot;
+
     double t0 = stats_tick(s->stats);
-    if (meta_store(s->f, &s->np) < 0)
-        return fail(s, "persisting the plan: %s", s->f->err.msg);
-    for (int i = 0; i < SECTORS_SLOT; i++)
-        if (s->done[i] && journal_set(s->f, i, JRN_VERIFIED) < 0)
-            return fail(s, "journal: %s", s->f->err.msg);
-    s->stats->t_persist = stats_tick(s->stats) - t0;
+    rc = format2_plan_walk(s->plan_buf, s->plan_got, step_count,
+                           (uint32_t)FORMAT2_BLOCKS, (uint32_t)FORMAT2_CHUNKS,
+                           (uint16_t)FORMAT2_CHUNK_LEN,
+                           format2_read_active, &actx, s->scratch,
+                           format2_apply_step, &actx);
+    s->stats->t_stage = stats_tick(s->stats) - t0;
+    s->stats->sha_bytes += s->plan_got;
+    if (rc != 0) {
+        /* rc == -1 here is always a flash failure, never a format2_err_t: FORMAT2_ESHORT is the only error that negates to -1, and it only fires before any step runs, which the length check above already ruled out. */
+        if (rc == -1) {
+            ack(s, NAK2_FLASH_FAIL);
+            return fail(s, "format2: apply: %s", s->f->err.msg);
+        }
+        ack(s, (uint8_t)(-rc));
+        return fail(s, "format2: plan walk refused: %s", format2_err_str((format2_err_t)(-rc)));
+    }
 
-    msg_plan_ready_t pr = { (uint16_t)s->pending_copies };
-    reply(s, MSG_PLAN_READY, &pr, sizeof pr);
+    /* Stages the outcome into meta_t for lib/bootloader.c's existing PLAN_STAGING->TRIAL transition; op[]/src_slot[]/src_index[]/target_hash[] stay zeroed since format2_plan_walk() above already applied everything live, so the boot-time apply loop has nothing left to do. */
+    double tp0 = stats_tick(s->stats);
+    meta_load(s->f, &s->np);
+    meta_reset_plan(&s->np);
+    s->np.plan_state     = PLAN_STAGING;
+    s->np.pending_slot   = (uint8_t)s->pending_slot;
+    s->np.target_version = chunky_descriptor_body_version(body);
+    s->np.image_len       = chunky_descriptor_body_image_len(body);
+    s->np.step_count      = (uint16_t)step_count;
+    if (meta_store(s->f, &s->np) < 0) {
+        ack(s, NAK2_FLASH_FAIL);
+        return fail(s, "persisting the plan: %s", s->f->err.msg);
+    }
+    s->stats->t_persist = stats_tick(s->stats) - tp0;
+
+    log_fmt(s->log, s->log_ctx, "device: plan v%u, %u steps, applied into slot %c",
+           s->np.target_version, step_count, 'A' + s->pending_slot);
+    ack(s, 0);
 
     s->state = S_COMMIT;
     return DEV_PENDING;
 }
 
-static int on_step(device_session_t *s, int t, const uint8_t *pay, size_t n)
+static int on_offer(device_session_t *s, int t, const uint8_t *pay, size_t n)
 {
-    /* In place, every WRITE so far is already in flash and nothing records
-     * it: the plan is persisted only at PLAN_END. The next request's
-     * manifest describes those sectors as they are now, so the server
-     * re-diffs from them; until then the partition holds a mix. */
-    if (t < 0) return fail(s, "link closed mid-plan; sectors written so far stay as written");
-    if (t == MSG_PLAN_END) return on_plan_end(s);
-
-    /* The descriptor sector is the commit marker: the pending slot stays
-     * without a valid header until it lands, so it is the last step. */
-    if (s->desc_seen)
-        return fail(s, "protocol: message %d after the descriptor sector", t);
-
-    if (t == MSG_STEP_COPY) {
-        msg_step_copy_t c;
-        if (n < sizeof c) return fail(s, "short STEP_COPY (%zu B)", n);
-        memcpy(&c, pay, sizeof c);
-        if (c.dst >= s->n_sectors || c.dst == DESC_SECTOR || c.src_index >= SECTORS_SLOT ||
-            (c.src_slot != SLOT_A && c.src_slot != SLOT_B))
-            return fail(s, "bad sector index dst=%u src_slot=%u src=%u",
-                       c.dst, c.src_slot, c.src_index);
-        /* Recorded only. The bootloader does flash-to-flash copies
-         * (DESIGN.md section 7 step 2). */
-        s->np.op[c.dst]        = OP_COPY;
-        s->np.src_slot[c.dst]  = c.src_slot;
-        s->np.src_index[c.dst] = c.src_index;
-        s->pending_copies++;
-        ack(s, MSG_STEP_ACK, c.dst, 0);
-    } else if (t == MSG_STEP_WRITE) {
-        sector_idx_t dst;
-        uint16_t off, len;
-        if (n < WRITE_HDR) return fail(s, "short STEP_WRITE (%zu B)", n);
-        memcpy(&dst, pay + 0, 2);
-        memcpy(&off, pay + 2, 2);
-        memcpy(&len, pay + 4, 2);
-        if (dst >= s->n_sectors || (size_t)off + len > SECTOR_SIZE || len > n - WRITE_HDR)
-            return fail(s, "bad write fragment");
-        memcpy(s->enc + off, pay + WRITE_HDR, len);
-    } else if (t == MSG_STEP_WRITE_END) {
-        msg_step_write_end_t we;
-        if (n < sizeof we) return fail(s, "short STEP_WRITE_END (%zu B)", n);
-        memcpy(&we, pay, sizeof we);
-        if (we.dst >= s->n_sectors || we.enc_len > SECTOR_SIZE ||
-            (we.compress == COMPRESS_RAW && we.enc_len != SECTOR_SIZE))
-            return fail(s, "bad write end");
-
-        /* The dictionary is dst's current flash content in the pending
-         * slot, which is what our manifest told the server it holds: dst is
-         * written once per plan, and only after this. */
-        flash_read(s->f, slot_base(s->pending_slot) + (size_t)we.dst * SECTOR_SIZE,
-                  s->dict, SECTOR_SIZE);
-        if (decompress_sector(we.compress, s->enc, we.enc_len, s->dict, s->sect) < 0) {
-            ack(s, MSG_STEP_NAK, we.dst, NAK_DECOMPRESS);
-            log_fmt(s->log, s->log_ctx, "device: sector %u does not decompress", we.dst);
-            return DEV_PENDING;
-        }
-        stage_sector(s, we.dst);
-        /* Only a staged descriptor closes the plan; a NAKed one may be resent. */
-        if (we.dst == DESC_SECTOR && s->done[DESC_SECTOR]) s->desc_seen = 1;
-    } else {
-        return fail(s, "protocol: unexpected message %d during plan", t);
+    if (t == MSG2_NO_UPDATE) {
+        log_fmt(s->log, s->log_ctx, "device: no update offered");
+        s->state = S_DONE;
+        return DEV_NO_UPDATE;
     }
-    return DEV_PENDING;
+    if (t != MSG2_PLAN) return fail(s, "protocol: expected PLAN or NO_UPDATE, got %d", t);
+    return on_plan_frag(s, pay, n);
+}
+
+static int on_plan(device_session_t *s, int t, const uint8_t *pay, size_t n)
+{
+    if (t < 0) return fail(s, "link closed before the plan was complete");
+    if (t == MSG2_PLAN) return on_plan_frag(s, pay, n);
+    if (t != MSG2_PLAN_END) return fail(s, "protocol: expected PLAN or PLAN_END, got %d", t);
+    return on_plan_end(s);
 }
 
 static int on_commit(device_session_t *s, int t)
 {
-    if (t == MSG_COMMIT) {
+    if (t == MSG2_COMMIT) {
         if (journal_set(s->f, JRN_ARM_INDEX, 0x0000) < 0)   /* arm: plan is committed */
             return fail(s, "arming the plan: %s", s->f->err.msg);
-        log_fmt(s->log, s->log_ctx,
-                "device: plan armed, %d copies left for the bootloader; reboot to apply",
-                s->pending_copies);
+        log_fmt(s->log, s->log_ctx, "device: plan armed; reboot to trial-boot");
     } else {
-        /* Nothing to unroll in place: the WRITEs are already in flash. */
         log_fmt(s->log, s->log_ctx,
                 "device: no COMMIT, plan left unarmed; its writes are already in flash, "
                 "so the boot discards the plan and the device needs another update");
@@ -385,34 +218,10 @@ static int on_commit(device_session_t *s, int t)
 int device_session_feed(device_session_t *s, int t, const uint8_t *pay, size_t n)
 {
     switch (s->state) {
-    case S_CHALLENGE:
-        if (t < 0) return fail(s, "no CHALLENGE");
-        if (t == MSG_MANIFEST_REJECT) {
-            /* HELLO refused: geometry or hash width differs from the server's. */
-            log_fmt(s->log, s->log_ctx, "device: session refused, reason %u", n ? pay[0] : 0);
-            s->state = S_DONE;
-            return DEV_NO_UPDATE;
-        }
-        if (t != MSG_CHALLENGE) return fail(s, "protocol: expected CHALLENGE, got %d", t);
-        return on_challenge(s, pay, n);
-    case S_OFFER:
-        if (t == MSG_MANIFEST_NEEDED) {
-            send_manifest(s);
-            s->state = S_OFFER_FULL;
-            return DEV_PENDING;
-        }
-        log_fmt(s->log, s->log_ctx, "device: manifest digest accepted, body elided");
-        return on_offer(s, t, pay, n);
-    case S_OFFER_FULL:
-        return on_offer(s, t, pay, n);
-    case S_TABLE:
-        return on_table(s, t, pay, n);
-    case S_PLAN:
-        return on_step(s, t, pay, n);
-    case S_COMMIT:
-        return on_commit(s, t);
-    default:
-        return fail(s, "session already over");
+    case S_OFFER:  return on_offer(s, t, pay, n);
+    case S_PLAN:   return on_plan(s, t, pay, n);
+    case S_COMMIT: return on_commit(s, t);
+    default:        return fail(s, "session already over");
     }
 }
 
@@ -426,6 +235,15 @@ int device_confirm(flash_t *f, log_fn log, void *log_ctx)
 
     log_fmt(log, log_ctx, "device: confirming slot %c (trial boot succeeded)",
            'A' + m.pending_slot);
+
+    /* SPEC.md 12.4: the floor only rises, on confirm, read back from flash, never trusted from the (long-gone) session. Floor 0 is safe here: this image already passed the real floor check at STAGING->TRIAL, which can only be <= today's floor. */
+    uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+    chunky_descriptor_body_view_t body;
+    if (format2_image_verify_flash(f, m.pending_slot, 0u, desc_raw, &body) == FORMAT2_OK) {
+        uint32_t sc = chunky_descriptor_body_security_counter(body);
+        if (sc > m.security_floor) m.security_floor = sc;
+    }
+
     m.active_slot    = m.pending_slot;
     m.pending_slot   = SLOT_NONE;
     m.plan_state     = PLAN_COMMITTED;

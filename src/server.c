@@ -1,14 +1,10 @@
-/* cb-server CLI: argv parsing and the per-session report table. The sender's
- * actual work - diffing a device manifest against the target release and
- * streaming only the sectors that differ - lives in server_session.c;
- * DESIGN.md sections 5-6. */
+/* cb-server CLI: argv parsing and the per-session report line; the sender's actual work lives in server_session.c (SPEC.md; MIGRATION_FORMAT2.md). */
 #include "server_session.h"
 #include "cli.h"
 #include "host.h"
 #include "lz4.h"
 #include "frame.h"
-#include "plan.h"
-#include "keys.h"
+#include "format2_geom.h"
 #include "util.h"
 #include "platform_posix.h"
 #include <stdio.h>
@@ -19,15 +15,11 @@
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
-#include <sys/stat.h>
 
 static const char *opt_image = NULL;   /* the release to serve */
-static const char *opt_cache  = "cache";
 static int opt_port    = 7700;
 static int opt_abort    = 0;   /* test-only: ABORT instead of COMMIT, see --abort-after-plan */
 static const char *opt_hold = NULL;   /* test-only: see --hold-session-end */
-
-static uint8_t dev_key[32], root_key[32];
 
 static void cli_log(void *ctx, const char *line)
 {
@@ -35,83 +27,22 @@ static void cli_log(void *ctx, const char *line)
     puts(line);
 }
 
-/* Wire cost of a raw sector and of a copy step, from frame and message sizes:
- * the raw full-image baseline is exact for any run. */
-#define SECTOR_WIRE  ((SECTOR_SIZE / WRITE_CHUNK) \
-                        * (FRAME_OVERHEAD + WRITE_HDR + WRITE_CHUNK) \
-                      + (FRAME_OVERHEAD + (int)sizeof(msg_step_write_end_t)) \
-                      + (FRAME_OVERHEAD + (int)sizeof(msg_step_ack_t)))
-#define COPY_WIRE    ((FRAME_OVERHEAD + (int)sizeof(msg_step_copy_t)) \
-                      + (FRAME_OVERHEAD + 2))
-
-/* "1-7,9,20-40": sector indices, sorted and run-length folded, so a plan that
- * touches most of the slot stays one readable line. */
-static void sector_list(const plan_t *p, int op, char *out, size_t cap)
-{
-    static int idx[SECTORS_SLOT];
-    int n = 0;
-    size_t used = 0;
-
-    for (int k = 0; k < p->count; k++)
-        if (p->step[k].op == op) idx[n++] = p->step[k].dst;
-    for (int i = 1; i < n; i++)                 /* insertion sort, n <= 52 */
-        for (int j = i; j > 0 && idx[j - 1] > idx[j]; j--) {
-            int t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t;
-        }
-    if (!n) { snprintf(out, cap, "-"); return; }
-
-    for (int i = 0; i < n; ) {
-        int j = i;
-        while (j + 1 < n && idx[j + 1] == idx[j] + 1) j++;
-        int w = (j > i)
-            ? snprintf(out + used, cap - used, "%s%d-%d", used ? "," : "", idx[i], idx[j])
-            : snprintf(out + used, cap - used, "%s%d", used ? "," : "", idx[i]);
-        if (w < 0 || (size_t)w >= cap - used) { snprintf(out + used, cap - used, ",..."); return; }
-        used += (size_t)w;
-        i = j + 1;
-    }
-}
-
-/* One row per update request, so repeated requests build the table up. */
+/* One row per update request. No old-style "of full image" wire-cost comparison (format2 has no per-step COPY/WRITE/ACK messages, SPEC.md 10); server_session_result_t carries step counts and raw wire bytes instead. */
 static void report(const char *label, const server_session_result_t *r)
 {
-    const plan_t *p = &r->plan;
     static int header;
-    double wire = (double)(r->tx_bytes + r->rx_bytes);
-    /* Everything that is not a step is session overhead: manifest, plan
-     * header, closing messages. A full-image transfer pays it too. */
-    double fixed = wire - (double)r->write_wire
-                        - (double)p->n_copy * COPY_WIRE;
-    double full = fixed + (double)r->n_sectors * SECTOR_WIRE;
-
-    /* Copies program the destination as well, so both count as sectors
-     * written, and flash time is what the device spends on them. */
-    int sectors = p->n_copy + p->n_write;
-    char flash[32];
-    snprintf(flash, sizeof flash, "%.0f-%.0f",
-             sectors * flash_sector_timing_ms(0), sectors * flash_sector_timing_ms(1));
-
-    char wl[320], cl[320];
-    sector_list(p, OP_WRITE, wl, sizeof wl);
-    sector_list(p, OP_COPY, cl, sizeof cl);
-    printf("sectors: %d of %d differ; %d sent, %d copied on the device, %d already right\n",
-           p->n_copy + p->n_write, r->n_sectors, p->n_write, p->n_copy, p->n_skip);
-    printf("  sent    %s\n", wl);
-    printf("  copied  %s\n", cl);
-    printf("  encoded %llu B\n", (unsigned long long)r->enc_bytes);
 
     if (!header) {
-        printf("\n%-26s %4s %4s %5s %8s %7s %9s %7s %13s\n",
-               "case", "skip", "copy", "write", "wire", "of full",
-               "saved B", "saved", "flash ms");
-        printf("%-26s %4s %4s %5s %8s %7s %9s %7s %13s\n",
-               "--------------------------", "----", "----", "-----",
-               "--------", "-------", "---------", "-------", "-------------");
+        printf("\n%-10s %6s %6s %6s %6s %10s %10s\n",
+               "case", "erase", "copy", "write", "of", "tx B", "rx B");
+        printf("%-10s %6s %6s %6s %6s %10s %10s\n",
+               "----------", "------", "------", "------", "------",
+               "----------", "----------");
         header = 1;
     }
-    printf("%-26s %4d %4d %5d %8.0f %6.1f%% %9.0f %6.1f%% %13s\n",
-           label, p->n_skip, p->n_copy, p->n_write, wire,
-           100.0 * wire / full, full - wire, 100.0 * (full - wire) / full, flash);
+    printf("%-10s %6d %6d %6d %6d %10llu %10llu\n",
+           label, r->erase, r->copy, r->write, FORMAT2_CHUNKS,
+           (unsigned long long)r->tx_bytes, (unsigned long long)r->rx_bytes);
     fflush(stdout);
 }
 
@@ -119,8 +50,7 @@ static void session(plat_io_t *io)
 {
     server_session_result_t res;
     cb_err_t err;
-    int rc = server_update_session(io, opt_image, opt_cache, dev_key, root_key,
-                                   opt_abort, cli_log, NULL, &res, &err);
+    int rc = server_update_session(io, opt_image, opt_abort, cli_log, NULL, &res, &err);
     /* The server's own fault ends this session, not the server: the
      * release may be fixed before the next device connects. */
     if (rc < 0) cli_fail("%s", err.msg);
@@ -140,17 +70,16 @@ static void session(plat_io_t *io)
 
 int main(int argc, char **argv)
 {
-    poc_dev_key(dev_key);
-    poc_root_key(root_key);
     if (lz4_register() < 0) { cli_fail("cannot register the LZ4 compressors"); return 1; }
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc)        opt_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--image") && i + 1 < argc)  opt_image = argv[++i];
-        else if (!strcmp(argv[i], "--cache") && i + 1 < argc)  opt_cache = argv[++i];
         else if (!strcmp(argv[i], "--abort-after-plan"))       opt_abort = 1;
         else if (!strcmp(argv[i], "--hold-session-end") && i + 1 < argc)
             opt_hold = argv[++i];
+        /* --cache DIR: accepted and ignored; format2 has no manifest-elision cache, but scripts/lab.sh still passes it on every server_start(), so it stays a recognized no-op. */
+        else if (!strcmp(argv[i], "--cache") && i + 1 < argc)  i++;
         else { cli_fail("unknown option %s", argv[i]); return 2; }
     }
 
@@ -164,11 +93,10 @@ int main(int argc, char **argv)
      * otherwise leave it holding the port. */
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 #endif
-    mkdir(opt_cache, 0755);
 
     if (!opt_image) {
         cli_fail("no image to serve\n"
-                 "  usage: cb-server --image FILE [--port N] [--cache DIR]");
+                 "  usage: cb-server --image FILE [--port N]");
         return 2;
     }
 

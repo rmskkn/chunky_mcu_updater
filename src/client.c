@@ -1,22 +1,28 @@
 /* cb-client CLI: argv parsing and the device-time report. The device's
  * actual work - manifest generation, the update session, the bootloader's
  * apply/verify step - lives in lib/device.c, carried over the link by
- * client_session.c; DESIGN.md sections 4, 6, 7, 8. */
+ * client_session.c; SPEC.md, MIGRATION_FORMAT2.md. */
 #include "bootloader.h"
 #include "client_session.h"
+#include "device.h"
 #include "cli.h"
 #include "flash_file.h"
+#include "format2.h"
+#include "format2_geom.h"
+#include "format2_image.h"
+#include "format2_manifest.h"
 #include "host.h"
 #include "lz4.h"
-#include "manifest.h"
-#include "image.h"
-#include "keys.h"
+#include "sha256.h"
 #include "util.h"
 #include "platform_posix.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+
+/* format2_manifest_build()'s own stated bound (lib/format2_manifest.h). */
+#define MANIFEST_BUF_CAP (13u + 2u * (size_t)FORMAT2_CHUNKS * 9u)
 
 static const char *opt_flash = "flash.bin";
 static const char *opt_host  = "127.0.0.1";
@@ -76,11 +82,8 @@ static int cmd_session(void)
 {
     flash_t f;
     cb_err_t err;
-    uint8_t dev_key[32], root_key[32];
-    poc_dev_key(dev_key);
-    poc_root_key(root_key);
 
-    if (device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL, &err) < 0)
+    if (device_open_or_create(&f, opt_flash, opt_initial, cli_log, NULL, &err) < 0)
         return cli_fail("%s", err.msg);
 
     plat_io_t *io = plat_io_tcp_connect(opt_host, opt_port);
@@ -93,8 +96,9 @@ static int cmd_session(void)
                         opt_host, opt_port, strerror(e));
     }
 
+    /* No key params: scheme 2 (unsigned) needs none. */
     double t_start = now_ms();
-    int rc = client_update_session(&f, io, dev_key, root_key, cli_log, NULL, &g_stats, &err);
+    int rc = client_update_session(&f, io, cli_log, NULL, &g_stats, &err);
     double session_ms = now_ms() - t_start;
     if (rc < 0) {
         plat_io_close(io);
@@ -124,14 +128,12 @@ static int cmd_boot(void)
 {
     flash_t f;
     cb_err_t err;
-    uint8_t root_key[32];
-    poc_root_key(root_key);
 
-    if (device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL, &err) < 0)
+    if (device_open_or_create(&f, opt_flash, opt_initial, cli_log, NULL, &err) < 0)
         return cli_fail("%s", err.msg);
 
     double t_start = now_ms();
-    int rc = bootloader_boot(&f, root_key, cli_log, NULL, &g_stats);
+    int rc = bootloader_boot(&f, cli_log, NULL, &g_stats);
     double boot_ms = now_ms() - t_start;
     if (rc < 0) {
         flash_file_close(&f);
@@ -143,10 +145,10 @@ static int cmd_boot(void)
                g_stats.t_apply, flash_timing_ms(f.n_erase, f.prog_bytes, 0),
                flash_timing_ms(f.n_erase, f.prog_bytes, 1));
     if (g_stats.t_verify > 0)
+        /* No ECDSA_VERIFY_MS term: format2 scheme 2 is unsigned, no asymmetric verify cost to model. */
         printf("time: verify     host %8.2f ms   F103 %8.1f ms  "
-               "(image_sha256 + signature)\n", g_stats.t_verify,
-               (double)g_stats.verify_bytes * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0)
-               + ECDSA_VERIFY_MS);
+               "(image_sha256)\n", g_stats.t_verify,
+               (double)g_stats.verify_bytes * CB_FLASH_SHA256_CYC_B / (CB_FLASH_MHZ * 1000.0));
     time_report("boot", boot_ms, &f, &g_stats);
     flash_file_close(&f);
     return 0;
@@ -163,10 +165,8 @@ static int cmd_confirm(void)
     flash_t f;
     cb_err_t err;
     meta_t m;
-    uint8_t root_key[32];
-    poc_root_key(root_key);
 
-    if (device_open_or_create(&f, opt_flash, opt_initial, root_key, cli_log, NULL, &err) < 0)
+    if (device_open_or_create(&f, opt_flash, opt_initial, cli_log, NULL, &err) < 0)
         return cli_fail("%s", err.msg);
     meta_load(&f, &m);
     if (m.plan_state != PLAN_TRIAL) {
@@ -186,14 +186,11 @@ static int cmd_status(void)
 {
     flash_t f;
     meta_t m;
-    manifest_t man;
-    uint8_t d[SHA256_LEN], rk[32];
+    uint8_t d[32];
     char hex[80];
-    const char *why;
 
     cb_err_t err;
-    poc_root_key(rk);
-    if (device_open_or_create(&f, opt_flash, opt_initial, rk, cli_log, NULL, &err) < 0)
+    if (device_open_or_create(&f, opt_flash, opt_initial, cli_log, NULL, &err) < 0)
         return cli_fail("%s", err.msg);
     identity_t id;
     if (identity_get(&f, &id) < 0) {
@@ -204,29 +201,35 @@ static int cmd_status(void)
 
     hexdump_line(id.device_id, 8, hex);
     printf("device_id       %s...\n", hex);
-    printf("meta gen %u  state %s  last_result %u  active slot %c",
-           m.generation, state_name(m.plan_state), m.last_result, 'A' + m.active_slot);
+    printf("meta gen %u  state %s  last_result %u  active slot %c  security floor %u",
+           m.generation, state_name(m.plan_state), m.last_result, 'A' + m.active_slot,
+           m.security_floor);
     if (m.plan_state == PLAN_TRIAL)
         printf("  pending slot %c (%d/%d trial attempts left)",
                'A' + m.pending_slot, m.attempts_left, MAX_TRIES);
     printf("\n");
 
+    /* Floor 0: a report, not a gate; the point is "what version is here and does it verify," not "would it pass staging today." */
     for (int slot = SLOT_A; slot <= SLOT_B; slot++) {
-        image_desc_t desc;
-        uint8_t h[SHA256_LEN];
-        image_desc_read(&f, slot, &desc);
-        image_hash_flash(&f, slot, desc.image_len, h);
-        int ok = image_verify_flash(&f, slot, rk, h, &why);
-        printf("slot %c          %s  version %u  %s\n", 'A' + slot,
-               desc.magic == IMG_MAGIC ? "image   " : "no image",
-               image_version_flash(&f, slot), ok == 0 ? "verified" : why);
+        uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+        chunky_descriptor_body_view_t body;
+        format2_err_t e = format2_image_verify_flash(&f, slot, 0u, desc_raw, &body);
+        if (e == FORMAT2_OK)
+            printf("slot %c          image     version %u  verified\n",
+                   'A' + slot, chunky_descriptor_body_version(body));
+        else
+            printf("slot %c          no image  %s\n", 'A' + slot, format2_err_str(e));
     }
 
-    manifest_build(&f, &man);
-    manifest_digest(&man, d);
-    hexdump_line(d, 8, hex);
-    printf("manifest digest %s...  %d sectors, body %zu B\n",
-           hex, MANIFEST_ENTRIES, MANIFEST_BODY_LEN);
+    {
+        uint8_t mbuf[MANIFEST_BUF_CAP];
+        size_t mlen = format2_manifest_build(&f, m.active_slot, OTHER_SLOT(m.active_slot),
+                                             mbuf, sizeof mbuf);
+        sha256(mbuf, mlen, d);
+        hexdump_line(d, 8, hex);
+        printf("manifest digest %s...  %d chunks, body %zu B\n",
+               hex, (int)(2 * FORMAT2_CHUNKS), mlen);
+    }
     flash_file_close(&f);
     return 0;
 }

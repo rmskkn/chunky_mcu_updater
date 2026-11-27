@@ -1,6 +1,7 @@
 #include "bootloader.h"
-#include "image.h"
-#include "manifest.h"
+#include "format2.h"
+#include "format2_geom.h"
+#include "format2_image.h"
 #include "sha256.h"
 #include "util.h"
 #include <string.h>
@@ -13,12 +14,18 @@ static int boot_flash_fail(flash_t *f, log_fn log, void *log_ctx)
     return -1;
 }
 
+/* Erases format2's trailing descriptor (SPEC.md 4: last 128 B, in the slot's last sector); unlike the old layout, that descriptor isn't at a fixed low offset, so erasing sector 0 no longer invalidates it. */
+static int erase_format2_descriptor(flash_t *f, int slot)
+{
+    size_t off = slot_base(slot) + (size_t)SLOT_SIZE - SECTOR_SIZE;
+    for (int u = 0; u < SECTOR_SIZE / ERASE_SIZE; u++)
+        if (flash_erase_unit(f, (int)(off / ERASE_SIZE) + u) < 0) return -1;
+    return 0;
+}
+
 /* Unroll (DESIGN.md section 8): abandon a plan that never booted -- never
  * armed, a copy source gone stale, or the staged image failing verify.
- * Erasing just sector 0 of the pending slot is enough: the slot header
- * disappears, so it is unmistakably invalid, and the apply invariant means
- * there is nothing else to undo. active_slot is untouched; it was never
- * going to move until a confirm that now never happens. */
+ * Erasing the pending slot's trailing descriptor invalidates the image; active_slot stays untouched until a confirm that now never happens. */
 static int unroll_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx, const char *why)
 {
     int pending = m->pending_slot;
@@ -26,9 +33,7 @@ static int unroll_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx, const c
     /* Only the inactive slot is ever erased: a meta that names anything
      * else is not a plan this bootloader wrote. */
     if (pending == OTHER_SLOT(m->active_slot)) {
-        size_t off = slot_base(pending);
-        for (int u = 0; u < SECTOR_SIZE / ERASE_SIZE; u++)
-            if (flash_erase_unit(f, (int)(off / ERASE_SIZE) + u) < 0) return -1;
+        if (erase_format2_descriptor(f, pending) < 0) return -1;
     }
     m->plan_state    = PLAN_NONE;
     m->pending_slot  = SLOT_NONE;
@@ -40,9 +45,7 @@ static int unroll_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx, const c
 /* Revert (DESIGN.md section 8): a committed-but-broken image, after
  * MAX_TRIES failed trial boots. active_slot is unchanged -- it was never
  * moved, so the image that was running before the update is still there.
- * The pending slot's descriptor is marked REVOKED so it is never retried
- * as-is; it is now simply the inactive slot again, available as the
- * destination of the next plan. */
+ * format2 has no revoked field (SPEC.md 4.1), so the pending descriptor is erased the same way unroll_plan() does, leaving the slot free for the next plan. */
 static int revert_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx)
 {
     int pending = m->pending_slot;
@@ -50,7 +53,7 @@ static int revert_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx)
         log_fmt(log, log_ctx, "boot: reverting after %d failed trial boots; "
                "slot %c revoked, staying on slot %c",
                MAX_TRIES, 'A' + pending, 'A' + m->active_slot);
-        if (image_revoke_flash(f, pending) < 0) return -1;
+        if (erase_format2_descriptor(f, pending) < 0) return -1;
     } else {
         /* Never revoke the running image: a meta naming any other slot is
          * not a plan this bootloader trial-booted. */
@@ -64,78 +67,47 @@ static int revert_plan(flash_t *f, meta_t *m, log_fn log, void *log_ctx)
     return meta_store(f, m);
 }
 
-/* Repeats the updater's check: a dev_key holder can forge meta to stage an
- * older, genuinely signed image. */
-static int is_downgrade(flash_t *f, const meta_t *m, const image_desc_t *d)
+/* Whole-slot format2 check (SPEC.md 4.3) plus anti-rollback (section 12.4); desc_raw is caller-owned storage that out_body points into, so it must outlive out_body's use. NULL if good, else the reason. */
+static const char *pending_image_check(flash_t *f, const meta_t *m, size_t *sha_bytes,
+                                       uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN],
+                                       chunky_descriptor_body_view_t *out_body)
 {
-    return d->version < image_version_flash(f, m->active_slot) && !(d->flags & 1);
-}
-
-/* Whether the staged plan is the one the release key signed, checked before
- * the plan is applied: the descriptor in the pending slot is authenticated,
- * and the plan's dense table must fold to its table_root. The meta plan is
- * only ever believed through that root, so a forged or stale one never gets
- * to run a COPY. NULL if good, else the reason. */
-static const char *plan_check(flash_t *f, const meta_t *m, const uint8_t root_key[32],
-                              size_t *sha_bytes)
-{
-    image_desc_t d;
-    uint8_t mac[SHA256_LEN], root[SHA256_LEN];
+    format2_err_t e;
 
     if (m->pending_slot != OTHER_SLOT(m->active_slot)) return "pending slot is not the inactive slot";
-    image_desc_read(f, m->pending_slot, &d);
-    if (d.magic != IMG_MAGIC)                    return "no image descriptor";
-    if (!image_len_ok(d.image_len) || d.image_len != m->image_len)
-                                                 return "plan image_len differs from the descriptor's";
-    image_desc_mac(&d, root_key, mac);
-    if (memcmp(mac, d.mac, SHA256_LEN))          return "release signature mismatch";
-    if (is_downgrade(f, m, &d))                  return "plan would downgrade the active image";
-    if (memcmp(d.sha256, m->target_sha256, SHA256_LEN)) return "descriptor differs from the plan";
-    image_table_root((const uint8_t *)m->target_hash, d.image_len / SECTOR_SIZE, root);
-    *sha_bytes += d.image_len / SECTOR_SIZE * SECTOR_HASH_LEN;
-    if (memcmp(root, d.table_root, SHA256_LEN))  return "plan table does not match the signed table_root";
-    return NULL;
+    e = format2_image_verify_flash(f, m->pending_slot, m->security_floor, desc_raw, out_body);
+    if (sha_bytes) *sha_bytes += (size_t)FORMAT2_IMAGE_LEN;
+    return e == FORMAT2_OK ? NULL : format2_err_str(e);
 }
 
-/* image_hash_flash() over `slot` with the image_len its descriptor claims;
- * image_verify_flash() rejects a bad one. */
-static void slot_hash(flash_t *f, int slot, size_t *sha_bytes, uint8_t out[SHA256_LEN])
+/* Gate before STAGING->TRIAL (DESIGN.md 7.3): under format2 every sector was already written and hash-checked live during the session, so this is effectively the only real check that transition makes. */
+static const char *plan_check(flash_t *f, const meta_t *m, size_t *sha_bytes)
 {
-    image_desc_t d;
-    image_desc_read(f, slot, &d);
-    if (image_hash_flash(f, slot, d.image_len, out) == 0 && sha_bytes)
-        *sha_bytes += d.image_len - DESC_LEN;
+    uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+    chunky_descriptor_body_view_t body;
+
+    return pending_image_check(f, m, sha_bytes, desc_raw, &body);
 }
 
 /* The whole pending image, before it may run (DESIGN.md section 7 step 3).
- * Runs at the STAGING->TRIAL transition and again on every later trial boot:
- * a forged TRIAL meta skips the transition. NULL if good, else the reason. */
-static const char *pending_verify(flash_t *f, const meta_t *m, const uint8_t root_key[32],
-                                  device_stats_t *stats)
+ * Runs at STAGING->TRIAL and every later trial boot; NULL if good, else the reason. No ecdsa_ms: format2 scheme 2 is unsigned (SPEC.md 4.2), nothing asymmetric to verify. */
+static const char *pending_verify(flash_t *f, const meta_t *m, device_stats_t *stats)
 {
-    if (m->pending_slot != OTHER_SLOT(m->active_slot)) return "pending slot is not the inactive slot";
-    image_desc_t d;
-    uint8_t hsh[SHA256_LEN];
+    uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+    chunky_descriptor_body_view_t body;
     size_t hashed = 0;
-    const char *why = NULL;
-    image_desc_read(f, m->pending_slot, &d);
-    slot_hash(f, m->pending_slot, &hashed, hsh);
+    const char *why = pending_image_check(f, m, &hashed, desc_raw, &body);
+
     stats->verify_bytes += hashed;
     stats->sha_bytes    += hashed;
-    stats->ecdsa_ms     += ECDSA_VERIFY_MS;
-    if (d.image_len != m->image_len)               return "image_len differs from the plan's";
-    if (memcmp(hsh, m->target_sha256, SHA256_LEN)) return "image_sha256 mismatch";
-    if (image_verify_flash(f, m->pending_slot, root_key, hsh, &why) < 0) return why;
-    if (is_downgrade(f, m, &d))                    return "plan would downgrade the active image";
-    return NULL;
+    return why;
 }
 
 /* Applies whatever the session staged into the pending slot, trial-boots
  * it, and otherwise decides whether the active slot is bootable (DESIGN.md
  * sections 7-8). See bootloader.h for the calling contract: one call is one
- * simulated boot/reset cycle. */
-int bootloader_boot(flash_t *f, const uint8_t root_key[32],
-                    log_fn log, void *log_ctx, device_stats_t *stats)
+ * simulated boot/reset cycle. No key parameter: format2 (scheme 2, SPEC.md 4.2) is unsigned, so none is needed. */
+int bootloader_boot(flash_t *f, log_fn log, void *log_ctx, device_stats_t *stats)
 {
     device_stats_t dummy = { 0 };
     if (!stats) stats = &dummy;
@@ -157,86 +129,17 @@ int bootloader_boot(flash_t *f, const uint8_t root_key[32],
         log_fmt(log, log_ctx, "boot: applying plan v%u into slot %c",
                m.target_version, 'A' + pending);
         double t0 = stats_tick(stats);
-        int bad = 0;
-        const char *reject = plan_check(f, &m, root_key, &stats->sha_bytes);
+        const char *reject = plan_check(f, &m, &stats->sha_bytes);
+        stats->t_apply = stats_tick(stats) - t0;
         if (reject) {
             if (unroll_plan(f, &m, log, log_ctx, reject) < 0)
                 return boot_flash_fail(f, log, log_ctx);
             goto final_boot;
         }
-        int n_sectors = (int)(m.image_len / SECTOR_SIZE);
-        for (int i = 0; i < n_sectors && !bad; i++) {
-            if (m.op[i] == OP_NONE || journal_get(f, i) == JRN_DONE) continue;
-            if (m.op[i] == OP_COPY && i == DESC_SECTOR) {
-                /* The descriptor plan_check() just authenticated must stay. */
-                if (unroll_plan(f, &m, log, log_ctx, "descriptor sector is a copy") < 0)
-                    return boot_flash_fail(f, log, log_ctx);
-                bad = 1;
-                break;
-            }
-
-            uint8_t got[SECTOR_HASH_LEN];
-            if (m.op[i] == OP_COPY) {
-                /* src_slot/src_index came off the wire a session ago and
-                 * live in flash across the reboot; the bounds check at send
-                 * time (device_session_feed) does not protect this read,
-                 * which runs on every boot regardless of how the stored
-                 * value got there. Treat an out-of-range index, or a slot
-                 * id that is neither A nor B, as a bad plan, same as a copy
-                 * source that no longer matches -- this path must never
-                 * read outside the two slots. */
-                if (m.src_index[i] >= SECTORS_SLOT ||
-                    (m.src_slot[i] != SLOT_A && m.src_slot[i] != SLOT_B)) {
-                    if (unroll_plan(f, &m, log, log_ctx, "copy source out of range") < 0)
-                        return boot_flash_fail(f, log, log_ctx);
-                    bad = 1;
-                    break;
-                }
-                /* Flash to flash, through RAM; source is always safe to
-                 * read (either the untouched active slot, or a sector of
-                 * the pending slot the plan itself already verified as
-                 * correct and left alone -- lib/plan.c's rule 2). */
-                uint8_t tmp[SECTOR_SIZE];
-                flash_read(f, slot_base(m.src_slot[i]) + (size_t)m.src_index[i] * SECTOR_SIZE,
-                           tmp, SECTOR_SIZE);
-                image_sector_hash(i, tmp, got);
-                if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
-                    if (unroll_plan(f, &m, log, log_ctx, "copy source no longer matches") < 0)
-                        return boot_flash_fail(f, log, log_ctx);
-                    bad = 1;
-                    break;
-                }
-                if (flash_write_app_sector(f, pending, m.active_slot, (sector_idx_t)i, tmp) < 0) {
-                    log_fmt(log, log_ctx, "boot: copy into sector %d: %s", i, f->err.msg);
-                    if (unroll_plan(f, &m, log, log_ctx, "flash failure during copy") < 0)
-                        return boot_flash_fail(f, log, log_ctx);
-                    bad = 1;
-                    break;
-                }
-            }
-            image_sector_hash_flash(f, pending, i, got);
-            if (memcmp(got, m.target_hash[i], SECTOR_HASH_LEN)) {
-                if (unroll_plan(f, &m, log, log_ctx, "sector does not match the plan") < 0)
-                    return boot_flash_fail(f, log, log_ctx);
-                bad = 1;
-                break;
-            }
-            if (journal_set(f, i, JRN_DONE) < 0) {
-                log_fmt(log, log_ctx, "boot: journal for sector %d: %s", i, f->err.msg);
-                if (unroll_plan(f, &m, log, log_ctx, "flash failure recording progress") < 0)
-                    return boot_flash_fail(f, log, log_ctx);
-                bad = 1;
-                break;
-            }
-            stats->sha_bytes += 2 * SECTOR_SIZE;
-        }
-        stats->t_apply = stats_tick(stats) - t0;
-        /* unroll_plan() already recorded and stored the result; boot
-         * active_slot, which this failed apply never touched. */
-        if (bad) goto final_boot;
+        /* No per-sector apply loop: format2 already wrote and hash-checked every sector live during the session (lib/device.c's format2_plan_walk()/format2_apply_step()), so plan_check() above is the only real gate this transition makes. */
 
         t0 = stats_tick(stats);
-        why = pending_verify(f, &m, root_key, stats);
+        why = pending_verify(f, &m, stats);
         stats->t_verify = stats_tick(stats) - t0;
         if (why) {
             if (unroll_plan(f, &m, log, log_ctx, why) < 0)
@@ -259,7 +162,7 @@ int bootloader_boot(flash_t *f, const uint8_t root_key[32],
     if (m.plan_state == PLAN_TRIAL) {
         if (!verified) {
             double t0 = stats_tick(stats);
-            why = pending_verify(f, &m, root_key, stats);
+            why = pending_verify(f, &m, stats);
             stats->t_verify = stats_tick(stats) - t0;
             if (why) {
                 if (unroll_plan(f, &m, log, log_ctx, why) < 0)
@@ -277,7 +180,7 @@ int bootloader_boot(flash_t *f, const uint8_t root_key[32],
         log_fmt(log, log_ctx,
                "boot: booting version %u (trial boot, slot %c, attempt %d/%d; "
                "call device_confirm() or this attempt is wasted)",
-               image_version_flash(f, m.pending_slot), 'A' + m.pending_slot,
+               m.target_version, 'A' + m.pending_slot,
                MAX_TRIES - m.attempts_left, MAX_TRIES);
         /* Unlike every other path here, this call ends with the *pending*
          * slot running on trial, not active_slot -- there is nothing to
@@ -287,38 +190,38 @@ int bootloader_boot(flash_t *f, const uint8_t root_key[32],
 
 final_boot:
     /* plan_state is NONE or COMMITTED: an ordinary boot of active_slot.
-     * The signature is not re-checked here (DESIGN.md section 10.1) -- only
-     * image_sha256, cheap enough to pay every boot, which is what turns bit
-     * rot in a long-deployed image into a clean fallback instead of an
-     * undefined crash. */
-    uint8_t hsh[SHA256_LEN];
-    slot_hash(f, m.active_slot, &stats->sha_bytes, hsh);
-    if (image_verify_flash(f, m.active_slot, root_key, hsh, &why) < 0) {
+     * format2_image_verify_flash() (SPEC.md 4.3) re-checks every boot, catching bit rot or an old reflashed image; a blank 0xFF slot fails the magic check cleanly (FORMAT2_EMAGIC) rather than causing UB. */
+    uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+    chunky_descriptor_body_view_t body;
+    format2_err_t e = format2_image_verify_flash(f, m.active_slot, m.security_floor, desc_raw, &body);
+    stats->sha_bytes += (size_t)FORMAT2_IMAGE_LEN;
+    if (e != FORMAT2_OK) {
+        why = format2_err_str(e);
         log_fmt(log, log_ctx, "boot: active slot %c does not verify (%s)",
                'A' + m.active_slot, why);
         int other = OTHER_SLOT(m.active_slot);
-        uint8_t hsh2[SHA256_LEN];
-        const char *why2 = NULL;
-        slot_hash(f, other, NULL, hsh2);
-        if (image_verify_flash(f, other, root_key, hsh2, &why2) == 0) {
+        uint8_t desc_raw2[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+        chunky_descriptor_body_view_t body2;
+        format2_err_t e2 = format2_image_verify_flash(f, other, m.security_floor, desc_raw2, &body2);
+        if (e2 == FORMAT2_OK) {
             log_fmt(log, log_ctx, "boot: falling back to slot %c", 'A' + other);
             m.active_slot = (uint8_t)other;
             m.last_result = RES_VERIFY_FAILED;
             if (meta_store(f, &m) < 0) return boot_flash_fail(f, log, log_ctx);
-            log_fmt(log, log_ctx, "boot: booting version %u", image_version_flash(f, m.active_slot));
+            log_fmt(log, log_ctx, "boot: booting version %u", chunky_descriptor_body_version(body2));
         } else {
             /* Both slots unusable: this is as far as the device gets. A
              * real port enters the recovery loop here (DESIGN.md section
              * 3); the PoC just reports it and asks for another release. */
             log_fmt(log, log_ctx, "boot: no bootable image in either slot (%s); "
-                   "requesting an update", why2 ? why2 : why);
+                   "requesting an update", format2_err_str(e2));
             if (m.last_result != RES_VERIFY_FAILED) {
                 m.last_result = RES_VERIFY_FAILED;
                 if (meta_store(f, &m) < 0) return boot_flash_fail(f, log, log_ctx);
             }
         }
     } else {
-        log_fmt(log, log_ctx, "boot: booting version %u", image_version_flash(f, m.active_slot));
+        log_fmt(log, log_ctx, "boot: booting version %u", chunky_descriptor_body_version(body));
     }
     return 0;
 }

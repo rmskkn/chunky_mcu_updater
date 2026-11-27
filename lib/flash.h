@@ -62,8 +62,6 @@ static inline size_t slot_base(int slot) { return slot == SLOT_A ? SLOT_A_BASE :
 #define FLASH_READ_CHUNK 256
 _Static_assert(SECTOR_SIZE % FLASH_READ_CHUNK == 0,
                "a sector must be a whole number of FLASH_READ_CHUNK reads");
-_Static_assert(SECTOR_SIZE % WRITE_CHUNK == 0,
-               "a sector must be a whole number of STEP_WRITE fragments");
 
 /* sector_idx_t and SECTOR_HASH_LEN are wire types: see protocol.h;
  * sector_hash() is in manifest.h. */
@@ -149,6 +147,12 @@ typedef struct {
     sector_idx_t src_index[SECTORS_SLOT];
     uint8_t  target_hash[SECTORS_SLOT][SECTOR_HASH_LEN];
     uint32_t last_result;
+    uint32_t security_floor; /* format2 anti-rollback floor (SPEC.md section 12
+                               * point 4): the security_counter of the last
+                               * confirmed image. Survives every plan cycle,
+                               * including ones that fail -- reset to 0 only
+                               * by meta_init() (fresh device), raised only on
+                               * confirm, never by meta_reset_plan(). */
 } meta_t;
 
 /* Bank layout: meta_t, then the journal in an erase unit of its own (it is

@@ -142,7 +142,7 @@ void meta_reset_plan(meta_t *m)
     memset(m->src_slot, 0, sizeof m->src_slot);
     memset(m->src_index, 0, sizeof m->src_index);
     memset(m->target_hash, 0, sizeof m->target_hash);
-    /* active_slot, magic, generation, mac, last_result: untouched. */
+    /* active_slot, magic, generation, mac, last_result, security_floor: untouched; security_floor must survive every plan cycle, even a failed one. */
 }
 
 /* mac = HMAC(dev_key, m with mac zeroed). -1 if there is no identity to take

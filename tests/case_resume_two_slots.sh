@@ -42,9 +42,7 @@ assert_contains "$status" "state STAGING" "the interrupted plan is on the books,
 boot_out="$("$CB_CLIENT" --flash "$FLASH" --boot-only 2>&1)"
 assert_contains "$boot_out" "unrolling the plan into slot B" "stale plan unrolled before the resume request"
 
-# Both slots now manifest sensibly: A is exactly the original base, B is a
-# mix of leftover written sectors and the unroll's erased sector 0 -- real
-# content either way, not blank.
+# Both slots now manifest sensibly: A is exactly the original base, B is a mix of leftover written sectors and the unroll's erased trailing descriptor chunk (the slot's last sector under format2, not sector 0); real content either way, not blank.
 manifest1="$("$CB_FLASH" manifest "$FLASH")"
 echo "$manifest1" | grep -c '[0-9a-f]\{16\}' >/dev/null || fail "manifest" "manifest did not print"
 

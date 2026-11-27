@@ -78,11 +78,18 @@ typedef enum {
     FORMAT2_EDATA,              /* a WRITE's data does not have the hash the step names (SPEC.md 6.2, DataMismatch) */
     FORMAT2_ESOURCE,            /* a COPY's source does not have the hash the step names (SourceMismatch) */
     FORMAT2_ESOURCE_UNREADABLE, /* the read_active callback reported an unreadable/ECC-faulted source (SourceUnreadable) */
-    FORMAT2_ENOACTIVE           /* a COPY step needs ACTIVE's bytes to check and no read_active callback was given */
+    FORMAT2_ENOACTIVE,          /* a COPY step needs ACTIVE's bytes to check and no read_active callback was given */
+    FORMAT2_EIMAGE              /* the whole-image hash does not match the sealed descriptor's image_sha256 (SPEC.md 4.3 stage 3, HashMismatch) */
 } format2_err_t;
 
 /* Text for a log line; never NULL, never allocates. */
 const char *format2_err_str(format2_err_t e);
+
+/* SPEC.md 4.3: checks one 128-byte signed descriptor in three stages (raw body, seal, then product/geometry id and floor); used for both a plan header's descriptor and a flashed image's trailing 128 B. On FORMAT2_OK, *out_body (if non-NULL) gets the sealed body view. */
+format2_err_t format2_descriptor_verify(chunky_signed_descriptor_view_t desc,
+                                        uint32_t geometry_id, uint32_t product_id,
+                                        uint32_t floor, uint32_t image_len,
+                                        chunky_descriptor_body_view_t *out_body);
 
 /* The per-chunk hash, SPEC.md section 2: the first 8 bytes of SHA-256 over
  * exactly the data bytes, no domain separation (unlike the descriptor

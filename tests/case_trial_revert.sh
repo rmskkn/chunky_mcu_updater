@@ -39,7 +39,8 @@ status="$("$CB_CLIENT" --flash "$FLASH" --status 2>&1)"
 assert_contains "$status" "state NONE" "plan_state is NONE after revert, no plan in flight"
 assert_contains "$status" "active slot A" "active_slot is still A"
 assert_contains "$status" "last_result 4" "RES_TRIAL_FAILED reported in the device's own state"
-assert_contains "$status" "revoked after a failed trial boot" "slot B's descriptor is revoked and image_verify_flash() says so"
+# format2 has no revoked field (SPEC.md 4.1): revert_plan() erases slot B's trailing descriptor instead, so it fails the cheap magic check rather than reporting a "revoked" field.
+assert_contains "$status" "slot B          no image  bad magic" "slot B's descriptor was erased and format2_image_verify_flash() says so"
 
 # Confirming now (nothing to confirm) must not crash or silently succeed
 # as if a trial were still live.
