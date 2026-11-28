@@ -1,5 +1,6 @@
 #include "flash_file.h"
-#include "image.h"
+#include "format2_geom.h"
+#include "format2_image.h"
 #include "host.h"
 #include <string.h>
 #include <errno.h>
@@ -90,28 +91,23 @@ void flash_file_close(flash_t *f)
     f->io = NULL;
 }
 
-/* Writes a raw firmware binary into slot A as a signed image: what a
- * factory programmer or a debugger would leave behind. Slot B stays
- * erased -- a fresh device has nothing pending (DESIGN.md: "slot B:
- * nobody yet"). A host tool's job, so it lives here and not in lib/. -1
- * with the reason in f->err. */
-static int install_image(flash_t *f, const uint8_t *bin, size_t binlen,
-                  uint32_t version, const uint8_t root_key[32])
+/* Writes bin into slot A as a full format2 image (SPEC.md 4): every sector is written, not just image_len/SECTOR_SIZE of them, since format2's trailing descriptor isn't sector-aligned. Slot B stays erased. No key needed (scheme 2); security_counter is 1, so a fresh device's floor (0) never rejects it. */
+static int install_image2(flash_t *f, const uint8_t *bin, size_t binlen)
 {
     uint8_t *img = malloc(SLOT_SIZE);
     meta_t m;
 
     if (!img) return err_set(&f->err, "out of memory for a %d B slot image", SLOT_SIZE);
     size_t image_len;
-    if (image_build(bin, binlen, version, root_key, img, &image_len) < 0) {
+    if (format2_image_build(bin, binlen, 1u, 1u, img, &image_len) < 0) {
         free(img);
-        return err_set(&f->err, "image is %zu B, over the %d B slot payload",
-                       binlen, IMG_MAX_PAYLOAD);
+        return err_set(&f->err, "image is %zu B, over the %u B slot payload",
+                       binlen, (unsigned)FORMAT2_IMAGE_LEN);
     }
 
     /* -1 "active_slot" to flash_write_app_sector(): this is provisioning,
      * before any update exists to protect an active slot from. */
-    for (int i = 0; i < (int)(image_len / SECTOR_SIZE); i++)
+    for (int i = 0; i < SECTORS_SLOT; i++)
         if (flash_write_app_sector(f, SLOT_A, -1, (sector_idx_t)i, img + (size_t)i * SECTOR_SIZE) < 0) {
             free(img);
             return -1;
@@ -130,9 +126,9 @@ static int install_image(flash_t *f, const uint8_t *bin, size_t binlen,
 
 /* Opens the device, creating it on first use with the firmware it shipped
  * with in slot 0. The manifest the client sends is a statement about real
- * flash contents, so the device has to have some. */
+ * flash contents, so the device has to have some. No key parameter: install_image2()'s format2 provisioning is scheme 2 (unsigned), needs none. */
 int device_open_or_create(flash_t *f, const char *flash_path,
-                          const char *initial_path, const uint8_t root_key[32],
+                          const char *initial_path,
                           log_fn log, void *log_ctx, cb_err_t *err)
 {
     if (flash_file_open(f, flash_path) == 0) return 0;
@@ -158,7 +154,7 @@ int device_open_or_create(flash_t *f, const char *flash_path,
         return err_set(err, "cannot open %s: %s", flash_path, strerror(errno));
     }
 
-    int rc = install_image(f, bin, binlen, 1, root_key);
+    int rc = install_image2(f, bin, binlen);
     free(bin);
     if (rc < 0) {
         err_set(err, "%s: %s", initial_path, f->err.msg);

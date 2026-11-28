@@ -28,8 +28,7 @@
  * chosen over a single-call simplified resolution because it is what lets
  * a shell-level test (this repo has no unit-test harness in C) exercise
  * the confirm/retry/revert paths with the real cb-client binary: see
- * src/client.c's --boot-only / --confirm-only / --no-confirm flags. */
-int  bootloader_boot(flash_t *f, const uint8_t root_key[32],
-                     log_fn log, void *log_ctx, device_stats_t *stats);
+ * src/client.c's --boot-only / --confirm-only / --no-confirm flags. No key parameter: format2 (scheme 2, SPEC.md 4.2) is unsigned, needs none. */
+int  bootloader_boot(flash_t *f, log_fn log, void *log_ctx, device_stats_t *stats);
 
 #endif

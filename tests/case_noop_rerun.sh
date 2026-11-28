@@ -21,10 +21,11 @@ assert_contains "$first" "booting version 2" "first run installs version 2"
 second="$(update 2>&1)"
 wire_stats "$second"
 assert_contains "$second" "no update offered" "second run finds nothing to do"
-[ "$WIRE_RX" -lt 200 ] || fail "wire size" "rx=$WIRE_RX B on a no-op request, expected a bare handshake"
-# The server cached the manifest the first run's plan produced, so the
-# request right after an update elides the manifest body too.
-assert_contains "$second" "body elided" "manifest elided right after an update"
-[ "$WIRE_TX" -lt 300 ] || fail "wire size" "tx=$WIRE_TX B on a no-op request, expected the manifest elided"
+# rx is the server's reply: a bare MSG2_NO_UPDATE, same size regardless of elision.
+[ "$WIRE_RX" -lt 200 ] || fail "wire size" "rx=$WIRE_RX B on a no-op request, expected a bare NO_UPDATE reply"
+# format2 has no manifest-elision cache: the manifest is cheap enough to send in full every session (SPEC.md 7.2), so tx on a no-op request costs roughly one manifest's worth, not a near-zero handshake.
+manifest_bound=$((13 + 2 * SECTORS * 9 + 200))
+[ "$WIRE_TX" -lt "$manifest_bound" ] || fail "wire size" \
+    "tx=$WIRE_TX B on a no-op request, expected under ~$manifest_bound B (one manifest, no elision)"
 
 ok "noop_rerun (rx=$WIRE_RX B)"

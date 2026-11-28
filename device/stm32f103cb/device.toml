@@ -8,6 +8,8 @@ name       = "STM32F103CB"
 flash_base = 0x08000000      # where flash sits in the address map
 flash_size = "128K"
 erase_size = "1K"            # minimum erasable unit: one page (RM0008)
+# product_id (optional, u32, SPEC.md 4.1/section 2): unset here, so the generator defaults to FNV-1a32 of part.name above.
+# product_id = 0x12345678
 
 # PM0075: one program per half-word after an erase, except that 0x0000 may
 # always be written regardless of the half-word's current content.

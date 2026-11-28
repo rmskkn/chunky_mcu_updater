@@ -33,7 +33,7 @@ exec 4>&-
 out="$(cat "$RUN/update.out")"
 assert_contains "$out" "booting version 2" "the update boots v2"
 grep -q '^server: session end' "$RUN/server.log" || fail "session end" "update() returned before the server ended the session"
-grep -qE '^sectors: .* 2 sent,' "$RUN/server.log" || fail "report" "the session's report is not in server.log"
-[ "$(compress_count raw)" -ge 1 ] || fail "compress line" "the session's compress counts are not in server.log"
+plan_counts
+[ "$WRITE_N" -ge 1 ] || fail "report" "the session's report is not in server.log"
 
 ok "server_log_settled"

@@ -33,6 +33,9 @@ jobs:
       - name: compress unit tests (ASan/UBSan)
         run: make test-compress
 
+      - name: format 2 contract reader/verifier (SPEC.md, rust/chunky_format)
+        run: make test-format2
+
       - name: end-to-end tests, all geometries
         run: tests/run_matrix.sh
 

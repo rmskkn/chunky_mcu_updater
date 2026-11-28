@@ -1,27 +1,24 @@
-/* Plan authentication and meta integrity (docs/auth_verification.md,
- * docs/auth_implementation_plan.md). Drives lib/device.c's session and
- * lib/bootloader.c directly, message by message, so each case can forge what
- * a real server never would: a tampered signature or table, a step the table
- * does not list, a misordered descriptor sector, a rewritten meta bank.
+/* Plan authentication and meta integrity (SPEC.md; MIGRATION_FORMAT2.md); drives lib/device.c and lib/bootloader.c directly, message by message, to forge what a real server never would (bad descriptor seal/scheme, step order, floor violations, forged trial state, a rewritten meta bank).
  *
  *   auth_test WORKDIR BASE.bin
  *
  * WORKDIR gets one flash file per case. BASE.bin is the firmware every
- * device ships with (tests/common.sh's gen_random_bin). */
+ * device ships with (tests/common.sh's gen_random_bin).
+ *
+ * A reduced port of the pre-format2 auth_test.c: 5 of its 16 forged-message scenarios have format2 equivalents here; the rest no longer apply (no PLAN_TABLE round trip, no per-step ACK/NAK, no descriptor-as-a-step ordering). */
 #include "bootloader.h"
 #include "device.h"
 #include "flash_file.h"
+#include "format2.h"
+#include "format2_geom.h"
+#include "format2_image.h"
+#include "format2_plan.h"
 #include "host.h"
-#include "image.h"
-#include "keys.h"
-#include "plan.h"
-#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static uint8_t dev_key[32], root_key[32];
 static const char *workdir, *base_path;
 static uint8_t *base_bin;
 static size_t base_len;
@@ -40,8 +37,13 @@ typedef struct {
 static int cap_send(void *ctx, uint8_t type, const void *p, size_t n)
 {
     cap_t *c = ctx;
-    if (type == MSG_STEP_ACK) c->acks++;
-    if (type == MSG_STEP_NAK) { c->naks++; c->last_nak = ((const msg_step_ack_t *)p)->code; }
+    (void)n;
+    if (type == MSG2_STEP_ACK || type == MSG2_STEP_NAK) {
+        msg2_step_ack_t a;
+        memcpy(&a, p, sizeof a);
+        if (type == MSG2_STEP_ACK) c->acks++;
+        else { c->naks++; c->last_nak = a.code; }
+    }
     return 0;
 }
 
@@ -57,22 +59,10 @@ typedef struct {
     size_t  len;
 } target_t;
 
-static target_t tgt;   /* big: kept off the stack */
-
-/* The shipped firmware with a few sectors patched, as release `version`. */
-static int make_target(target_t *t, uint32_t version)
-{
-    uint8_t *bin = malloc(base_len);
-    if (!bin) return -1;
-    memcpy(bin, base_bin, base_len);
-    for (size_t k = 1; k <= 3; k++) {
-        size_t at = k * SECTOR_SIZE - DESC_LEN + 100;
-        if (at + 16 < base_len) memset(bin + at, (int)(0x30 + k), 16);
-    }
-    int rc = image_build(bin, base_len, version, root_key, t->img, &t->len);
-    free(bin);
-    return rc;
-}
+/* Kept off the stack (SLOT_SIZE-sized) and reused one case at a time, since main() runs every case_*() sequentially. */
+static target_t         tgt;
+static uint8_t           g_scratch[SLOT_SIZE];   /* format2_plan_build_from_active_slot()'s active_scratch */
+static uint8_t           g_planbuf[DEVICE_PLAN_BUF_CAP];
 
 static int open_dev(flash_t *f, cap_t *cap, const char *name)
 {
@@ -81,107 +71,63 @@ static int open_dev(flash_t *f, cap_t *cap, const char *name)
     snprintf(path, sizeof path, "%s/%s.bin", workdir, name);
     remove(path);
     memset(cap, 0, sizeof *cap);
-    return device_open_or_create(f, path, base_path, root_key, cap_log, cap, &err);
+    return device_open_or_create(f, path, base_path, cap_log, cap, &err);
 }
 
-typedef struct {
-    flash_t        *f;
-    cap_t          *cap;
-    device_session_t s;
-    int             rc;
-    manifest_t      man;
-    plan_t          plan;
-    uint8_t         table[SECTORS_SLOT * SECTOR_HASH_LEN];
-    msg_plan_begin_t pb;
-} drv_t;
-
-static drv_t drv;
-
-static int feed(drv_t *d, int type, const void *p, size_t n)
+/* The shipped firmware as release `version`/`security_counter`; no key needed (format2 scheme 2 is unsigned). */
+static int build_target(target_t *t, uint32_t version, uint32_t security_counter)
 {
-    return d->rc = device_session_feed(&d->s, type, p, n);
+    return format2_image_build(base_bin, base_len, version, security_counter, t->img, &t->len);
 }
 
-/* HELLO/CHALLENGE, leaving the session waiting for the server's offer. */
-static int drv_open(drv_t *d, flash_t *f, cap_t *cap, const target_t *t)
+static int build_plan(flash_t *f, int active_slot, const uint8_t *target_img,
+                      uint8_t *out, size_t out_cap, size_t *out_len)
 {
-    memset(d, 0, sizeof *d);
-    d->f = f;
-    d->cap = cap;
-    if (device_session_start(&d->s, f, dev_key, root_key, cap_send, cap, cap_log, cap, NULL)
-            != DEV_PENDING)
-        return -1;
-    msg_challenge_t ch;
-    memset(&ch, 7, sizeof ch);
-    if (feed(d, MSG_CHALLENGE, &ch, sizeof ch) != DEV_PENDING) return -1;
-
-    manifest_build(f, &d->man);
-    plan_build(&d->man, SLOT_A, SLOT_B, t->img, t->len, &d->plan);
-    image_table(t->img, t->len, d->table);
-
-    const image_desc_t *desc = image_desc(t->img);
-    memset(&d->pb, 0, sizeof d->pb);
-    d->pb.version    = desc->version;
-    d->pb.step_count = (uint16_t)d->plan.count;
-    d->pb.dest_slot  = SLOT_B;
-    d->pb.image_len  = desc->image_len;
-    d->pb.flags      = desc->flags;
-    memcpy(d->pb.image_sha256, desc->sha256, SHA256_LEN);
-    memcpy(d->pb.table_root, desc->table_root, SHA256_LEN);
-    memcpy(d->pb.image_mac, desc->mac, SHA256_LEN);
-    return 0;
+    return format2_plan_build_from_active_slot(f, active_slot, target_img, g_scratch, out, out_cap, out_len);
 }
 
-static int send_begin(drv_t *d) { return feed(d, MSG_PLAN_BEGIN, &d->pb, sizeof d->pb); }
-
-/* The table in order; flip_at >= 0 corrupts that byte of it on the wire. */
-static int send_table(drv_t *d, size_t table_len, long flip_at)
+/* Fragments buf as MSG2_PLAN+MSG2_PLAN_END, same shape as server_session.c's send_fragmented(), straight into device_session_feed() since this test plays the server's role. Returns the final feed's result (DEV_PENDING or DEV_ERROR). */
+static int send_plan(device_session_t *s, const uint8_t *buf, size_t len)
 {
-    for (size_t off = 0; off < table_len; off += 256) {
-        uint8_t buf[TABLE_HDR + 256];
-        uint16_t len = (uint16_t)(table_len - off < 256 ? table_len - off : 256);
+    size_t off = 0;
+    const size_t max_body = FRAME_MAX_PAYLOAD - PLAN2_FRAG_HDR;
+    int rc = DEV_PENDING;
+
+    while (off < len) {
+        uint8_t frag[FRAME_MAX_PAYLOAD];
         uint16_t o16 = (uint16_t)off;
-        memcpy(buf, &o16, 2);
-        memcpy(buf + 2, &len, 2);
-        memcpy(buf + TABLE_HDR, d->table + off, len);
-        if (flip_at >= (long)off && flip_at < (long)(off + len)) buf[TABLE_HDR + flip_at - off] ^= 1;
-        if (feed(d, MSG_PLAN_TABLE, buf, TABLE_HDR + len) != DEV_PENDING) return d->rc;
+        uint16_t flen = (uint16_t)(len - off < max_body ? len - off : max_body);
+        memcpy(frag, &o16, 2);
+        memcpy(frag + 2, &flen, 2);
+        memcpy(frag + PLAN2_FRAG_HDR, buf + off, flen);
+        rc = device_session_feed(s, MSG2_PLAN, frag, PLAN2_FRAG_HDR + flen);
+        if (rc != DEV_PENDING) return rc;
+        off += flen;
     }
-    return feed(d, MSG_PLAN_TABLE_END, NULL, 0);
+    return device_session_feed(s, MSG2_PLAN_END, NULL, 0);
 }
 
-/* One step, as a server would send it. patch, if given, edits the decoded
- * sector before it goes out (the table still lists the original). */
-static int send_step(drv_t *d, const target_t *t, const step_t *s,
-                     void (*patch)(uint8_t sector[SECTOR_SIZE]))
+/* Opens a fresh device, starts a session, builds an honest target/plan against the device's own active-slot bytes, and sends it. Returns send_plan()'s result; caller still owns f/cap/s and decides whether to send MSG2_COMMIT. */
+static int stage_plan(flash_t *f, cap_t *cap, device_session_t *s, const char *name,
+                      uint32_t version, uint32_t security_counter)
 {
-    if (s->op == OP_COPY) {
-        msg_step_copy_t c = { s->dst, s->src_slot, 0, s->src_index };
-        return feed(d, MSG_STEP_COPY, &c, sizeof c);
-    }
-    uint8_t sect[SECTOR_SIZE];
-    memcpy(sect, t->img + (size_t)s->dst * SECTOR_SIZE, SECTOR_SIZE);
-    if (patch) patch(sect);
-    for (size_t off = 0; off < SECTOR_SIZE; off += WRITE_CHUNK) {
-        uint8_t buf[WRITE_HDR + WRITE_CHUNK];
-        uint16_t o16 = (uint16_t)off, len = WRITE_CHUNK;
-        memcpy(buf + 0, &s->dst, 2);
-        memcpy(buf + 2, &o16, 2);
-        memcpy(buf + 4, &len, 2);
-        memcpy(buf + WRITE_HDR, sect + off, len);
-        if (feed(d, MSG_STEP_WRITE, buf, WRITE_HDR + len) != DEV_PENDING) return d->rc;
-    }
-    msg_step_write_end_t we = { .dst = s->dst, .compress = COMPRESS_RAW, .enc_len = SECTOR_SIZE };
-    return feed(d, MSG_STEP_WRITE_END, &we, sizeof we);
+    meta_t m;
+    size_t plan_len;
+
+    if (open_dev(f, cap, name) < 0) return DEV_ERROR;
+    if (device_session_start(s, f, cap_send, cap, cap_log, cap, NULL) != DEV_PENDING) return DEV_ERROR;
+    if (build_target(&tgt, version, security_counter) < 0) return DEV_ERROR;
+    meta_load(f, &m);
+    if (build_plan(f, m.active_slot, tgt.img, g_planbuf, sizeof g_planbuf, &plan_len) < 0) return DEV_ERROR;
+    return send_plan(s, g_planbuf, plan_len);
 }
 
-/* Every step in plan order, then PLAN_END and COMMIT. */
-static int send_rest(drv_t *d, const target_t *t)
+/* stage_plan() through to DEV_STAGED, armed with MSG2_COMMIT: a full honest session stopped right before any boot. */
+static int stage_armed(flash_t *f, cap_t *cap, device_session_t *s, const char *name,
+                       uint32_t version, uint32_t security_counter)
 {
-    for (int k = 0; k < d->plan.count; k++)
-        if (send_step(d, t, &d->plan.step[k], NULL) != DEV_PENDING) return d->rc;
-    if (feed(d, MSG_PLAN_END, NULL, 0) != DEV_PENDING) return d->rc;
-    return feed(d, MSG_COMMIT, NULL, 0);
+    if (stage_plan(f, cap, s, name, version, security_counter) != DEV_PENDING) return -1;
+    return device_session_feed(s, MSG2_COMMIT, NULL, 0) == DEV_STAGED ? 0 : -1;
 }
 
 static int untouched(const flash_t *f)
@@ -189,200 +135,334 @@ static int untouched(const flash_t *f)
     return f->n_erase == 0 && f->n_prog == 0;
 }
 
-/* A fresh device, a session through PLAN_BEGIN's checks, the target built. */
-#define SETUP(name, version) \
-    flash_t f; cap_t cap; \
-    REQUIRE(open_dev(&f, &cap, name) == 0, "cannot create the device"); \
-    REQUIRE(make_target(&tgt, version) == 0, "cannot build the target"); \
-    REQUIRE(drv_open(&drv, &f, &cap, &tgt) == 0, "session did not start"); \
-    f.n_erase = f.n_prog = 0; f.prog_bytes = 0
-
 /* ------------------------------------------------------------------ cases */
 
-static int t_honest(void)
+static int t2_honest(void)
 {
-    SETUP("honest", 2);
-    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
-    REQUIRE(send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, -1) == DEV_PENDING,
-            "table refused: %s", drv.s.error);
-    REQUIRE(send_rest(&drv, &tgt) == DEV_STAGED, "plan not staged: %s", drv.s.error);
-    REQUIRE(cap.naks == 0, "%d NAKs on an honest plan", cap.naks);
+    flash_t f;
+    cap_t cap;
+    device_session_t s;
+    meta_t m;
+    int pending;
+
+    REQUIRE(stage_armed(&f, &cap, &s, "t2_honest", 2, 2) == 0, "cannot stage an honest plan: %s", s.error);
 
     cap.log[0] = 0;
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(bootloader_boot(&f, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
     REQUIRE(strstr(cap.log, "trial boot"), "the honest plan did not reach a trial boot:\n%s", cap.log);
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_bad_signature(void)
-{
-    SETUP("bad_mac", 2);
-    drv.pb.image_mac[0] ^= 1;
-    REQUIRE(send_begin(&drv) == DEV_ERROR, "a bad release signature was accepted");
-    REQUIRE(strstr(drv.s.error, "signature"), "wrong reason: %s", drv.s.error);
-    REQUIRE(untouched(&f), "flash written before the signature checked out");
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_bad_table_root(void)
-{
-    /* table_root is inside the signed prefix, so swapping it breaks the mac. */
-    SETUP("bad_root", 2);
-    drv.pb.table_root[0] ^= 1;
-    REQUIRE(send_begin(&drv) == DEV_ERROR, "a re-rooted plan was accepted");
-    REQUIRE(strstr(drv.s.error, "signature"), "wrong reason: %s", drv.s.error);
-    REQUIRE(untouched(&f), "flash written before the signature checked out");
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_table_mismatch(void)
-{
-    /* A genuine signature, a table that is not the one it covers. */
-    SETUP("bad_table", 2);
-    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
-    REQUIRE(send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, 5) == DEV_ERROR,
-            "a table that does not fold to table_root was accepted");
-    REQUIRE(strstr(drv.s.error, "table_root"), "wrong reason: %s", drv.s.error);
-    REQUIRE(untouched(&f), "flash written before the table was authenticated");
-    REQUIRE(send_step(&drv, &tgt, &drv.plan.step[0], NULL) == DEV_ERROR, "a step followed a refused table");
-    REQUIRE(untouched(&f), "a step reached flash after the table was refused");
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_step_before_table(void)
-{
-    SETUP("early_step", 2);
-    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
-    REQUIRE(send_step(&drv, &tgt, &drv.plan.step[0], NULL) == DEV_ERROR,
-            "a step was accepted before the table");
-    REQUIRE(untouched(&f), "a step reached flash before the table was authenticated");
-    flash_file_close(&f);
-    return 0;
-}
-
-static void corrupt_sector(uint8_t sector[SECTOR_SIZE]) { sector[SECTOR_SIZE - 1] ^= 0xFF; }
-
-static int t_step_not_in_table(void)
-{
-    /* The sector is internally consistent (a server could hash it any way it
-     * likes) but is not what the signed table lists for that sector. */
-    SETUP("off_table", 2);
-    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
-    REQUIRE(send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, -1) == DEV_PENDING,
-            "table refused: %s", drv.s.error);
-
-    int k = 0;
-    while (k < drv.plan.count && drv.plan.step[k].op != OP_WRITE) k++;
-    REQUIRE(k < drv.plan.count, "the plan has no WRITE step");
-    const step_t *s = &drv.plan.step[k];
-
-    uint8_t before[SECTOR_SIZE], after[SECTOR_SIZE];
-    flash_read(&f, slot_base(SLOT_B) + (size_t)s->dst * SECTOR_SIZE, before, SECTOR_SIZE);
-    f.n_erase = f.n_prog = 0;
-    REQUIRE(send_step(&drv, &tgt, s, corrupt_sector) == DEV_PENDING, "session died: %s", drv.s.error);
-    REQUIRE(cap.naks == 1 && cap.last_nak == NAK_HASH_MISMATCH, "expected one HASH_MISMATCH NAK");
-    flash_read(&f, slot_base(SLOT_B) + (size_t)s->dst * SECTOR_SIZE, after, SECTOR_SIZE);
-    REQUIRE(!memcmp(before, after, SECTOR_SIZE) && untouched(&f), "the off-table sector reached flash");
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_descriptor_not_last(void)
-{
-    SETUP("desc_first", 2);
-    REQUIRE(drv.plan.count >= 2, "the plan has no second step");
-    REQUIRE(drv.plan.step[drv.plan.count - 1].dst == DESC_SECTOR, "planner did not put the descriptor last");
-    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
-    REQUIRE(send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, -1) == DEV_PENDING,
-            "table refused: %s", drv.s.error);
-    REQUIRE(send_step(&drv, &tgt, &drv.plan.step[drv.plan.count - 1], NULL) == DEV_PENDING,
-            "the descriptor sector was refused: %s", drv.s.error);
-    REQUIRE(send_step(&drv, &tgt, &drv.plan.step[0], NULL) == DEV_ERROR,
-            "a step was accepted after the descriptor sector");
-    REQUIRE(strstr(drv.s.error, "descriptor"), "wrong reason: %s", drv.s.error);
-    flash_file_close(&f);
-    return 0;
-}
-
-static void edit_descriptor(uint8_t sector[SECTOR_SIZE])
-{
-    /* Inside the hole: the table cannot see it, PLAN_END must. */
-    sector[DESC_OFF % SECTOR_SIZE + offsetof(image_desc_t, reserved)] ^= 0x55;
-}
-
-static int t_descriptor_swapped(void)
-{
-    SETUP("desc_swap", 2);
-    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
-    REQUIRE(send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, -1) == DEV_PENDING,
-            "table refused: %s", drv.s.error);
-    for (int k = 0; k < drv.plan.count; k++) {
-        const step_t *s = &drv.plan.step[k];
-        REQUIRE(send_step(&drv, &tgt, s, s->dst == DESC_SECTOR ? edit_descriptor : NULL) == DEV_PENDING,
-                "step %d refused: %s", k, drv.s.error);
-    }
-    REQUIRE(cap.naks == 0, "the table should not see a descriptor edit");
-    REQUIRE(feed(&drv, MSG_PLAN_END, NULL, 0) == DEV_ERROR, "a swapped descriptor was staged");
-    REQUIRE(strstr(drv.s.error, "descriptor"), "wrong reason: %s", drv.s.error);
-
-    meta_t m;
     meta_load(&f, &m);
-    REQUIRE(m.plan_state != PLAN_STAGING, "the plan was persisted");
+    pending = m.pending_slot;
+    REQUIRE(pending == SLOT_B, "pending slot %d, expected B", pending);
+
+    REQUIRE(device_confirm(&f, cap_log, &cap) == 0, "confirm: %s", f.err.msg);
+    meta_load(&f, &m);
+    REQUIRE(m.active_slot == pending, "active_slot was not promoted to the confirmed (trial) slot");
+    REQUIRE(m.plan_state == PLAN_COMMITTED, "plan_state %d after confirm, expected COMMITTED", m.plan_state);
+
     flash_file_close(&f);
     return 0;
 }
 
-static int t_plan_begin_bounds(void)
+static int t2_bad_seal(void)
 {
-    SETUP("bounds", 2);
-    drv.pb.image_len += 1;
-    REQUIRE(send_begin(&drv) == DEV_ERROR, "an image_len that is not a sector multiple was accepted");
-    REQUIRE(untouched(&f), "flash written for a bad PLAN_BEGIN");
-    flash_file_close(&f);
+    flash_t f;
+    cap_t cap;
+    device_session_t s;
+    meta_t m;
+    size_t plan_len;
+    int rc;
 
-    /* Version 0 against the shipped version 1: signed, but a downgrade. */
-    REQUIRE(make_target(&tgt, 0) == 0, "cannot build the target");
-    REQUIRE(open_dev(&f, &cap, "downgrade") == 0, "cannot create the device");
-    REQUIRE(drv_open(&drv, &f, &cap, &tgt) == 0, "session did not start");
-    REQUIRE(send_begin(&drv) == DEV_ERROR, "a downgrade was accepted");
-    REQUIRE(strstr(drv.s.error, "downgrade"), "wrong reason: %s", drv.s.error);
+    REQUIRE(open_dev(&f, &cap, "t2_bad_seal") == 0, "cannot create the device");
+    REQUIRE(device_session_start(&s, &f, cap_send, &cap, cap_log, &cap, NULL) == DEV_PENDING,
+            "session did not start");
+    REQUIRE(build_target(&tgt, 2, 2) == 0, "cannot build the target");
+    meta_load(&f, &m);
+    REQUIRE(build_plan(&f, m.active_slot, tgt.img, g_planbuf, sizeof g_planbuf, &plan_len) == 0,
+            "cannot build the plan");
+
+    /* Flips image_sha256's first byte inside the sealed body (SPEC.md 4.1, not the scheme byte), caught only at the seal check (stage 3), never an earlier refusal. */
+    g_planbuf[CHUNKY_PLAN_HEADER_DESCRIPTOR_OFFSET + CHUNKY_DESCRIPTOR_BODY_IMAGE_SHA256_OFFSET] ^= 0x01;
+
+    REQUIRE(untouched(&f), "flash written before the plan was even sent");
+    rc = send_plan(&s, g_planbuf, plan_len);
+    REQUIRE(rc == DEV_ERROR, "a plan with a tampered, uncomputed-seal descriptor body was accepted");
+    REQUIRE(strstr(s.error, format2_err_str(FORMAT2_ESIGNATURE)), "wrong reason: %s", s.error);
+    REQUIRE(untouched(&f), "flash written before the seal checked out");
+
     flash_file_close(&f);
     return 0;
 }
 
-/* An armed plan to attack: a full honest session, stopped before any boot. */
-static int stage_armed(flash_t *f, cap_t *cap, const char *name)
+/* Shared by t2_bad_scheme()'s two sub-cases. */
+static int one_bad_scheme(const char *name, uint8_t scheme, format2_err_t want)
 {
-    if (open_dev(f, cap, name) < 0) return -1;
-    if (make_target(&tgt, 2) < 0 || drv_open(&drv, f, cap, &tgt) < 0) return -1;
-    if (send_begin(&drv) != DEV_PENDING) return -1;
-    if (send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, -1) != DEV_PENDING) return -1;
-    return send_rest(&drv, &tgt) == DEV_STAGED ? 0 : -1;
+    flash_t f;
+    cap_t cap;
+    device_session_t s;
+    meta_t m;
+    size_t plan_len;
+    int rc;
+
+    REQUIRE(open_dev(&f, &cap, name) == 0, "cannot create the device");
+    REQUIRE(device_session_start(&s, &f, cap_send, &cap, cap_log, &cap, NULL) == DEV_PENDING,
+            "session did not start");
+    REQUIRE(build_target(&tgt, 2, 2) == 0, "cannot build the target");
+    meta_load(&f, &m);
+    REQUIRE(build_plan(&f, m.active_slot, tgt.img, g_planbuf, sizeof g_planbuf, &plan_len) == 0,
+            "cannot build the plan");
+
+    g_planbuf[CHUNKY_PLAN_HEADER_DESCRIPTOR_OFFSET + CHUNKY_DESCRIPTOR_BODY_SCHEME_OFFSET] = scheme;
+
+    REQUIRE(untouched(&f), "flash written before the plan was even sent");
+    rc = send_plan(&s, g_planbuf, plan_len);
+    REQUIRE(rc == DEV_ERROR, "scheme byte %u was accepted", (unsigned)scheme);
+    REQUIRE(strstr(s.error, format2_err_str(want)), "wrong reason for scheme %u: %s", (unsigned)scheme, s.error);
+    REQUIRE(untouched(&f), "flash written for scheme %u before the seal was even checked", (unsigned)scheme);
+
+    flash_file_close(&f);
+    return 0;
 }
 
+static int t2_bad_scheme(void)
+{
+    /* Ed25519 (SPEC.md 4.2's scheme 1): known, well-formed, but this device is unsigned (scheme 2); refused as unsupported before the seal is even computed. */
+    if (one_bad_scheme("t2_bad_scheme_ed25519", CHUNKY_SCHEME_ED25519, FORMAT2_ESCHEME_UNSUPPORTED) < 0)
+        return -1;
+    /* A value naming neither scheme SPEC.md defines: refused even earlier, at the stage-1 raw-byte check, before any seal work. */
+    if (one_bad_scheme("t2_bad_scheme_unknown", 99, FORMAT2_ESCHEME) < 0)
+        return -1;
+    return 0;
+}
+
+typedef struct { size_t off, len; uint8_t op; uint16_t idx; } step_info_t;
+
+/* Walks a plan body into step_info_t records (same framing as format2_plan_walk(), SPEC.md 5.3), without checking hashes/order/ranges: this test wants step positions, not a verdict. -1 on a malformed step or out of room, else the count. */
+static int parse_steps(const uint8_t *body, size_t body_len, step_info_t *out, int max)
+{
+    size_t at = 0;
+    int n = 0;
+
+    while (at < body_len) {
+        chunky_step_view_t v;
+        if (n >= max || chunky_step_view(body + at, body_len - at, &v) != 0) return -1;
+        out[n].off = at;
+        out[n].len = v.len;
+        out[n].op = chunky_step_tag(&v);
+        if (out[n].op == CHUNKY_STEP_ERASE) {
+            const chunky_step_erase_view_t *e;
+            if (chunky_step_as_erase(&v, &e) != 0) return -1;
+            out[n].idx = chunky_step_erase_block(e);
+        } else if (out[n].op == CHUNKY_STEP_COPY) {
+            const chunky_step_copy_view_t *c;
+            if (chunky_step_as_copy(&v, &c) != 0) return -1;
+            out[n].idx = chunky_step_copy_dst(c);
+        } else if (out[n].op == CHUNKY_STEP_WRITE) {
+            const chunky_step_write_view_t *w;
+            if (chunky_step_as_write(&v, &w) != 0) return -1;
+            out[n].idx = chunky_step_write_dst(w);
+        } else {
+            return -1;
+        }
+        at += v.len;
+        n++;
+    }
+    return n;
+}
+
+static int t2_step_order(void)
+{
+    flash_t f;
+    cap_t cap;
+    device_session_t s;
+    meta_t m;
+    size_t plan_len;
+    static step_info_t steps[SECTORS_SLOT * 2 + 4];
+    int n, j = -1, earlier_chunk = -1, rc;
+    uint8_t flashbuf[FORMAT2_CHUNK_LEN];
+
+    REQUIRE(open_dev(&f, &cap, "t2_step_order") == 0, "cannot create the device");
+    REQUIRE(device_session_start(&s, &f, cap_send, &cap, cap_log, &cap, NULL) == DEV_PENDING,
+            "session did not start");
+    REQUIRE(build_target(&tgt, 2, 2) == 0, "cannot build the target");
+    meta_load(&f, &m);
+    REQUIRE(build_plan(&f, m.active_slot, tgt.img, g_planbuf, sizeof g_planbuf, &plan_len) == 0,
+            "cannot build the plan");
+
+    n = parse_steps(g_planbuf + CHUNKY_PLAN_HEADER_LEN, plan_len - CHUNKY_PLAN_HEADER_LEN,
+                    steps, (int)(sizeof steps / sizeof steps[0]));
+    REQUIRE(n > 0, "cannot parse the plan's own steps");
+
+    /* A data step for chunk >= 2, directly followed by the next block's ERASE: the structure format2_plan_build() always produces when chunks_per_block == 1, so this pair exists whenever the image spans >= 3 non-blank chunks. */
+    for (int k = 0; k + 1 < n; k++) {
+        if (steps[k].op != CHUNKY_STEP_ERASE && steps[k].idx >= 2 &&
+            steps[k + 1].op == CHUNKY_STEP_ERASE) {
+            j = k;
+            break;
+        }
+    }
+    REQUIRE(j >= 0, "no data step past the first block has a following ERASE to swap with");
+
+    /* Swaps the two steps' byte ranges in place (same total length); SPEC.md 5.4's strictly-increasing position check must then fail on the data step, now out of order. */
+    {
+        uint8_t tmp[13 + FORMAT2_CHUNK_LEN];
+        size_t base = CHUNKY_PLAN_HEADER_LEN + steps[j].off;
+        size_t len_j = steps[j].len, len_j1 = steps[j + 1].len;
+        REQUIRE(len_j + len_j1 <= sizeof tmp, "swap buffer too small");
+        memcpy(tmp, g_planbuf + base + len_j, len_j1);
+        memcpy(tmp + len_j1, g_planbuf + base, len_j);
+        memcpy(g_planbuf + base, tmp, len_j + len_j1);
+    }
+
+    /* The nearest earlier data step (strictly before the swapped pair, so unaffected) must have already landed, verifiable, by the time the walk stops at the violation. */
+    for (int k = j - 1; k >= 0; k--) {
+        if (steps[k].op != CHUNKY_STEP_ERASE) { earlier_chunk = steps[k].idx; break; }
+    }
+    REQUIRE(earlier_chunk >= 0, "no earlier data step to verify survived the violation");
+
+    rc = send_plan(&s, g_planbuf, plan_len);
+    REQUIRE(rc == DEV_ERROR, "a plan with two swapped adjacent steps was accepted");
+    REQUIRE(strstr(s.error, format2_err_str(FORMAT2_EORDER)), "wrong reason: %s", s.error);
+
+    flash_read(&f, slot_base(SLOT_B) + (size_t)earlier_chunk * FORMAT2_CHUNK_LEN, flashbuf, FORMAT2_CHUNK_LEN);
+    REQUIRE(!memcmp(flashbuf, tgt.img + (size_t)earlier_chunk * FORMAT2_CHUNK_LEN, FORMAT2_CHUNK_LEN),
+            "chunk %d, applied before the swapped pair, is not actually in flash", earlier_chunk);
+
+    flash_file_close(&f);
+    return 0;
+}
+
+static int t2_rollback_floor(void)
+{
+    flash_t f, f2;
+    cap_t cap, cap2;
+    device_session_t s;
+    meta_t m, before, after, forged;
+    size_t plan_len;
+    long e0, p0;
+    int rc, active_before, old_slot;
+
+    /* (a) session-level: an honest update+confirm raises the floor to its security_counter (SPEC.md 12.4); a later plan sealed below that floor is refused before any write. */
+    REQUIRE(stage_armed(&f, &cap, &s, "t2_rollback_a", 5, 5) == 0, "cannot stage the floor-raising plan");
+    REQUIRE(bootloader_boot(&f, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(device_confirm(&f, cap_log, &cap) == 0, "confirm: %s", f.err.msg);
+    meta_load(&f, &m);
+    REQUIRE(m.security_floor == 5, "security_floor is %u, expected 5 after confirming security_counter 5",
+            m.security_floor);
+
+    e0 = f.n_erase;
+    p0 = f.n_prog;
+    REQUIRE(device_session_start(&s, &f, cap_send, &cap, cap_log, &cap, NULL) == DEV_PENDING,
+            "second session did not start");
+    REQUIRE(build_target(&tgt, 6, 3) == 0, "cannot build the below-floor target");
+    REQUIRE(build_plan(&f, m.active_slot, tgt.img, g_planbuf, sizeof g_planbuf, &plan_len) == 0,
+            "cannot build the plan");
+    rc = send_plan(&s, g_planbuf, plan_len);
+    REQUIRE(rc == DEV_ERROR, "a plan with security_counter 3 under floor 5 was accepted");
+    REQUIRE(strstr(s.error, format2_err_str(FORMAT2_EROLLBACK)), "wrong reason: %s", s.error);
+    REQUIRE(f.n_erase == e0 && f.n_prog == p0, "flash written for a below-floor plan");
+    flash_file_close(&f);
+
+    /* (b) boot-level: same gate, reached from plan_check() at STAGING->TRIAL instead of format2_plan_begin(): meta_t forged straight into PLAN_STAGING, naming an older, genuinely-sealed image as pending after a real update already raised the floor. */
+    REQUIRE(stage_armed(&f2, &cap2, &s, "t2_rollback_b", 7, 7) == 0, "cannot stage the floor-raising plan");
+    REQUIRE(bootloader_boot(&f2, cap_log, &cap2, NULL) == 0, "boot: %s", f2.err.msg);
+    REQUIRE(device_confirm(&f2, cap_log, &cap2) == 0, "confirm: %s", f2.err.msg);
+    meta_load(&f2, &before);
+    REQUIRE(before.security_floor == 7, "security_floor is %u, expected 7", before.security_floor);
+    active_before = before.active_slot;        /* slot B, the just-confirmed v7 image */
+    old_slot = OTHER_SLOT(active_before);       /* slot A, still the factory v1 image, sec_counter 1 */
+
+    forged = before;
+    forged.plan_state     = PLAN_STAGING;
+    forged.pending_slot    = (uint8_t)old_slot;
+    forged.target_version  = 1;
+    forged.image_len       = (uint32_t)FORMAT2_IMAGE_LEN;
+    forged.step_count      = 0;
+    REQUIRE(meta_store(&f2, &forged) == 0, "cannot store the forged plan: %s", f2.err.msg);
+
+    cap2.log[0] = 0;
+    REQUIRE(bootloader_boot(&f2, cap_log, &cap2, NULL) == 0, "boot: %s", f2.err.msg);
+    REQUIRE(!strstr(cap2.log, "trial boot"), "a rolled-back image reached a trial boot:\n%s", cap2.log);
+    meta_load(&f2, &after);
+    /* The security claim: the device never moved onto the rolled-back image. plan_check()'s refusal unrolls the forged plan to PLAN_NONE (DESIGN.md 8), a real state change, but the safe terminal one, never TRIAL. */
+    REQUIRE(after.active_slot == active_before, "active_slot moved from %d to %d on a refused rollback",
+            active_before, after.active_slot);
+    REQUIRE(after.plan_state == PLAN_NONE,
+            "plan_state %d after the refusal, expected NONE (unrolled cleanly, never TRIAL)", after.plan_state);
+    flash_file_close(&f2);
+    return 0;
+}
+
+static int t2_forged_trial(void)
+{
+    flash_t f;
+    cap_t cap;
+    meta_t m;
+    int active;
+    uint8_t desc_raw[CHUNKY_SIGNED_DESCRIPTOR_LEN];
+    chunky_descriptor_body_view_t body;
+
+    /* (a) pending_slot names a slot with no valid image (fresh device's blank slot B). A meta forged into TRIAL skips the STAGING->TRIAL verify, so every trial boot must check the pending slot unconditionally. */
+    REQUIRE(open_dev(&f, &cap, "t2_forged_trial_blank") == 0, "cannot create the device");
+    meta_load(&f, &m);
+    m.plan_state    = PLAN_TRIAL;
+    m.pending_slot  = (uint8_t)OTHER_SLOT(m.active_slot);
+    m.attempts_left = MAX_TRIES;
+    REQUIRE(meta_store(&f, &m) == 0, "cannot store the forged plan: %s", f.err.msg);
+
+    cap.log[0] = 0;
+    REQUIRE(bootloader_boot(&f, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(!strstr(cap.log, "trial boot"), "an unverified slot was trial-booted:\n%s", cap.log);
+    meta_load(&f, &m);
+    REQUIRE(m.plan_state == PLAN_NONE, "plan_state %d, expected NONE (cleanly unarmed/reverted)", m.plan_state);
+    flash_file_close(&f);
+
+    /* (b) pending_slot == active_slot: the bootloader must not treat or revoke the running image as untrusted just because it's also (falsely) the named pending slot. */
+    REQUIRE(open_dev(&f, &cap, "t2_forged_trial_self") == 0, "cannot create the device");
+    meta_load(&f, &m);
+    active = m.active_slot;
+    m.plan_state    = PLAN_TRIAL;
+    m.pending_slot  = (uint8_t)active;
+    m.attempts_left = 0;
+    REQUIRE(meta_store(&f, &m) == 0, "cannot store the forged plan: %s", f.err.msg);
+
+    cap.log[0] = 0;
+    REQUIRE(bootloader_boot(&f, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(!strstr(cap.log, "revoked"), "the running image was revoked:\n%s", cap.log);
+    REQUIRE(!strstr(cap.log, "does not verify"), "the active slot no longer verifies:\n%s", cap.log);
+    meta_load(&f, &m);
+    REQUIRE(m.active_slot == active, "active_slot moved from %d to %d", active, m.active_slot);
+    REQUIRE(m.plan_state == PLAN_NONE && m.pending_slot == SLOT_NONE, "plan_state %d pending %d",
+            m.plan_state, m.pending_slot);
+    REQUIRE(format2_image_verify_flash(&f, active, 0u, desc_raw, &body) == FORMAT2_OK,
+            "the running image no longer verifies after a forged self-targeting trial");
+    flash_file_close(&f);
+    return 0;
+}
+
+/* Orthogonal to the wire format: the meta bank's own HMAC (lib/flash.c), unaffected by the format2 migration beyond the harness it shares with everything above. */
 static int t_meta_tampered(void)
 {
     flash_t f;
     cap_t cap;
+    device_session_t s;
     char path[1024];
-    REQUIRE(stage_armed(&f, &cap, "meta_tamper") == 0, "cannot stage a plan");
-    meta_t armed;
+    meta_t armed, after;
+    uint8_t *img;
+    size_t len;
+    int live;
+    uint32_t gen;
+
+    REQUIRE(stage_armed(&f, &cap, &s, "meta_tamper", 2, 2) == 0, "cannot stage a plan");
     meta_load(&f, &armed);
     REQUIRE(armed.plan_state == PLAN_STAGING, "the plan is not on the books");
     flash_file_close(&f);
 
-    /* Edit the live bank in the file, no key, no code path: a bank with the
-     * old CRC-32 scheme would only have needed its checksum redone. */
+    /* Edits the live bank directly in the file, no key, no code path: a bank with the old CRC-32 scheme would only have needed its checksum redone. */
     snprintf(path, sizeof path, "%s/meta_tamper.bin", workdir);
-    size_t len;
-    uint8_t *img = read_file(path, &len);
+    img = read_file(path, &len);
     REQUIRE(img, "cannot read the flash file");
-    int live = -1;
-    uint32_t gen = 0;
+    live = -1;
+    gen = 0;
     for (int b = 0; b < 2; b++) {
         meta_t m;
         memcpy(&m, img + (size_t)(b ? META1_UNIT : META0_UNIT) * ERASE_SIZE, sizeof m);
@@ -394,185 +474,12 @@ static int t_meta_tampered(void)
     free(img);
 
     REQUIRE(flash_file_open(&f, path) == 0, "cannot reopen");
-    meta_t after;
     meta_load(&f, &after);
     REQUIRE(after.generation < armed.generation, "the tampered bank was believed (generation %u)",
             after.generation);
     cap.log[0] = 0;
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
+    REQUIRE(bootloader_boot(&f, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
     REQUIRE(!strstr(cap.log, "applying plan"), "the tampered plan was applied:\n%s", cap.log);
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_forged_plan_table(void)
-{
-    /* The attacker holds dev_key (so the meta mac is genuine) but not the
-     * release key: the bootloader must still refuse a plan whose table is
-     * not the one the signed descriptor names. */
-    flash_t f;
-    cap_t cap;
-    REQUIRE(stage_armed(&f, &cap, "forged_table") == 0, "cannot stage a plan");
-
-    meta_t m;
-    meta_load(&f, &m);
-    m.target_hash[1][0] ^= 1;
-    REQUIRE(meta_store(&f, &m) == 0, "cannot store the forged plan: %s", f.err.msg);
-    REQUIRE(journal_set(&f, JRN_ARM_INDEX, 0x0000) == 0, "cannot re-arm the plan: %s", f.err.msg);
-
-    uint8_t before[SLOT_SIZE], after[SLOT_SIZE];
-    flash_read(&f, slot_base(SLOT_B), before, SLOT_SIZE);
-    cap.log[0] = 0;
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
-    REQUIRE(strstr(cap.log, "signed table_root"), "the forged plan was not refused for its table:\n%s", cap.log);
-    REQUIRE(!strstr(cap.log, "trial boot"), "the forged plan reached a trial boot");
-
-    flash_read(&f, slot_base(SLOT_B), after, SLOT_SIZE);
-    REQUIRE(!memcmp(before + SECTOR_SIZE, after + SECTOR_SIZE, SLOT_SIZE - SECTOR_SIZE),
-            "the bootloader touched the pending slot beyond the unroll");
-    meta_load(&f, &m);
-    REQUIRE(m.plan_state == PLAN_NONE && m.active_slot == SLOT_A, "plan_state %d active %d after the refusal",
-            m.plan_state, m.active_slot);
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_forged_downgrade(void)
-{
-    /* After an honest v2 update slot A still holds the genuinely signed v1.
-     * A dev_key holder forges a plan that points back at it. */
-    flash_t f;
-    cap_t cap;
-    REQUIRE(stage_armed(&f, &cap, "forged_downgrade") == 0, "cannot stage a plan");
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
-    REQUIRE(device_confirm(&f, cap_log, &cap) == 0, "confirm: %s", f.err.msg);
-
-    static uint8_t old[SLOT_SIZE];
-    flash_read(&f, slot_base(SLOT_A), old, SLOT_SIZE);
-    const image_desc_t *d = image_desc(old);
-    REQUIRE(d->magic == IMG_MAGIC && d->version == 1, "slot A does not hold v1");
-
-    meta_t m;
-    meta_load(&f, &m);
-    REQUIRE(m.active_slot == SLOT_B, "the v2 update did not land");
-    m.plan_state     = PLAN_STAGING;
-    m.pending_slot   = SLOT_A;
-    m.target_version = d->version;
-    m.image_len      = d->image_len;
-    memcpy(m.target_sha256, d->sha256, SHA256_LEN);
-    memcpy(m.target_mac, d->mac, SHA256_LEN);
-    image_table(old, d->image_len, (uint8_t *)m.target_hash);
-    memset(m.op, OP_NONE, sizeof m.op);
-    REQUIRE(meta_store(&f, &m) == 0, "cannot store the forged plan: %s", f.err.msg);
-    REQUIRE(journal_set(&f, JRN_ARM_INDEX, 0x0000) == 0, "cannot arm: %s", f.err.msg);
-
-    cap.log[0] = 0;
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
-    REQUIRE(strstr(cap.log, "downgrade"), "the forged downgrade was not refused:\n%s", cap.log);
-    REQUIRE(!strstr(cap.log, "trial boot"), "the forged downgrade reached a trial boot");
-    meta_load(&f, &m);
-    REQUIRE(m.active_slot == SLOT_B && m.plan_state == PLAN_NONE, "active %d plan_state %d",
-            m.active_slot, m.plan_state);
-    flash_file_close(&f);
-    return 0;
-}
-
-static int t_revert_active(void)
-{
-    /* A forged trial plan whose pending slot is the running one must not
-     * revoke the running image. */
-    flash_t f;
-    cap_t cap;
-    REQUIRE(open_dev(&f, &cap, "revert_active") == 0, "cannot create the device");
-    meta_t m;
-    meta_load(&f, &m);
-    m.plan_state    = PLAN_TRIAL;
-    m.pending_slot  = m.active_slot;
-    m.attempts_left = 0;
-    REQUIRE(meta_store(&f, &m) == 0, "cannot store the forged plan: %s", f.err.msg);
-
-    cap.log[0] = 0;
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
-    REQUIRE(!strstr(cap.log, "revoked"), "the running image was revoked:\n%s", cap.log);
-    REQUIRE(!strstr(cap.log, "does not verify"), "the active slot no longer verifies:\n%s", cap.log);
-    meta_load(&f, &m);
-    REQUIRE(m.plan_state == PLAN_NONE && m.pending_slot == SLOT_NONE, "plan_state %d pending %d",
-            m.plan_state, m.pending_slot);
-    flash_file_close(&f);
-    return 0;
-}
-
-static int forge_trial(flash_t *f, slot_id_t pending)
-{
-    meta_t m;
-    meta_load(f, &m);
-    m.plan_state    = PLAN_TRIAL;
-    m.pending_slot  = pending;
-    m.attempts_left = MAX_TRIES;
-    return meta_store(f, &m);
-}
-
-static int t_forged_trial(void)
-{
-    /* A meta forged straight into TRIAL skips the STAGING->TRIAL verify:
-     * every trial boot must check the pending slot itself. */
-    flash_t f;
-    cap_t cap;
-    meta_t m;
-
-    /* Unsigned bytes: a fresh device's slot B holds no image. */
-    REQUIRE(open_dev(&f, &cap, "forged_trial_empty") == 0, "cannot create the device");
-    REQUIRE(forge_trial(&f, SLOT_B) == 0, "cannot store the forged plan: %s", f.err.msg);
-    cap.log[0] = 0;
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
-    REQUIRE(!strstr(cap.log, "trial boot"), "an unverified slot was trial-booted:\n%s", cap.log);
-    meta_load(&f, &m);
-    REQUIRE(m.active_slot == SLOT_A && m.plan_state == PLAN_NONE, "active %d plan_state %d",
-            m.active_slot, m.plan_state);
-    flash_file_close(&f);
-
-    /* An older signed image: after an honest v2 update slot A holds v1. */
-    REQUIRE(stage_armed(&f, &cap, "forged_trial_old") == 0, "cannot stage a plan");
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
-    REQUIRE(device_confirm(&f, cap_log, &cap) == 0, "confirm: %s", f.err.msg);
-    meta_load(&f, &m);
-    m.target_version = 1;
-    image_desc_t d;
-    image_desc_read(&f, SLOT_A, &d);
-    m.image_len = d.image_len;
-    memcpy(m.target_sha256, d.sha256, SHA256_LEN);
-    REQUIRE(meta_store(&f, &m) == 0, "cannot store: %s", f.err.msg);
-    REQUIRE(forge_trial(&f, SLOT_A) == 0, "cannot store the forged plan: %s", f.err.msg);
-    cap.log[0] = 0;
-    REQUIRE(bootloader_boot(&f, root_key, cap_log, &cap, NULL) == 0, "boot: %s", f.err.msg);
-    REQUIRE(strstr(cap.log, "downgrade"), "the forged rollback was not refused:\n%s", cap.log);
-    REQUIRE(!strstr(cap.log, "trial boot"), "the older image was trial-booted");
-    meta_load(&f, &m);
-    REQUIRE(m.active_slot == SLOT_B && m.plan_state == PLAN_NONE, "active %d plan_state %d",
-            m.active_slot, m.plan_state);
-    flash_file_close(&f);
-    return 0;
-}
-
-static void flip_vector(uint8_t sector[SECTOR_SIZE]) { sector[0] ^= 1; }
-
-static int t_descriptor_resend(void)
-{
-    /* A NAKed descriptor sector does not close the plan: the resend lands. */
-    SETUP("desc_resend", 2);
-    REQUIRE(send_begin(&drv) == DEV_PENDING, "PLAN_BEGIN refused: %s", drv.s.error);
-    REQUIRE(send_table(&drv, (size_t)(tgt.len / SECTOR_SIZE) * SECTOR_HASH_LEN, -1) == DEV_PENDING,
-            "table refused: %s", drv.s.error);
-    for (int k = 0; k < drv.plan.count; k++) {
-        const step_t *s = &drv.plan.step[k];
-        if (s->dst == DESC_SECTOR) {
-            REQUIRE(send_step(&drv, &tgt, s, flip_vector) == DEV_PENDING, "bad descriptor: %s", drv.s.error);
-            REQUIRE(cap.naks == 1, "a corrupt descriptor sector was not NAKed");
-        }
-        REQUIRE(send_step(&drv, &tgt, s, NULL) == DEV_PENDING, "step %d refused: %s", k, drv.s.error);
-    }
-    REQUIRE(feed(&drv, MSG_PLAN_END, NULL, 0) == DEV_PENDING, "PLAN_END refused: %s", drv.s.error);
-    REQUIRE(feed(&drv, MSG_COMMIT, NULL, 0) == DEV_STAGED, "COMMIT refused: %s", drv.s.error);
     flash_file_close(&f);
     return 0;
 }
@@ -582,16 +489,12 @@ int main(int argc, char **argv)
     if (argc != 3) { fprintf(stderr, "usage: auth_test WORKDIR BASE.bin\n"); return 2; }
     workdir = argv[1];
     base_path = argv[2];
-    poc_dev_key(dev_key);
-    poc_root_key(root_key);
     base_bin = read_file(base_path, &base_len);
     if (!base_bin) { fprintf(stderr, "cannot read %s\n", base_path); return 2; }
 
     static int (*const cases[])(void) = {
-        t_honest, t_bad_signature, t_bad_table_root, t_table_mismatch, t_step_before_table,
-        t_step_not_in_table, t_descriptor_not_last, t_descriptor_swapped, t_plan_begin_bounds,
-        t_meta_tampered, t_forged_plan_table, t_forged_downgrade, t_revert_active,
-        t_descriptor_resend, t_forged_trial,
+        t2_honest, t2_bad_seal, t2_bad_scheme, t2_step_order,
+        t2_rollback_floor, t2_forged_trial, t_meta_tampered,
     };
     int bad = 0, n = (int)(sizeof cases / sizeof *cases);
     for (int i = 0; i < n; i++)

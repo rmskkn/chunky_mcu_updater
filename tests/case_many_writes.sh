@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Many ordinary STEP_WRITE sectors in one plan - exercises the unbounded
-# step pipeline against the device's step-at-a-time write path (lib/device.c:
-# stage_sector) under load: steps keep streaming in while earlier sectors
-# are being programmed, and every ACK/NAK must still land before the plan
-# is persisted. Correctness is checked by
-# re-reading every sector's hash after the update, not just by booting.
+# Many WRITE/COPY steps in one plan: format2's bulk delivery applies the whole plan body in one pass during the session (no overlapped/streaming application). Checked by comparing every sector's hash from the device's own manifest against the release file, not just by booting.
 source "$(dirname "$0")/common.sh"
 need_build
 test_init many_writes
@@ -19,19 +14,35 @@ server_start
 out="$(update 2>&1)"
 echo "$out" | grep -E 'plan v|device: wire|booting'
 wire_stats "$out"
+plan_counts
 
-steps="$(sed -n 's/.*plan v[0-9]*, \([0-9]*\) steps.*/\1/p' <<<"$out")"
 # larger sectors make the 25 runs collide more
 need=$((SECTORS / 10 < 10 ? SECTORS / 10 : 10))
-[ "$steps" -ge "$need" ] || fail "step count" "only $steps steps, expected at least $need from 25 patch runs"
+[ "$WRITE_N" -ge "$need" ] || fail "write count" "only $WRITE_N writes, expected at least $need from 25 patch runs"
 assert_contains "$out" "booting version 2" "boots the new version"
 assert_contains "$out" "verified" "image verifies"
-# The apply loop re-checks every sector's hash against the plan, and verify
-# re-checks image_sha256 plus the signature over the whole slot - so these
-# two failure strings covering both checks are the sign anything is wrong.
-# random bytes do not compress; only sector 0 (descriptor zeros) and the 0xFF-padded tail may
-[ "$(compress_count lz4)" -le 2 ] || fail "raw fallback" "random sectors were sent compressed"
-assert_not_contains "$out" "does not match the plan" "every sector matched its planned hash"
-assert_not_contains "$out" "does not verify" "the staged image verified"
 
-ok "many_writes ($steps steps, rx=$WIRE_RX B)"
+# Post-hoc check: every sector format2_apply_step() wrote/copied into slot B must read back as the release's own bytes, via the device's manifest. After update()'s auto-confirm, active_slot is B, so the manifest puts its chunks at flat index i, not SECTORS+i.
+python3 -I -c "
+import hashlib, subprocess, sys
+SECT = $SECTOR_SIZE
+data = open('$IMAGE', 'rb').read()
+full = len(data) // SECT
+out = subprocess.run(['$CB_FLASH', 'manifest', '$FLASH'], capture_output=True, text=True, check=True).stdout
+tok = out.split()
+got = {}
+for j in range(0, len(tok) - 1, 2):
+    got[tok[j]] = tok[j + 1]
+bad = []
+for i in range(full):
+    want = hashlib.sha256(data[i * SECT:(i + 1) * SECT]).digest()[:8].hex()
+    have = got.get(str(i))
+    if have != want:
+        bad.append((i, want, have))
+if bad:
+    print('sector hash mismatch:', bad[:5], file=sys.stderr)
+    sys.exit(1)
+print(full, 'sectors verified against the device manifest')
+" || fail "sector verify" "a sector's flash content does not match the release"
+
+ok "many_writes ($WRITE_N writes, rx=$WIRE_RX B)"

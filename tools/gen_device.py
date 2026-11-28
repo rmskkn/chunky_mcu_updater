@@ -23,9 +23,21 @@ import tomllib
 # The regions lib/ addresses by name, in the order it expects them.
 REQUIRED = ["bootloader", "identity", "meta0", "meta1", "slot_a", "slot_b"]
 
+# format2_geom.c's write unit (CB_FLASH_WRITE_UNIT): not read from the TOML yet, since every catalog part today is a half-word-programming F1, so this is a flat default.
+DEFAULT_WRITE_UNIT = 2
+
 
 class LayoutError(Exception):
     pass
+
+
+def fnv1a32(data):
+    """FNV-1a 32 (SPEC.md section 2): offset basis 0x811c9dc5, prime 0x01000193."""
+    h = 0x811C9DC5
+    for b in data:
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return h
 
 
 def size_of(v, what):
@@ -69,6 +81,12 @@ def resolve(doc, erase_override=None, sector_override=None):
     base_addr = part.get("flash_base", 0)
     if not isinstance(base_addr, int) or base_addr < 0:
         raise LayoutError("part.flash_base must be a non-negative integer")
+
+    product_id = part.get("product_id")
+    if product_id is None:
+        product_id = fnv1a32(name.encode("utf-8"))
+    elif not isinstance(product_id, int) or isinstance(product_id, bool) or not (0 <= product_id <= 0xFFFFFFFF):
+        raise LayoutError("part.product_id must be a 32-bit unsigned integer")
 
     if not pow2(erase):
         raise LayoutError(f"erase size {erase} is not a power of two")
@@ -167,6 +185,7 @@ def resolve(doc, erase_override=None, sector_override=None):
     return {
         "name": name, "flash_base": base_addr, "flash": flash,
         "erase": erase, "sector": sector, "regions": out, "by": by,
+        "product_id": product_id, "write_unit": DEFAULT_WRITE_UNIT,
         "program_once": bool(prog.get("once", True)),
         "zero_exempt": bool(prog.get("zero_exempt", True)),
         "erase_ms": rng("erase_ms", [20.0, 40.0]),
@@ -188,6 +207,7 @@ def geometry_h(g, src):
         "",
         f'#define CB_DEVICE_NAME "{g["name"]}"',
         f"#define CB_FLASH_BASE  0x{g['flash_base']:08X}u   /* address of flash offset 0 */",
+        f"#define CB_PRODUCT_ID  0x{g['product_id']:08X}u   /* format2: part.product_id, else FNV-1a32(name) */",
         "",
         "/* Erase unit: what the part can erase. Sector: the delta unit. */",
         f"#define FLASH_SIZE   {g['flash']}",
@@ -197,6 +217,7 @@ def geometry_h(g, src):
         "/* Program rules, enforced by flash_program() in lib/flash.c. */",
         f"#define CB_FLASH_PROGRAM_ONCE  {int(g['program_once'])}",
         f"#define CB_FLASH_ZERO_EXEMPT   {int(g['zero_exempt'])}",
+        f"#define CB_FLASH_WRITE_UNIT    {g['write_unit']}u   /* bytes programmed at once; format2 geometry id input */",
         "",
         "/* Timing model: [min, max] per erase unit and per half-word program. */",
         f"#define CB_FLASH_ERASE_MS_MIN  {g['erase_ms'][0]!r}",

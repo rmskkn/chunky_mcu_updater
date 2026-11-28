@@ -1,7 +1,9 @@
 /* cb-flash: inspect the emulated flash, and build test releases. */
 #include "flash.h"
-#include "manifest.h"
-#include "image.h"
+#include "format2.h"
+#include "format2_geom.h"
+#include "format2_manifest.h"
+#include "sha256.h"
 #include "util.h"
 #include "flash_file.h"
 #include "cli.h"
@@ -9,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* format2_manifest_build()'s own stated bound (lib/format2_manifest.h). */
+#define MANIFEST_BUF_CAP (13u + 2u * (size_t)FORMAT2_CHUNKS * 9u)
 
 static int usage(void)
 {
@@ -22,47 +27,90 @@ static int usage(void)
     return 2;
 }
 
+/* Flat entry index 0..2*chunks-1: active_slot's chunks then dfu_slot's, format2_manifest_build()'s ordering. */
+typedef struct { int printed; } print_ctx_t;
+
+static int print_entry(void *ctx, const format2_entry_t *e, uint32_t index)
+{
+    print_ctx_t *c = ctx;
+    char hex[32];
+
+    if (e->tag == CHUNKY_CHUNK_ENTRY_HASH) {
+        hexdump_line(e->hash, FORMAT2_CHUNK_HASH_LEN, hex);
+        printf("%3u %-16s", index, hex);
+    } else {
+        printf("%3u %-16s", index, e->tag == CHUNKY_CHUNK_ENTRY_BLANK ? "BLANK" : "UNREADABLE");
+    }
+    printf("%s", (++c->printed % 5 == 0) ? "\n" : "  ");
+    return 0;
+}
+
 static int cmd_manifest(const char *path)
 {
     flash_t f;
     meta_t m;
-    manifest_t man;
-    uint8_t d[SHA256_LEN];
+    uint8_t buf[MANIFEST_BUF_CAP];
+    size_t mlen;
+    uint16_t chunks = 0;
+    format2_err_t fe;
+    uint8_t d[32];
     char hex[80];
+    print_ctx_t pc = { 0 };
 
     if (flash_file_open(&f, path) < 0) return cli_fail("cannot open %s", path);
     meta_load(&f, &m);
-    (void)m;
-    manifest_build(&f, &man);
-    /* Flat index, slot A's sectors (0..SECTORS_SLOT-1) then slot B's -- same
-     * numbering the wire manifest and tests/common.sh's sector_hash_hex()
-     * use, so a sector number alone is still enough to find its entry. */
-    for (int k = 0; k < MANIFEST_ENTRIES; k++) {
-        hexdump_line(man.h[k], SECTOR_HASH_LEN, hex);
-        printf("%3d %s%s", k, hex, (k % 5 == 4) ? "\n" : "   ");
-    }
-    if (MANIFEST_ENTRIES % 5) printf("\n");
-    manifest_digest(&man, d);
+    mlen = format2_manifest_build(&f, m.active_slot, OTHER_SLOT(m.active_slot), buf, sizeof buf);
+    if (mlen == 0) { flash_file_close(&f); return cli_fail("manifest build failed (buffer too small)"); }
+    fe = format2_manifest_begin(buf, mlen, format2_geometry_id(), &chunks);
+    if (fe != FORMAT2_OK) { flash_file_close(&f); return cli_fail("manifest: %s", format2_err_str(fe)); }
+
+    format2_manifest_walk(buf, mlen, (uint32_t)2u * chunks, print_entry, &pc);
+    if (pc.printed % 5) printf("\n");
+    sha256(buf, mlen, d);
     hexdump_line(d, 32, hex);
-    printf("body %zu B  digest %s\n", MANIFEST_BODY_LEN, hex);
+    printf("body %zu B  digest %s\n", mlen, hex);
     flash_file_close(&f);
     return 0;
 }
 
 /* Reverse lookup. Index to hash is a subscript; hash to index is a scan, and
- * it can match more than one sector -- an erased page hashes the same wherever
- * it is. Any match is an equally good copy source, which is what makes the
- * planner's rule 2 a content lookup rather than a positional one. */
+ * can match more than one chunk (an erased page hashes the same everywhere); any match is an equally good COPY source, which is why find_active_match() is a content lookup, not positional. */
+typedef struct {
+    const uint8_t *want;
+    size_t         wlen;
+    uint16_t       chunks;
+    int            active_slot, dfu_slot;
+    int            hits;
+} find_ctx_t;
+
+static int find_entry(void *ctx, const format2_entry_t *e, uint32_t index)
+{
+    find_ctx_t *c = ctx;
+    char hex[32];
+
+    if (e->tag != CHUNKY_CHUNK_ENTRY_HASH || memcmp(e->hash, c->want, c->wlen)) return 0;
+    int slot = index < c->chunks ? c->active_slot : c->dfu_slot;
+    uint32_t i = index < c->chunks ? index : index - c->chunks;
+    hexdump_line(e->hash, FORMAT2_CHUNK_HASH_LEN, hex);
+    printf("slot %c chunk %3u  %s  at 0x%05zx\n", 'A' + slot, i, hex,
+           slot_base(slot) + (size_t)i * FORMAT2_CHUNK_LEN);
+    c->hits++;
+    return 0;
+}
+
 static int cmd_find(const char *path, const char *hex)
 {
     flash_t f;
-    manifest_t man;
-    uint8_t want[SECTOR_HASH_LEN];
+    meta_t m;
+    uint8_t buf[MANIFEST_BUF_CAP];
+    size_t mlen;
+    uint16_t chunks = 0;
+    format2_err_t fe;
+    uint8_t want[FORMAT2_CHUNK_HASH_LEN];
     size_t n = strlen(hex) / 2;
-    char buf[64];
 
-    if (n == 0 || n > SECTOR_HASH_LEN || strlen(hex) % 2)
-        return cli_fail("hash must be 2 to %d hex bytes", SECTOR_HASH_LEN);
+    if (n == 0 || n > FORMAT2_CHUNK_HASH_LEN || strlen(hex) % 2)
+        return cli_fail("hash must be 2 to %u hex bytes", (unsigned)FORMAT2_CHUNK_HASH_LEN);
     for (size_t i = 0; i < n; i++) {
         unsigned b;
         if (sscanf(hex + i * 2, "%2x", &b) != 1) return cli_fail("bad hex in %s", hex);
@@ -70,21 +118,17 @@ static int cmd_find(const char *path, const char *hex)
     }
 
     if (flash_file_open(&f, path) < 0) return cli_fail("cannot open %s", path);
-    manifest_build(&f, &man);
+    meta_load(&f, &m);
+    mlen = format2_manifest_build(&f, m.active_slot, OTHER_SLOT(m.active_slot), buf, sizeof buf);
+    fe = mlen ? format2_manifest_begin(buf, mlen, format2_geometry_id(), &chunks) : FORMAT2_ESHORT;
+    if (fe != FORMAT2_OK) { flash_file_close(&f); return cli_fail("manifest: %s", format2_err_str(fe)); }
 
-    int hits = 0;
-    for (int k = 0; k < MANIFEST_ENTRIES; k++)
-        if (!memcmp(man.h[k], want, n)) {
-            int slot = manifest_slot_of(k), i = manifest_sector_of(k);
-            hexdump_line(man.h[k], SECTOR_HASH_LEN, buf);
-            printf("slot %c sector %3d  %s  at 0x%05zx\n", 'A' + slot, i, buf,
-                   slot_base(slot) + (size_t)i * SECTOR_SIZE);
-            hits++;
-        }
-    printf("%d of %d sectors match %s%s\n", hits, MANIFEST_ENTRIES, hex,
-           n < SECTOR_HASH_LEN ? " (prefix)" : "");
+    find_ctx_t fc = { want, n, chunks, m.active_slot, OTHER_SLOT(m.active_slot), 0 };
+    format2_manifest_walk(buf, mlen, (uint32_t)2u * chunks, find_entry, &fc);
+    printf("%d of %u chunks match %s%s\n", fc.hits, 2u * (unsigned)chunks, hex,
+           n < FORMAT2_CHUNK_HASH_LEN ? " (prefix)" : "");
     flash_file_close(&f);
-    return hits ? 0 : 1;
+    return fc.hits ? 0 : 1;
 }
 
 /* The map straight from the generated geometry.h: no flash file, since the
@@ -108,10 +152,10 @@ static int cmd_map(void)
 /* One line the test scripts eval, so their sizes follow the build. */
 static int cmd_geometry(void)
 {
-    printf("ERASE_SIZE=%d SECTOR_SIZE=%d SECTORS=%d SLOT_SIZE=%d PAYLOAD_MAX=%d DESC_LEN=%d "
-           "SECTOR_HASH_LEN=%d\n",
-           ERASE_SIZE, SECTOR_SIZE, SECTORS_SLOT, SLOT_SIZE, IMG_MAX_PAYLOAD, DESC_LEN,
-           SECTOR_HASH_LEN);
+    printf("ERASE_SIZE=%d SECTOR_SIZE=%d SECTORS=%d SLOT_SIZE=%d PAYLOAD_MAX=%d "
+           "geometry_id=0x%08x\n",
+           ERASE_SIZE, SECTOR_SIZE, SECTORS_SLOT, SLOT_SIZE, (int)FORMAT2_IMAGE_LEN,
+           format2_geometry_id());
     return 0;
 }
 

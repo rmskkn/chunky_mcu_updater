@@ -1,35 +1,20 @@
 #ifndef CB_SERVER_SESSION_H
 #define CB_SERVER_SESSION_H
-#include "plan.h"
 #include "util.h"
 #include "platform_io.h"
 #include <stdint.h>
 
+/* No compression counters (format2 has no layer-0 compression, SPEC.md 10) and no plan_t (format2's plan is a flat byte stream); erase/copy/write are step counts straight off the plan. */
 typedef struct {
     uint32_t ver;
-    int      n_sectors;                  /* the target image's size in sectors */
-    plan_t   plan;
+    int      erase, copy, write;
     uint64_t tx_bytes, rx_bytes;
-    int      n_raw, n_lz4, n_lz4_dict;   /* written sectors per compressor */
-    uint64_t enc_bytes;                  /* encoded sector bytes */
-    uint64_t write_wire;                 /* tx bytes of the write steps, framing included */
 } server_session_result_t;
 
-/* Handles one device connection end to end: HELLO, the manifest (with the
- * elision cache in cache_dir), diffing it against image_path, and streaming
- * the resulting plan. Returns 1 and fills *out if a plan was built and
- * streamed - the caller should report it - or 0 if the session ended before
- * that (geometry mismatch, bad auth, a rejected manifest, a protocol fault
- * on the device's side, or nothing to update). -1 with the reason in *err
- * is the server's own fault (the release cannot be read or does not fit),
- * which the next session will hit too. */
-/* abort_before_commit (test-only, docs/ab_migration.md): send ABORT instead
- * of COMMIT right after PLAN_READY, simulating a link or server fault
- * before the device ever arms the plan. */
-int server_update_session(plat_io_t *io, const char *image_path, const char *cache_dir,
-                          const uint8_t dev_key[32], const uint8_t root_key[32],
-                          int abort_before_commit,
-                          log_fn log, void *log_ctx, server_session_result_t *out,
-                          cb_err_t *err);
+/* The server-side session (SPEC.md; MIGRATION_FORMAT2.md): HELLO, the device's manifest (received but not used to plan, SPEC.md 7.2), diffs the target release against it, then streams the plan. Returns 1 and fills *out if a plan was streamed, 0 if the session ended before that, or -1 (reason in *err) on the server's own fault. abort_before_commit (test-only) sends ABORT instead of COMMIT right after the device's ACK. */
+int server_update_session(plat_io_t *io, const char *image_path,
+                           int abort_before_commit,
+                           log_fn log, void *log_ctx,
+                           server_session_result_t *out, cb_err_t *err);
 
 #endif

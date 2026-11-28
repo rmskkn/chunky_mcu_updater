@@ -18,10 +18,10 @@ int  flash_file_open(flash_t *f, const char *path);
 void flash_file_close(flash_t *f);
 
 /* Opens flash_path, creating it from initial_path (the factory image) on
- * first use. initial_path may be NULL once the device exists. 0, or -1
- * with the reason in *err. */
+ * first use. initial_path may be NULL once the device exists. No key
+ * parameter: format2 provisioning (install_image2(), flash_file.c) is scheme 2, unsigned, needs none. 0, or -1 with the reason in *err. */
 int  device_open_or_create(flash_t *f, const char *flash_path,
-                           const char *initial_path, const uint8_t root_key[32],
+                           const char *initial_path,
                            log_fn log, void *log_ctx, cb_err_t *err);
 
 #endif

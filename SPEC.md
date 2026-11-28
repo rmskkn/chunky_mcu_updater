@@ -477,3 +477,8 @@ To settle with upstream before this draft is agreed:
    only by the bootloader. Whether a plan or a session also needs a sequence number (replay of an old plan of a
    valid release is harmless today: it is refused below the floor, and otherwise installs a valid release).
 5. **In place** (§8.2, §8.3, §9.3): the session record and apply journal formats are not fixed here yet.
+6. **Per-chunk authenticity**: rejected for layer 0, since the seal already catches a tampered chunk at finish,
+   before any swap (§6.3), and a per-chunk MAC would cost wire bytes on the slow links this targets (LoRa, CAN)
+   for no added integrity. For a metered link where failing early is worth the extra format, the offline option
+   is a signed table of the target image's chunk hashes, root carried in the descriptor, checked against each
+   chunk on arrival. That would be a new format number (layer 1), not a server-held key.

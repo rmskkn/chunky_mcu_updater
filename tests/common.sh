@@ -14,21 +14,10 @@ CB_FLASH="$BUILD/cb-flash"
 CB_SERVER="$BUILD/cb-server"
 CB_CLIENT="$BUILD/cb-client"
 
-# Geometry comes from the binary under test (cb-flash geometry); RAW_WIRE is
-# what one uncompressed sector costs to receive.
+# Geometry comes from cb-flash geometry (src/cbflash.c's cmd_geometry()): ERASE_SIZE, SECTOR_SIZE, SECTORS, SLOT_SIZE, PAYLOAD_MAX, geometry_id. No RAW_WIRE/COPY_MARGIN (format2 has no per-fragment/PLAN_TABLE framing to margin for) and no SECTOR_HASH_LEN (format2_chunk_hash() fixes it at 8 B); referencing it here crashed under `set -eu` once cmd_geometry() stopped printing it.
 need_build() {
     [ -x "$CB_FLASH" ] || make -C "$POC" >/dev/null
     eval "$("$CB_FLASH" geometry)"
-    RAW_WIRE=$((SECTOR_SIZE / 256 * 272))   # per 256 B fragment: frame 10 + header 6
-    # A/B margin: on a device's first update the destination slot starts
-    # blank, so almost every sector the plan doesn't write is a free
-    # OP_COPY instead of an "already right" skip -- zero bytes each, but
-    # still a framed STEP_COPY + STEP_ACK, and an entry in the plan's table
-    # (SECTOR_HASH_LEN per sector, sent for every sector of the image).
-    # Tests that bound total wire size after a first-ever update add this
-    # per-sector margin on top of whatever the write-sized sectors actually
-    # cost.
-    COPY_MARGIN=$((SECTORS * (40 + 2 * SECTOR_HASH_LEN) + 700))
 }
 
 # test_init NAME: sets RUN, CACHE, FLASH, IMAGE, BASE, PORT and clears RUN.
@@ -130,16 +119,14 @@ open('$1', 'wb').write(bytes(random.randrange(1, 255) for _ in range($2)))
 "
 }
 
-# patch_sector BIN SECTOR BYTE: overwrite sector index SECTOR's slot-image
-# range with one repeated byte. SECTOR must be >= 1 - sector 0 straddles the
-# vector table and the descriptor, so its bin offset is not a clean multiple
-# of SECTOR_SIZE. Mirrors the slot layout in lib/image.h: a target byte at
-# offset T (T >= CODE_OFF=640) comes from bin offset T-DESC_LEN.
+# format2 has no mid-slot descriptor hole (unlike the old lib/image.h layout): its 128 B descriptor is appended after the raw binary, in the slot's *last* 128 bytes, so a sector's bin offset is simply `sector * SECTOR_SIZE`, for every sector including 0; these helpers never need to avoid the descriptor region since BASE/IMAGE stays well under PAYLOAD_MAX.
+
+# patch_sector BIN SECTOR BYTE: overwrite sector index SECTOR's range with one repeated byte.
 patch_sector() {
     python3 -I -c "
 SECT = $SECTOR_SIZE
 sector = $2
-start = sector * SECT - $DESC_LEN
+start = sector * SECT
 end = start + SECT
 data = bytearray(open('$1', 'rb').read())
 data[start:end] = bytes([$3]) * SECT
@@ -151,14 +138,14 @@ open('$1', 'wb').write(data)
 # with fresh non-uniform pseudo-random bytes - an ordinary change that is
 # neither fillable (not one repeated byte) nor a dedup (new random content
 # does not already exist elsewhere), so the planner must send it as a plain
-# STEP_WRITE. SECTOR must be >= 1 (see patch_sector).
+# WRITE step.
 scramble_sector() {
     python3 -I -c "
 import random
 SECT = $SECTOR_SIZE
 sector = $2
 random.seed($3)
-start = sector * SECT - $DESC_LEN
+start = sector * SECT
 end = start + SECT
 data = bytearray(open('$1', 'rb').read())
 data[start:end] = bytes(random.randrange(1, 255) for _ in range(SECT))
@@ -167,11 +154,11 @@ open('$1', 'wb').write(data)
 }
 
 # motif_sector BIN SECTOR: fill the sector with a repeating 16-byte motif:
-# compressible, but not one repeated byte. SECTOR >= 1, as above.
+# compressible, but not one repeated byte.
 motif_sector() {
     python3 -I -c "
 SECT = $SECTOR_SIZE
-start = $2 * SECT - $DESC_LEN
+start = $2 * SECT
 motif = bytes((i * 7 + 3) % 251 + 1 for i in range(16))
 data = bytearray(open('$1', 'rb').read())
 data[start:start + SECT] = motif * (SECT // 16)
@@ -184,7 +171,7 @@ open('$1', 'wb').write(data)
 insert_bytes() {
     python3 -I -c "
 SECT = $SECTOR_SIZE
-at = $2 * SECT - $DESC_LEN + SECT // 2
+at = $2 * SECT + SECT // 2
 data = open('$1', 'rb').read()
 open('$1', 'wb').write((data[:at] + bytes([0x77]) * $3 + data[at:])[:len(data)])
 "
@@ -194,30 +181,34 @@ open('$1', 'wb').write((data[:at] + bytes([0x77]) * $3 + data[at:])[:len(data)])
 tweak_sector() {
     python3 -I -c "
 SECT = $SECTOR_SIZE
-at = $2 * SECT - $DESC_LEN + SECT // 2
+at = $2 * SECT + SECT // 2
 data = bytearray(open('$1', 'rb').read())
 for i in range(16): data[at + i] ^= ${3:-0x55}
 open('$1', 'wb').write(data)
 "
 }
 
-# sector_hash_hex FLASH SECTOR: the manifest hash of one sector of a device.
+# sector_hash_hex FLASH INDEX: the manifest's chunk hash at flat INDEX (0..chunks-1 active slot, chunks..2*chunks-1 dfu slot). Tag-aware: BLANK/UNREADABLE carry no hash, so this prints empty rather than a bogus value.
 sector_hash_hex() {
     "$CB_FLASH" manifest "$1" | python3 -I -c "
 import sys
+want = '$2'
 t = sys.stdin.read().split()
-i = t.index('$2')
-print(t[i + 1])
+for i in range(0, len(t) - 1, 2):
+    if t[i] == want:
+        v = t[i + 1]
+        print('' if v in ('BLANK', 'UNREADABLE') else v)
+        break
 "
 }
 
 # copy_sector BIN DST SRC: overwrite sector DST's range with sector SRC's
-# current bytes, both >= 1 (see patch_sector).
+# current bytes.
 copy_sector() {
     python3 -I -c "
 SECT = $SECTOR_SIZE
 dst, src = $2, $3
-def rng(s): start = s * SECT - $DESC_LEN; return start, start + SECT
+def rng(s): start = s * SECT; return start, start + SECT
 data = bytearray(open('$1', 'rb').read())
 ds, de = rng(dst); ss, se = rng(src)
 data[ds:de] = bytes(data[ss:se])
@@ -225,9 +216,12 @@ open('$1', 'wb').write(data)
 "
 }
 
-# compress_count raw|lz4|lz4_dict: sectors the server's last session sent that way.
-compress_count() {
-    grep 'server: compress' "$RUN/server.log" | tail -1 | sed -n "s/.* $1=\([0-9]*\).*/\1/p"
+# plan_counts: sets ERASE_N/COPY_N/WRITE_N/OF_N/TX_B/RX_B from the last "vN erase copy write of txB rxB" row server.c's report() prints (one row per request). format2 has no compression counters to read alongside these.
+plan_counts() {
+    local row
+    row="$(grep -E '^v[0-9]+ +[0-9]' "$RUN/server.log" | tail -1)"
+    [ -n "$row" ] || fail "plan_counts" "no plan report row (label vN ...) in $RUN/server.log"
+    read -r _ ERASE_N COPY_N WRITE_N OF_N TX_B RX_B <<<"$row"
 }
 
 ok()   { printf 'PASS  %s\n' "$1"; }

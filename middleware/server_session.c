@@ -1,366 +1,222 @@
-/* The sender's functional core: diffs a device manifest against the target
- * release and streams only the sectors that differ (DESIGN.md sections 5-6).
- * No argv parsing, no printf/report table: status goes through the log
- * callback, the finished plan/wire counts through server_session_result_t.
- * cb-server.c is the thin CLI shell around this. */
+/* The sender's functional core (SPEC.md; MIGRATION_FORMAT2.md): HELLO, the device's manifest, diffing the target release against the device, then streaming the plan; cb-server.c is the thin CLI shell around this. */
 #include "server_session.h"
 #include "frame.h"
 #include "protocol.h"
-#include "manifest.h"
-#include "image.h"
-#include "compress.h"
+#include "format2.h"
+#include "format2_geom.h"
+#include "format2_image.h"
+#include "format2_plan.h"
 #include "host.h"
-#include <stdio.h>
+#include "sha256.h"
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/stat.h>
 
-static void cache_path(char *out, size_t len, const uint8_t id[16], const char *cache_dir)
+/* format2_manifest_build()'s stated bound (lib/format2_manifest.h), mirrored here since the server receives the device's buffer rather than building its own. */
+#define MANIFEST_BUF_CAP (13u + 2u * (size_t)FORMAT2_CHUNKS * 9u)
+
+/* The plan this server streams: 145 B header plus worst-case body (every chunk WRITE-fragmented); same bound as lib/device.h's DEVICE_PLAN_BUF_CAP. */
+#define PLAN_BUF_CAP (CHUNKY_PLAN_HEADER_LEN + (size_t)FORMAT2_BLOCKS * 16u + (size_t)SLOT_SIZE)
+
+typedef struct { int erase, copy, write; } step_counts_t;
+
+static int count_step(void *ctx, const format2_step_t *step, uint32_t index)
 {
-    char hex[33];
-    hexdump_line(id, 16, hex);
-    snprintf(out, len, "%s/%s.manifest", cache_dir, hex);
+    (void)index;
+    step_counts_t *c = ctx;
+    if (step->op == CHUNKY_STEP_ERASE)      c->erase++;
+    else if (step->op == CHUNKY_STEP_COPY)  c->copy++;
+    else if (step->op == CHUNKY_STEP_WRITE) c->write++;
+    return 0;
 }
 
-/* Sector store: every sector of every image served, by content hash. The
- * device's current content of a sector is what its manifest hash names, so a
- * hit gives the compressor the exact bytes the device will hold as dictionary.
- * Files are trusted by content, never by name. */
-static void store_path(char *out, size_t len, const char *cache_dir,
-                       const uint8_t h[SECTOR_HASH_LEN])
+/* Receives MSG2_MANIFEST fragments (off:u16, len:u16, PLAN2_FRAG_HDR) into buf until MSG2_MANIFEST_END. Returns the total received, or 0 on a protocol fault (the caller ends the session). */
+static size_t recv_manifest(link_t *l, uint8_t *buf, size_t cap, log_fn log, void *log_ctx)
 {
-    char hex[2 * SECTOR_HASH_LEN + 1];
-    hexdump_line(h, SECTOR_HASH_LEN, hex);
-    snprintf(out, len, "%s/sectors/%s", cache_dir, hex);
+    uint8_t pay[FRAME_MAX_PAYLOAD];
+    size_t n, got = 0;
+
+    for (;;) {
+        int t = frame_recv(l, pay, &n);
+        if (t < 0) return 0;
+        if (t == MSG2_MANIFEST_END) return got;
+        if (t != MSG2_MANIFEST) {
+            log_fmt(log, log_ctx, "server: protocol: expected MANIFEST, got %d; session ended", t);
+            return 0;
+        }
+        uint16_t off, len;
+        if (n < PLAN2_FRAG_HDR) {
+            log_fmt(log, log_ctx, "server: short MANIFEST fragment (%zu B)", n);
+            return 0;
+        }
+        memcpy(&off, pay, 2);
+        memcpy(&len, pay + 2, 2);
+        if (off != got || (size_t)off + len > cap || len > n - PLAN2_FRAG_HDR) {
+            log_fmt(log, log_ctx, "server: bad MANIFEST fragment (off=%u len=%u, have %zu B)",
+                   off, len, got);
+            return 0;
+        }
+        memcpy(buf + off, pay + PLAN2_FRAG_HDR, len);
+        got += len;
+    }
 }
 
-static void store_put(const char *cache_dir, const uint8_t *sector)
+/* Streams buf as MSG2_PLAN fragments (off:u16, len:u16, PLAN2_FRAG_HDR), closed by MSG2_PLAN_END; same shape recv_manifest() above decodes and lib/device.c's own MANIFEST send uses. */
+static void send_fragmented(link_t *l, uint8_t type, uint8_t end_type,
+                            const uint8_t *buf, size_t len)
 {
-    uint8_t h[SECTOR_HASH_LEN];
-    char path[512], tmp[560];
+    size_t off = 0;
+    const size_t max_body = FRAME_MAX_PAYLOAD - PLAN2_FRAG_HDR;
 
-    sector_hash(sector, h);
-    store_path(path, sizeof path, cache_dir, h);
-    if (access(path, F_OK) == 0) return;
-    snprintf(tmp, sizeof tmp, "%s.%d", path, (int)getpid());   /* rename: no torn files */
-    if (write_file(tmp, sector, SECTOR_SIZE) < 0 || rename(tmp, path) < 0) unlink(tmp);
+    while (off < len) {
+        uint8_t frag[FRAME_MAX_PAYLOAD];
+        uint16_t o16 = (uint16_t)off;
+        uint16_t flen = (uint16_t)(len - off < max_body ? len - off : max_body);
+        memcpy(frag, &o16, 2);
+        memcpy(frag + 2, &flen, 2);
+        memcpy(frag + PLAN2_FRAG_HDR, buf + off, flen);
+        frame_send(l, type, frag, PLAN2_FRAG_HDR + flen);
+        off += flen;
+    }
+    frame_send(l, end_type, NULL, 0);
 }
 
-static int store_get(const char *cache_dir, const uint8_t h[SECTOR_HASH_LEN],
-                     uint8_t out[SECTOR_SIZE])
-{
-    char path[512];
-    size_t n = 0;
-    uint8_t got[SECTOR_HASH_LEN];
-
-    store_path(path, sizeof path, cache_dir, h);
-    uint8_t *b = read_file(path, &n);
-    if (!b) return -1;
-    if (n == SECTOR_SIZE) memcpy(out, b, SECTOR_SIZE);
-    free(b);
-    if (n != SECTOR_SIZE) return -1;
-    sector_hash(out, got);
-    return memcmp(got, h, SECTOR_HASH_LEN) ? -1 : 0;
-}
-
-int server_update_session(plat_io_t *io, const char *image_path, const char *cache_dir,
-                          const uint8_t dev_key[32], const uint8_t root_key[32],
-                          int abort_before_commit,
-                          log_fn log, void *log_ctx, server_session_result_t *out,
-                          cb_err_t *err)
+int server_update_session(plat_io_t *io, const char *image_path,
+                           int abort_before_commit,
+                           log_fn log, void *log_ctx,
+                           server_session_result_t *out, cb_err_t *err)
 {
     link_t l;
     uint8_t pay[FRAME_MAX_PAYLOAD];
     size_t n;
-    msg_hello_t hello;
-    msg_challenge_t ch;
-    manifest_t dev;
-    char cpath[512];
+    msg2_hello_t hello;
+    uint8_t manifest_buf[MANIFEST_BUF_CAP];
+    uint8_t *target = NULL, *plan = NULL, *active_scratch = NULL;
+    size_t manifest_got, image_len, plan_len;
+    step_counts_t counts = { 0 };
 
     link_init(&l, io);
     memset(out, 0, sizeof *out);
 
-    if (frame_expect(&l, MSG_HELLO, pay, &n) < 0) return 0;
+    if (frame_expect(&l, MSG2_HELLO, pay, &n) < 0) return 0;
     memcpy(&hello, pay, sizeof hello);
-    if (hello.sector_size != SECTOR_SIZE || hello.sectors != SECTORS_SLOT ||
-        hello.sector_hash_len != SECTOR_HASH_LEN ||
+    if (hello.geometry_id != format2_geometry_id() || hello.product_id != CB_PRODUCT_ID ||
         (hello.active_slot != SLOT_A && hello.active_slot != SLOT_B)) {
-        uint8_t r = REJ_GEOMETRY_MISMATCH;
-        frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
-        log_fmt(log, log_ctx, "server: geometry mismatch, session refused");
+        /* format2's message space has no reject reply (unlike the old MSG_MANIFEST_REJECT); dropping the link is the signal the session never got anywhere. */
+        log_fmt(log, log_ctx, "server: geometry/product mismatch, session refused");
         return 0;
     }
-    log_fmt(log, log_ctx, "server: HELLO running_version=%u last_result=%u active_slot=%c",
-           hello.running_version, hello.last_result, 'A' + hello.active_slot);
-    int active_slot = hello.active_slot;
-    int dest_slot   = OTHER_SLOT(active_slot);   /* the device's own inactive slot */
+    log_fmt(log, log_ctx, "server: HELLO running_version=%u active_slot=%c",
+           hello.running_version, 'A' + hello.active_slot);
 
-    rnd_bytes(ch.nonce, NONCE_LEN);
-    frame_send(&l, MSG_CHALLENGE, &ch, sizeof ch);
-
-    /* Manifest, with elision (DESIGN.md 17.1). */
-    msg_manifest_auth_t auth;
-    if (frame_expect(&l, MSG_MANIFEST_DIGEST, pay, &n) < 0) return 0;
-    memcpy(&auth, pay, sizeof auth);
-
-    uint8_t want_mac[SHA256_LEN];
-    manifest_mac(dev_key, hello.device_id, ch.nonce, auth.manifest_digest, want_mac);
-    if (memcmp(want_mac, auth.mac, SHA256_LEN)) {
-        uint8_t r = REJ_BAD_SIGNATURE;
-        frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
-        log_fmt(log, log_ctx, "server: manifest MAC bad, session refused");
-        return 0;
+    /* The device's manifest (SPEC.md 7.2: unsigned, untrusted by design) is received and sanity-checked to keep the wire protocol in sync, but NOT used to plan COPY-vs-WRITE below; see server_session.h. */
+    manifest_got = recv_manifest(&l, manifest_buf, sizeof manifest_buf, log, log_ctx);
+    if (manifest_got == 0) return 0;
+    {
+        uint16_t chunks = 0;
+        format2_err_t me = format2_manifest_begin(manifest_buf, manifest_got,
+                                                   format2_geometry_id(), &chunks);
+        log_fmt(log, log_ctx, "server: manifest received, %zu B (%s)", manifest_got,
+               me == FORMAT2_OK ? "well-formed" : format2_err_str(me));
     }
 
-    cache_path(cpath, sizeof cpath, hello.device_id, cache_dir);
-    int cached = 0;
-    size_t clen = 0;
-    uint8_t *cbuf = read_file(cpath, &clen);
-    if (cbuf && clen == MANIFEST_BODY_LEN) {
-        uint8_t d[SHA256_LEN];
-        sha256(cbuf, clen, d);
-        if (!memcmp(d, auth.manifest_digest, SHA256_LEN)) {
-            memcpy(&dev, cbuf, MANIFEST_BODY_LEN);
-            cached = 1;
-        }
-    }
-    free(cbuf);
-
-    if (cached) {
-        log_fmt(log, log_ctx, "server: manifest elided, cache hit (%zu B of body not sent)",
-               MANIFEST_BODY_LEN);
-    } else {
-        frame_send(&l, MSG_MANIFEST_NEEDED, NULL, 0);
-        uint8_t *body = malloc(MANIFEST_BODY_LEN);
-        if (!body) return err_set(err, "out of memory for a manifest body");
-        size_t got = 0;
-        for (;;) {
-            int t = frame_recv(&l, pay, &n);
-            if (t < 0) { free(body); return 0; }
-            if (t == MSG_MANIFEST_END) break;
-            uint16_t off, len;
-            if (t != MSG_MANIFEST || n < 4) {
-                log_fmt(log, log_ctx, "server: protocol: expected MANIFEST, got %d; session ended", t);
-                free(body);
-                return 0;
-            }
-            memcpy(&off, pay, 2);
-            memcpy(&len, pay + 2, 2);
-            if ((size_t)off + len > MANIFEST_BODY_LEN || len > n - 4) {
-                log_fmt(log, log_ctx, "server: manifest fragment out of range; session ended");
-                free(body);
-                return 0;
-            }
-            memcpy(body + off, pay + 4, len);
-            got += len;
-        }
-        memcpy(&auth, pay, sizeof auth);
-        uint8_t d[SHA256_LEN];
-        sha256(body, MANIFEST_BODY_LEN, d);
-        manifest_mac(dev_key, hello.device_id, ch.nonce, auth.manifest_digest, want_mac);
-        const char *why = NULL;
-        memcpy(&dev, body, MANIFEST_BODY_LEN);
-
-        if (got != MANIFEST_BODY_LEN || memcmp(d, auth.manifest_digest, SHA256_LEN) ||
-            memcmp(want_mac, auth.mac, SHA256_LEN) || manifest_check(&dev, &why)) {
-            uint8_t r = why ? REJ_MALFORMED : REJ_BAD_SIGNATURE;
-            frame_send(&l, MSG_MANIFEST_REJECT, &r, 1);
-            log_fmt(log, log_ctx, "server: manifest rejected (%s)", why ? why : "digest or MAC");
-            free(body);
-            return 0;
-        }
-        write_file(cpath, body, MANIFEST_BODY_LEN);
-        free(body);
-        log_fmt(log, log_ctx, "server: manifest received and verified, %zu B of body", MANIFEST_BODY_LEN);
-    }
-
-    /* Target image: whatever file was named on the command line, re-read each
-     * session so a new release can be dropped in without a restart. The
-     * version is the device's own plus one, which keeps it monotonic without
-     * the server tracking anything. */
+    /* Target image: re-read from image_path every session, so a new release can be dropped in without a restart. version = device's + 1; security_counter rides along with it (scheme 2 has no separate release-signing step). */
     size_t binlen;
     uint8_t *bin = read_file(image_path, &binlen);
     if (!bin) return err_set(err, "cannot read %s", image_path);
     uint32_t ver = hello.running_version + 1;
-    uint8_t *target = malloc(SLOT_SIZE);
+    target = malloc(SLOT_SIZE);
     if (!target) { free(bin); return err_set(err, "out of memory for a %d B slot image", SLOT_SIZE); }
-    size_t image_len;
-    if (image_build(bin, binlen, ver, root_key, target, &image_len) < 0) {
+    if (format2_image_build(bin, binlen, ver, ver, target, &image_len) < 0) {
         free(bin);
         free(target);
-        return err_set(err, "%s is %zu B, over the %d B slot payload",
-                       image_path, binlen, IMG_MAX_PAYLOAD);
+        return err_set(err, "%s is %zu B, over the %u B slot payload",
+                       image_path, binlen, (unsigned)FORMAT2_IMAGE_LEN);
     }
     free(bin);
 
-    /* The first session after factory install finds no history and falls back
-     * to plain LZ4; from then on every served sector is a future dictionary. */
-    snprintf(cpath, sizeof cpath, "%s/sectors", cache_dir);
-    mkdir(cpath, 0755);
-    int n_sectors = (int)(image_len / SECTOR_SIZE);
-    out->n_sectors = n_sectors;
-    for (int i = 0; i < n_sectors; i++)
-        store_put(cache_dir, target + (size_t)i * SECTOR_SIZE);
-
-    /* The device already runs this firmware if its active slot has the same
-     * content hash. image_sha256 excludes the descriptor, so the version
-     * stamp does not affect the comparison. */
-    if (!memcmp(hello.running_sha256, image_desc(target)->sha256, SHA256_LEN)) {
-        frame_send(&l, MSG_NO_UPDATE, NULL, 0);
+    /* Compares HELLO's running_sha256, not the manifest (per-chunk, untrusted); the whole-image hash is the one value format2_image_verify_flash() itself trusts (SPEC.md 4.3). */
+    uint8_t target_sha[32];
+    sha256(target, image_len, target_sha);
+    if (!memcmp(hello.running_sha256, target_sha, 32)) {
+        frame_send(&l, MSG2_NO_UPDATE, NULL, 0);
         log_fmt(log, log_ctx, "server: device already runs this image, nothing to do");
         free(target);
         return 0;
     }
 
-    double t_plan = now_ms();
-    plan_build(&dev, active_slot, dest_slot, target, image_len, &out->plan);
-    t_plan = now_ms() - t_plan;
-    log_fmt(log, log_ctx, "server: plan built in %.2f ms", t_plan);
+    /* The server has no live flash_t for the device, so no real ACTIVE bytes to compare (the manifest carries hashes, not bytes); it plans against an all-blank scratch "active" instead, which turns every non-blank target chunk into WRITE (safe, just less efficient, per SPEC.md). A blank target chunk is still skipped, so this can't manufacture a bogus COPY. */
+    active_scratch = malloc(SLOT_SIZE);
+    if (!active_scratch) {
+        free(target);
+        return err_set(err, "out of memory for a %d B scratch slot", SLOT_SIZE);
+    }
+    memset(active_scratch, 0xFF, SLOT_SIZE);
 
-    const image_desc_t *d = image_desc(target);
-    msg_plan_begin_t pb;
-    memset(&pb, 0, sizeof pb);
-    pb.version    = (uint32_t)ver;
-    pb.step_count = (uint16_t)out->plan.count;
-    pb.dest_slot  = (slot_id_t)dest_slot;
-    pb.image_len  = (uint32_t)image_len;
-    pb.flags      = d->flags;
-    memcpy(pb.image_sha256, d->sha256, SHA256_LEN);
-    memcpy(pb.table_root, d->table_root, SHA256_LEN);
-    memcpy(pb.image_mac, d->mac, SHA256_LEN);
-    frame_send(&l, MSG_PLAN_BEGIN, &pb, sizeof pb);
+    plan = malloc(PLAN_BUF_CAP);
+    if (!plan) {
+        free(target);
+        free(active_scratch);
+        return err_set(err, "out of memory for a %zu B plan buffer", PLAN_BUF_CAP);
+    }
+    plan_len = format2_plan_build(active_scratch, target, plan, PLAN_BUF_CAP);
+    free(active_scratch);
+    active_scratch = NULL;
+    if (plan_len == 0) {
+        free(target);
+        free(plan);
+        return err_set(err, "format2: plan build failed (buffer too small, or the target "
+                       "has no valid descriptor)");
+    }
 
-    /* The target's sector hashes, authenticated by the table_root PLAN_BEGIN
-     * just carried, so the device checks every step against them. */
+    /* Step counts for the report: re-walks the plan with the device's own decoder rather than threading counters through format2_plan_build(). read_active may be NULL: the all-blank scratch guarantees no COPY step was emitted. */
     {
-        uint8_t table[SECTORS_SLOT * SECTOR_HASH_LEN];
-        size_t table_len = (size_t)n_sectors * SECTOR_HASH_LEN;
-        image_table(target, image_len, table);
-        for (size_t off = 0; off < table_len; off += 256) {
-            uint8_t buf[TABLE_HDR + 256];
-            uint16_t len = (uint16_t)(table_len - off < 256 ? table_len - off : 256);
-            uint16_t o16 = (uint16_t)off;
-            memcpy(buf, &o16, 2);
-            memcpy(buf + 2, &len, 2);
-            memcpy(buf + TABLE_HDR, table + off, len);
-            frame_send(&l, MSG_PLAN_TABLE, buf, TABLE_HDR + len);
-        }
-        frame_send(&l, MSG_PLAN_TABLE_END, NULL, 0);
-    }
-    log_fmt(log, log_ctx, "server: plan v%d, %d steps (%d skipped), dest slot %c",
-           ver, out->plan.count, out->plan.n_skip, 'A' + dest_slot);
-
-    /* Stream every step without waiting for its ACK (DESIGN.md 6, revised):
-     * the device flashes one sector in the background while the next one's
-     * bytes are still arriving, so a lockstep wait here would just reintroduce
-     * the stall the double buffer on the device side is there to hide. ACKs
-     * are drained as a second pass, after PLAN_END, in send order. */
-    for (int k = 0; k < out->plan.count; k++) {
-        step_t *s = &out->plan.step[k];
-        if (s->op == OP_COPY) {
-            msg_step_copy_t c;
-            c.dst = s->dst; c.src_slot = s->src_slot; c.src_index = s->src_index;
-            c.pad = 0;
-            frame_send(&l, MSG_STEP_COPY, &c, sizeof c);
-        } else {
-            /* dev.h[.] at dest_slot's own index for dst is the device's
-             * current content there, which is what its flash holds when it
-             * decompresses: each dst is written once per plan, and writes
-             * happen in-session. */
-            uint8_t enc[SECTOR_SIZE], dict[SECTOR_SIZE], method;
-            int have_dict = store_get(cache_dir, dev.h[manifest_index(dest_slot, s->dst)], dict) == 0;
-            size_t enc_len = compress_sector(target + (size_t)s->dst * SECTOR_SIZE,
-                                             have_dict ? dict : NULL, enc, &method);
-            out->n_raw      += method == COMPRESS_RAW;
-            out->n_lz4      += method == COMPRESS_LZ4;
-            out->n_lz4_dict += method == COMPRESS_LZ4_DICT;
-            out->enc_bytes  += enc_len;
-
-            for (size_t off = 0; off < enc_len; off += WRITE_CHUNK) {
-                uint8_t buf[WRITE_HDR + WRITE_CHUNK];
-                uint16_t len = (uint16_t)(enc_len - off < WRITE_CHUNK ? enc_len - off : WRITE_CHUNK);
-                uint16_t o16 = (uint16_t)off;
-                memcpy(buf + 0, &s->dst, 2);
-                memcpy(buf + 2, &o16, 2);
-                memcpy(buf + 4, &len, 2);
-                memcpy(buf + WRITE_HDR, enc + off, len);
-                frame_send(&l, MSG_STEP_WRITE, buf, WRITE_HDR + len);
-                out->write_wire += FRAME_OVERHEAD + WRITE_HDR + len;
-            }
-            msg_step_write_end_t we = { .dst = s->dst, .compress = method, .enc_len = (uint16_t)enc_len };
-            frame_send(&l, MSG_STEP_WRITE_END, &we, sizeof we);
-            out->write_wire += FRAME_OVERHEAD + sizeof we + FRAME_OVERHEAD + sizeof(msg_step_ack_t);
+        chunky_plan_header_view_t h;
+        uint8_t scratch[FORMAT2_CHUNK_LEN];
+        if (chunky_plan_header_view(plan, plan_len, &h) == 0) {
+            uint32_t step_count = chunky_plan_header_step_count(h);
+            format2_plan_walk(plan, plan_len, step_count, (uint32_t)FORMAT2_BLOCKS,
+                              (uint32_t)FORMAT2_CHUNKS, (uint16_t)FORMAT2_CHUNK_LEN,
+                              NULL, NULL, scratch, count_step, &counts);
         }
     }
+    log_fmt(log, log_ctx, "server: plan v%u, %d erase %d copy %d write, %zu B",
+           ver, counts.erase, counts.copy, counts.write, plan_len);
 
-    log_fmt(log, log_ctx, "server: compress raw=%d lz4=%d lz4_dict=%d",
-           out->n_raw, out->n_lz4, out->n_lz4_dict);
+    send_fragmented(&l, MSG2_PLAN, MSG2_PLAN_END, plan, plan_len);
 
-    frame_send(&l, MSG_PLAN_END, NULL, 0);
-
-    for (int k = 0; k < out->plan.count; k++) {
-        int t = frame_recv(&l, pay, &n);
-        if (t < 0) {
-            log_fmt(log, log_ctx, "server: device went away after %d of %d acks", k, out->plan.count);
-            goto out_report;
-        }
-        if (t == MSG_STEP_NAK) {
-            msg_step_ack_t nak;
-            memcpy(&nak, pay, sizeof nak);
-            log_fmt(log, log_ctx, "server: NAK on sector %u reason %u", nak.dst, nak.code);
-        } else if (t != MSG_STEP_ACK) {
-            log_fmt(log, log_ctx, "server: protocol: expected STEP_ACK/NAK, got %d; session ended", t);
-            goto out_report;
-        }
+    int t = frame_recv(&l, pay, &n);
+    if (t < 0) {
+        log_fmt(log, log_ctx, "server: device went away waiting for the plan's ack");
+        goto out_report;
     }
-
-    if (frame_expect(&l, MSG_PLAN_READY, pay, &n) < 0) goto out_report;
-    log_fmt(log, log_ctx, "server: device staged the plan, %u steps left for the bootloader",
-           (unsigned)((msg_plan_ready_t *)pay)->pending);
+    if (t == MSG2_STEP_NAK) {
+        msg2_step_ack_t nak;
+        memcpy(&nak, pay, sizeof nak);
+        log_fmt(log, log_ctx, "server: device NAKed the plan, code %u", nak.code);
+        goto out_report;
+    }
+    if (t != MSG2_STEP_ACK) {
+        log_fmt(log, log_ctx, "server: protocol: expected STEP_ACK/NAK, got %d; session ended", t);
+        goto out_report;
+    }
+    log_fmt(log, log_ctx, "server: device staged the plan");
 
     if (abort_before_commit) {
-        /* Test-only hook (docs/ab_migration.md's "unroll before any boot
-         * attempt" case): simulate the link or server giving up between
-         * PLAN_READY and COMMIT. The device never arms the plan, so the
-         * next bootloader_boot() finds it staged but unarmed and unrolls it. */
-        frame_send(&l, MSG_ABORT, NULL, 0);
+        /* Test-only hook: simulate the link/server giving up right after the device acked the plan; since it's never armed, bootloader_boot() finds it staged but unarmed and unrolls it. */
+        frame_send(&l, MSG2_ABORT, NULL, 0);
         log_fmt(log, log_ctx, "server: test hook, sending ABORT instead of COMMIT");
         goto out_report;
     }
-    frame_send(&l, MSG_COMMIT, NULL, 0);
-
-    /* The device's next manifest is the one this plan produces: dest_slot
-     * becomes the target, sector for sector; active_slot is unchanged
-     * (confirming only moves which slot is "active," never a flash byte).
-     * Sectors past the image keep what the device has there: a smaller
-     * image leaves its slot's tail alone.
-     * Cache it now so that request elides its body (DESIGN.md 17.1) instead
-     * of always missing right after an update. If the update fails, the
-     * digests differ and the device sends its manifest in full, which then
-     * replaces this one. */
-    {
-        manifest_t next;
-        memset(&next, 0, sizeof next);
-        next.sector_size = SECTOR_SIZE;
-        next.sectors     = MANIFEST_ENTRIES;
-        for (int i = 0; i < SECTORS_SLOT; i++) {
-            if (i < n_sectors)
-                sector_hash(target + (size_t)i * SECTOR_SIZE, next.h[manifest_index(dest_slot, i)]);
-            else
-                memcpy(next.h[manifest_index(dest_slot, i)],
-                      manifest_hash_at(&dev, manifest_index(dest_slot, i)), SECTOR_HASH_LEN);
-            memcpy(next.h[manifest_index(active_slot, i)],
-                  manifest_hash_at(&dev, manifest_index(active_slot, i)), SECTOR_HASH_LEN);
-        }
-        cache_path(cpath, sizeof cpath, hello.device_id, cache_dir);
-        write_file(cpath, &next, MANIFEST_BODY_LEN);
-    }
+    frame_send(&l, MSG2_COMMIT, NULL, 0);
 
 out_report:
-    out->ver = ver;
+    out->ver   = ver;
+    out->erase = counts.erase;
+    out->copy  = counts.copy;
+    out->write = counts.write;
     out->tx_bytes = l.tx_bytes;
     out->rx_bytes = l.rx_bytes;
     free(target);
+    free(plan);
     return 1;
 }
