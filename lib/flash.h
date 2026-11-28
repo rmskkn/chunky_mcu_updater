@@ -64,7 +64,7 @@ _Static_assert(SECTOR_SIZE % FLASH_READ_CHUNK == 0,
                "a sector must be a whole number of FLASH_READ_CHUNK reads");
 
 /* sector_idx_t and SECTOR_HASH_LEN are wire types: see protocol.h;
- * sector_hash() is in manifest.h. */
+ * flash_sector_hash() is declared below. */
 
 /* Three things grow with the number of sectors, and only one of them is the
  * index width. The asserts below turn each cliff into a build error rather

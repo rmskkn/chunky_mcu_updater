@@ -23,16 +23,19 @@ for the PoC's own map of the demo flow):
   `memcpy`/`memset`/`vsnprintf` plus the three `plat_flash_*` functions of
   its own port contract. `flash.c/h` (flash model, meta/journal layout),
   `flash_port.h` (the opaque flash port lib/ needs; a port implements it),
-  `flash_view.c` (everything that reads the image or manifest out of flash),
-  `manifest.c/h` (body, digest, MAC, checks, `sector_hash`), `plan.c/h`,
-  `device.c/h` (the update session, fed one message at a time, plus the
-  application's confirm; no threads, transport or clock), `bootloader.c/h`
-  (the bootloader's apply/verify/trial boot/unroll/revert; includes no
-  session or protocol code), `stats.h` (`device_stats_t`, shared by both;
-  `clock_ms` is the caller's), `protocol.h` (the pure wire protocol),
-  `image.c/h` (descriptor, hashes, per-sector table and build over RAM),
-  `compress.c/h` (registry only, no compressor built in), `sha256.c/h`,
-  `util.c/h` (CRC-32, `cb_err_t`, log sink).
+  `format2.c/h` (format 2's wire contract: the length-checked views over
+  `chunky_format.h`, SPEC.md), `format2_geom.c/h` (device geometry mapped to
+  format 2's constants, plus `format2_geometry_id()`), `format2_image.c/h`
+  (slot image layout, descriptor/hash verify), `format2_plan.c/h`
+  (server-side plan build: ERASE/COPY/WRITE per chunk), `format2_manifest.c/h`
+  (the device's unsigned manifest: per-chunk `flash_sector_hash` truncated to
+  `SECTOR_HASH_LEN`), `device.c/h` (the update session, fed one message at a
+  time, plus the application's confirm; no threads, transport or clock),
+  `bootloader.c/h` (the bootloader's apply/verify/trial boot/unroll/revert;
+  includes no session or protocol code), `stats.h` (`device_stats_t`, shared
+  by both; `clock_ms` is the caller's), `protocol.h` (the pure wire
+  protocol), `compress.c/h` (registry only, no compressor built in),
+  `sha256.c/h`, `util.c/h` (CRC-32, `cb_err_t`, log sink).
 - `middleware/` — everything between the core and a host program:
   `frame.c/h` and `platform_io.h` (framing over the transport seam),
   `client_session.c/h` and `server_session.c/h` (each side's session over a
@@ -49,7 +52,7 @@ for the PoC's own map of the demo flow):
   TOML, never the generated files.
 - `src/` — the CLIs: `server.c`, `client.c`, `cbflash.c` (the
   `cb-flash` inspection tool), `cli.h` (`cli_fail()`, how a CLI command
-  reports an error), `keys.h` (PoC key material).
+  reports an error).
 
 Errors: nothing exits on an error. Fallible calls return `-1` (or a
 negative/`DEV_*` code) with the reason in a `cb_err_t` (`lib/util.h`),
